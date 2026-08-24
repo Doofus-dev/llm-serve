@@ -1,0 +1,28 @@
+# Runtime artifacts — never commit these
+logs/
+*.pid
+*.log
+
+# Model weights (gigantic, not for version control)
+*.gguf
+*.bin
+*.safetensors
+
+# Secrets / credentials
+.env
+ssh_*
+*.pem
+*.key
+
+# Build artifacts (if llama.cpp is checked out alongside)
+build/
+cmake/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*~
+.vscode/
