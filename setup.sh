@@ -117,7 +117,17 @@ ok "${CC_NAME} ${CC_VER}"
 if ! command -v make &>/dev/null; then
     warn "make not found. Installing..."
     if command -v sudo &>/dev/null; then
-        sudo apt install -y make
+        if command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm make
+        elif command -v apt-get &>/dev/null; then
+            sudo apt-get install -y make
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y make
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y make
+        else
+            fail "make not found. Install it via your package manager (make is in base-devel on Arch, build-essential on Debian/Ubuntu)."
+        fi
     else
         fail "make not found and no sudo available. Install it manually."
     fi
