@@ -30,6 +30,10 @@ CONF="${SCRIPT_DIR}/models.conf"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
 
+# Model files directory — defaults to repo root models/
+# Override: MODEL_DIR=/path/to/your/models llm-serve my-model
+MODEL_DIR="${MODEL_DIR:-${SCRIPT_DIR}/models}"
+
 # ── Log/PID paths (for status/stop subcommands) ──────────────────────────────
 LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/llm-serve.log}"
@@ -235,7 +239,7 @@ list_models() {
     echo "  THREADS=        UBATCH=         PARALLEL=       N_PREDICT="
     echo "  CACHE_TYPE_K=   CACHE_TYPE_V=   BATCH_SIZE=     DEFRAG_THOLD="
     echo "  TEMP=           TOP_P=          SEED=           ENABLE_MTP=0"
-    echo "  N_CPU_MOE=      MODEL_PATH=     (see models.conf for full parameter list)"
+    echo "  N_CPU_MOE=      MODEL_PATH=     MODEL_DIR=      (see models.conf for full parameter list)"
     echo
     echo "Flags:"
     echo "  --no-hermes           Skip Hermes config update (server only)"
@@ -532,7 +536,7 @@ fi
 
 # Resolve config with env overrides
 MODEL_FILE="$(m_get "${MODEL}" file)"
-MODEL_PATH="${MODEL_PATH:-${LLAMA_DIR}/models/${MODEL_FILE}}"
+MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/${MODEL_FILE}}"
 
 HOST="${HOST:-$(m_get "${MODEL}" host 127.0.0.1)}"
 PORT="${PORT:-$(m_get "${MODEL}" port 8081)}"
