@@ -32,19 +32,22 @@ cp models.conf.example models.conf
 
 ### Directory Structure
 
-The script expects your llama.cpp build and models in a specific layout:
+The script expects your llama.cpp build and models in this layout:
 
 ```
-llm-serve/                    ← this repo
-├── llm-serve                 ← launcher script
-├── models.conf               ← your model registry
-├── llama.cpp/                ← llama.cpp repo (git submodule or symlink)
-│   ├── build/bin/llama-server
-│   └── models/               ← your .gguf model files
-└── logs/                     ← runtime logs
+llm-serve/ ← this repo
+├── llm-serve ← launcher script
+├── models.conf ← your model registry
+├── models.conf.example ← annotated template
+├── models/ ← your .gguf model files
+├── llama.cpp/ ← llama.cpp repo (git submodule or symlink)
+│   └── build/bin/llama-server
+└── logs/ ← runtime logs
 ```
 
-Set up the llama.cpp directory however you prefer:
+The `models/` directory lives at the repo root — separate from llama.cpp.
+This keeps your model weights independent from the upstream source tree,
+so updating llama.cpp never touches your models.
 
 ```bash
 # Option 1: Clone llama.cpp as a sibling directory
@@ -60,7 +63,7 @@ LLAMA_DIR=/path/to/your/llama.cpp ./llm-serve my-model
 ## Quick Start
 
 1. **Set up llama.cpp** (see above)
-2. **Download a model** to `llama.cpp/models/`
+2. **Download a model** to `models/`
 3. **Copy and edit the config:**
    ```bash
    cp models.conf.example models.conf
@@ -106,6 +109,9 @@ CONTEXT_SIZE=131072 ./llm-serve my-model
 
 # Use a different model file
 MODEL_PATH=/path/to/other-model.gguf ./llm-serve my-model
+
+# Change the model directory (all models resolve relative to this)
+MODEL_DIR=/mnt/models ./llm-serve my-model
 
 # Change the server port
 PORT=9000 ./llm-serve my-model
