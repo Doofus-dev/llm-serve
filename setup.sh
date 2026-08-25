@@ -34,6 +34,60 @@ fail()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
 # ── Resolve script directory ─────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── OS guard ──────────────────────────────────────────────────────────────────
+case "$(uname -s)" in
+    Linux)  ;;
+    Darwin) fail "macOS is not yet supported by setup.sh. The llm-serve launcher \
+works on macOS (with Homebrew bash 5), but building llama.cpp requires \
+a different setup. See: https://github.com/Doofus-dev/llm-serve" ;;
+    MINGW*|MSYS*|CYGWIN*)
+            fail "Windows is not yet supported by setup.sh. \
+Use WSL2 with a Linux distribution, or build llama.cpp manually \
+and point LLAMA_DIR at your build." ;;
+    *)      fail "Unsupported OS: $(uname -s). setup.sh only supports Linux." ;;
+esac
+
+# ── Distro-aware package hints ────────────────────────────────────────────────
+# Returns a one-line install hint for the given tool name.
+pkg_hint() {
+    local tool="$1"
+    if command -v pacman &>/dev/null; then
+        case "$tool" in
+            git)   echo "sudo pacman -S git" ;;
+            cmake) echo "sudo pacman -S cmake" ;;
+            g++)   echo "sudo pacman -S gcc" ;;
+            nvcc)  echo "sudo pacman -S cuda" ;;
+            *)     echo "sudo pacman -S $tool" ;;
+        esac
+    elif command -v apt-get &>/dev/null; then
+        case "$tool" in
+            git)   echo "sudo apt-get install git" ;;
+            cmake) echo "sudo apt-get install cmake" ;;
+            g++)   echo "sudo apt-get install g++" ;;
+            nvcc)  echo "sudo apt-get install nvidia-cuda-toolkit" ;;
+            *)     echo "sudo apt-get install $tool" ;;
+        esac
+    elif command -v dnf &>/dev/null; then
+        case "$tool" in
+            git)   echo "sudo dnf install git" ;;
+            cmake) echo "sudo dnf install cmake" ;;
+            g++)   echo "sudo dnf install gcc-c++" ;;
+            nvcc)  echo "sudo dnf install nvidia-cuda-toolkit" ;;
+            *)     echo "sudo dnf install $tool" ;;
+        esac
+    elif command -v zypper &>/dev/null; then
+        case "$tool" in
+            git)   echo "sudo zypper install git" ;;
+            cmake) echo "sudo zypper install cmake" ;;
+            g++)   echo "sudo zypper install gcc-c++" ;;
+            nvcc)  echo "sudo zypper install nvidia-cuda-toolkit" ;;
+            *)     echo "sudo zypper install $tool" ;;
+        esac
+    else
+        echo "your package manager"
+    fi
+}
+
 # ── Defaults ─────────────────────────────────────────────────────────────────
 LLAMA_DIR="${SCRIPT_DIR}/llama.cpp"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
@@ -88,13 +142,13 @@ ok "Bash ${BASH_VERSION}"
 
 # Git
 if ! command -v git &>/dev/null; then
-    fail "git not found. Install it first: sudo apt install git  (Debian/Ubuntu)"
+    fail "git not found. Install it first: $(pkg_hint git)"
 fi
 ok "git $(git --version | cut -d' ' -f3)"
 
 # CMake
 if ! command -v cmake &>/dev/null; then
-    fail "cmake not found. Install it first: sudo apt install cmake"
+    fail "cmake not found. Install it first: $(pkg_hint cmake)"
 fi
 ok "cmake $(cmake --version | head -1 | cut -d' ' -f3)"
 
@@ -109,7 +163,7 @@ elif command -v clang++ &>/dev/null; then
     CC_NAME="clang++"
     CC_VER="$(clang++ --version | head -1)"
 else
-    fail "No C++ compiler found. Install one: sudo apt install g++  (Debian/Ubuntu)"
+    fail "No C++ compiler found. Install one: $(pkg_hint g++)"
 fi
 ok "${CC_NAME} ${CC_VER}"
 
@@ -140,7 +194,7 @@ if [[ "$CUDA_BUILD" -eq 1 ]]; then
         fail "CUDA build requested (--cuda) but nvcc not found."
         echo ""
         echo "Install the NVIDIA driver and CUDA toolkit first:"
-        echo "  Ubuntu:  sudo apt install nvidia-cuda-toolkit"
+        echo "  $(pkg_hint nvcc)"
         echo "  Or visit: https://developer.nvidia.com/cuda-downloads"
     fi
     ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
