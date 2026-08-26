@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CONF="${SCRIPT_DIR}/models.conf"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
@@ -278,6 +278,15 @@ do_uninstall() {
 }
 
 # Source models.conf (needed for list, stop <model>, and model launching)
+# Uninstall is special: dispatched BEFORE models.conf source, because when
+# invoked through the ~/.local/bin symlink (before readlink fix) or when
+# models.conf has been deleted, we still need it to work.  Uses raw $1
+# since ARGS hasn't been parsed yet.
+if [[ "${1:-}" == "uninstall" ]]; then
+    do_uninstall "${2:-}"
+    exit 0
+fi
+
 [[ -f "${CONF}" ]] || { echo "Error: models.conf not found at ${CONF}" >&2; exit 1; }
 # shellcheck source=models.conf
 source "${CONF}"
@@ -575,9 +584,6 @@ if [[ "${ARGS[0]:-}" == "stop" ]]; then
     do_stop "${ARGS[@]:1}"
     exit 0
 fi
-
-# Uninstall (does not need models.conf)
-[[ "${ARGS[0]:-}" == "uninstall" ]] && { do_uninstall "${ARGS[1]:-}"; exit 0; }
 
 # List / no args
 if [[ ${#ARGS[@]} -eq 0 ]] || [[ "${ARGS[0]:-}" == "list" ]]; then
