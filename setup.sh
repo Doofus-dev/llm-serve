@@ -283,9 +283,6 @@ else
     else
         info "Cloning llama.cpp..."
         git clone https://github.com/ggml-org/llama.cpp.git "${LLAMA_DIR}"
-        cd "${LLAMA_DIR}"
-        git checkout main
-        cd "${SCRIPT_DIR}"
         ok "llama.cpp cloned"
     fi
 fi
