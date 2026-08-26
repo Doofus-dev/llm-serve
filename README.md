@@ -9,6 +9,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 - **Fine-grained parameter control** — GPU offload, KV cache quantization, MoE expert offload, speculative decoding, reasoning/thinking control, and more
 - **Environment overrides** — Tune any parameter at runtime without editing config (`GPU_LAYERS=50 llm-serve my-model`)
 - **Dry-run mode** — Preview the generated command without launching (`llm-serve --dry-run my-model`)
+- **Remote access** — `llm-serve my-model --remote` binds to all interfaces so other devices on your LAN or VPN mesh can reach it
 - **Background/foreground modes** — Run servers in the background or attached to your terminal
 - **Status management** — `llm-serve status` and `llm-serve stop` for running servers
 - **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, creates directories
@@ -89,6 +90,7 @@ Commands:
 
 Options:
   --live                 Run in foreground with live logs
+  --remote               Bind 0.0.0.0 so other devices (LAN/Meshnet) can reach it
   --no-hermes            Skip Hermes Agent config sync
   --no-gateway-restart   Skip Hermes gateway restart after config sync
 ```
@@ -105,6 +107,24 @@ MODEL_DIR=/mnt/models ./llm-serve my-model
 PORT=9000 ./llm-serve my-model
 GPU_LAYERS=99 CONTEXT_SIZE=32768 THREADS=16 ./llm-serve my-model
 ```
+
+### Remote Access (LAN / Meshnet)
+
+By default the server binds to `127.0.0.1` (localhost only). To serve other devices — a laptop, phone, or anything on your LAN or a private VPN mesh like NordVPN Meshnet or Tailscale — launch with `--remote`:
+
+```bash
+./llm-serve my-model --remote
+```
+
+This binds `0.0.0.0` (all interfaces), skips the Hermes config sync (so your local `base_url` isn't overwritten with `0.0.0.0`), and prints the addresses other devices can use:
+
+```
+Remote mode: bound to 0.0.0.0 — reachable from other devices at:
+    http://192.168.1.100:8081/v1    # LAN (example — use your machine's address)
+    http://100.64.0.10:8081/v1      # Meshnet / VPN (example — use your mesh address)
+```
+
+Security note: `--remote` exposes the server to anything that can reach those addresses. Only use it on trusted networks (LAN, a private VPN mesh). Do not forward the port to the public internet — there is no authentication.
 
 ### Hermes Agent Integration
 

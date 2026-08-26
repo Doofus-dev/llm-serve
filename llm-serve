@@ -5,6 +5,7 @@
 #   llm-serve                         list available models
 #   llm-serve <model>                 launch model in background
 #   llm-serve <model> --live          launch model in foreground (live logs)
+#   llm-serve <model> --remote        bind 0.0.0.0 for LAN/Meshnet access
 #   llm-serve list                    same as no args
 #   llm-serve status                  show running model info
 #   llm-serve stop                    stop all running servers
@@ -327,6 +328,7 @@ list_models() {
     echo "  --no-hermes           Skip Hermes config update (server only)"
     echo "  --no-gateway-restart  Skip Hermes gateway restart after config sync"
     echo "  --live                Start in foreground with live logs"
+    echo "  --remote              Bind 0.0.0.0 for LAN/Meshnet access (skips Hermes sync)"
     echo "  --dry-run             Show the command that would be run (no launch)"
 }
 
@@ -563,6 +565,7 @@ SKIP_HERMES="${SKIP_HERMES:-0}"
 SKIP_GATEWAY_RESTART="${SKIP_GATEWAY_RESTART:-0}"
 LIVE="${LIVE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+REMOTE="${REMOTE:-0}"
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -570,6 +573,7 @@ for arg in "$@"; do
         --no-gateway-restart) SKIP_GATEWAY_RESTART=1 ;;
         --live) LIVE=1 ;;
         --dry-run) DRY_RUN=1 ;;
+        --remote) REMOTE=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -613,7 +617,13 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# Apply Hermes config (skip with --no-hermes)
+# ── Remote mode (--remote): bind all interfaces + skip Hermes base_url sync ──
+if [[ "$REMOTE" == "1" ]]; then
+    HOST="${HOST:-0.0.0.0}"
+    SKIP_HERMES=1
+fi
+
+# Apply Hermes config (skip with --no-hermes or --remote)
 [[ "$SKIP_HERMES" != "1" ]] && apply_hermes_config "$MODEL"
 
 # Resolve config with env overrides
@@ -789,6 +799,19 @@ fi
 echo "  Hermes agent: tool_use=$(m_get "${MODEL}" tool_use_enforcement false) compression=$(m_get "${MODEL}" compression_threshold 0.85) sync_aux=$(m_get "${MODEL}" sync_aux 1)"
 echo "  Notes:        $(m_get "${MODEL}" notes)"
 [[ "$SKIP_HERMES" == "1" ]] && echo "  Hermes config: skipped (--no-hermes)"
+if [[ "$REMOTE" == "1" ]]; then
+    echo "  Remote mode:  bound to 0.0.0.0 — reachable from other devices at:"
+    if command -v ip >/dev/null 2>&1; then
+        _REMOTE_IPS="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u || true)"
+    else
+        _REMOTE_IPS="$(hostname -I 2>/dev/null | tr ' ' $'\n' | sort -u | grep -vE '^$' || true)"
+    fi
+    while IFS= read -r _REMOTE_IP; do
+        [[ -z "$_REMOTE_IP" ]] && continue
+        echo "      http://${_REMOTE_IP}:${PORT}/v1"
+    done <<< "$_REMOTE_IPS"
+    echo "      (Meshnet devices use the 100.x.x.x address; LAN devices use your local IP.)"
+fi
 echo
 
 # ── Dry-run mode: show command without launching ─────────────────────────────
