@@ -142,13 +142,43 @@ ok "Bash ${BASH_VERSION}"
 
 # Git
 if ! command -v git &>/dev/null; then
-    fail "git not found. Install it first: $(pkg_hint git)"
+    warn "git not found. Installing..."
+    if command -v sudo &>/dev/null; then
+        if command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm git
+        elif command -v apt-get &>/dev/null; then
+            sudo apt-get install -y git
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y git
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y git
+        else
+            fail "git not found. Install it via your package manager."
+        fi
+    else
+        fail "git not found and no sudo available. Install it manually."
+    fi
 fi
 ok "git $(git --version | cut -d' ' -f3)"
 
 # CMake
 if ! command -v cmake &>/dev/null; then
-    fail "cmake not found. Install it first: $(pkg_hint cmake)"
+    warn "cmake not found. Installing..."
+    if command -v sudo &>/dev/null; then
+        if command -v pacman &>/dev/null; then
+            sudo pacman -S --noconfirm cmake
+        elif command -v apt-get &>/dev/null; then
+            sudo apt-get install -y cmake
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y cmake
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y cmake
+        else
+            fail "cmake not found. Install it via your package manager."
+        fi
+    else
+        fail "cmake not found and no sudo available. Install it manually."
+    fi
 fi
 ok "cmake $(cmake --version | head -1 | cut -d' ' -f3)"
 
@@ -163,7 +193,36 @@ elif command -v clang++ &>/dev/null; then
     CC_NAME="clang++"
     CC_VER="$(clang++ --version | head -1)"
 else
-    fail "No C++ compiler found. Install one: $(pkg_hint g++)"
+    warn "No C++ compiler found. Installing g++..."
+    if command -v sudo &>/dev/null; then
+        if command -v pacman &>/dev/null; then
+            # g++ lives in the gcc package on Arch
+            sudo pacman -S --noconfirm gcc
+        elif command -v apt-get &>/dev/null; then
+            sudo apt-get install -y g++
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y gcc-c++
+        elif command -v zypper &>/dev/null; then
+            sudo zypper install -y gcc-c++
+        else
+            fail "No C++ compiler found. Install one via your package manager."
+        fi
+    else
+        fail "No C++ compiler found and no sudo available. Install one manually."
+    fi
+    # Re-check after install
+    if command -v g++ &>/dev/null; then
+        CC_NAME="g++"
+        CC_VER="$(g++ --version | head -1)"
+    elif command -v c++ &>/dev/null; then
+        CC_NAME="c++"
+        CC_VER="$(c++ --version | head -1)"
+    elif command -v clang++ &>/dev/null; then
+        CC_NAME="clang++"
+        CC_VER="$(clang++ --version | head -1)"
+    else
+        fail "C++ compiler install failed. Try manually: $(pkg_hint g++)"
+    fi
 fi
 ok "${CC_NAME} ${CC_VER}"
 
