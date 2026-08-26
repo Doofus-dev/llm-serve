@@ -724,7 +724,10 @@ _append_server_arg SERVER_ARGS --n-predict "${N_PREDICT}"
 _append_server_arg SERVER_ARGS -tb "${THREADS_BATCH}"
 _append_server_arg SERVER_ARGS --timeout "${SERVER_TIMEOUT}"
 _append_server_arg SERVER_ARGS --cache-reuse "${CACHE_REUSE}"
-_append_server_arg SERVER_ARGS --checkpoint-every-n-tokens "${CHECKPOINT_EVERY}"
+# llama.cpp removed --checkpoint-every-n-tokens; use --checkpoint-min-step (0 = no minimum).
+if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
+    _append_server_arg SERVER_ARGS --checkpoint-min-step "${CHECKPOINT_EVERY}"
+fi
 _append_server_arg SERVER_ARGS --ctx-checkpoints "${CTX_CHECKPOINTS}"
 
 _append_server_bool SERVER_ARGS --jinja --no-jinja "${JINJA}"
@@ -772,7 +775,11 @@ fi
 [[ -n "${UBATCH}" ]]       && echo "  UBatch:       ${UBATCH}"
 [[ -n "${N_PREDICT}" ]]    && echo "  Max response: ${N_PREDICT} tokens"
 echo "  Sampling:     temp=${TEMP} top_p=${TOP_P} top_k=${TOP_K} seed=${SEED}"
-echo "  Checkpoints:  every=${CHECKPOINT_EVERY} tokens"
+if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
+    echo "  Checkpoints:  min-step=${CHECKPOINT_EVERY} tokens"
+else
+    echo "  Checkpoints:  llama-server default (min-step not overridden)"
+fi
 [[ "${THINKING}" == "off" ]] && echo "  Thinking:     disabled (--reasoning off)"
 [[ "${THINKING}" == "on"  ]] && echo "  Thinking:     enabled (--reasoning on)"
 [[ -z "${THINKING}"       ]] && echo "  Thinking:     auto (llama-server default — Qwen3 may show thinking=1 in logs)"
@@ -803,6 +810,16 @@ else
     bg_pid=$!
 
     write_pid "$bg_pid" "$MODEL" "$PORT"
+
+    # Fail fast if llama-server dies during model load (bad flags, OOM, missing CUDA, etc.)
+    sleep 1
+    if ! check_pid "$bg_pid"; then
+        echo "Error: llama-server exited immediately (PID: $bg_pid)." >&2
+        echo "Last log lines:" >&2
+        tail -10 "$LOG_FILE" >&2 || true
+        rm -f "$PID_FILE"
+        exit 1
+    fi
 
     echo "Started $MODEL in background (PID: $bg_pid)"
     echo "Logs:   $LOG_FILE"
