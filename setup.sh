@@ -380,6 +380,34 @@ fi
 chmod +x "${SCRIPT_DIR}/llm-serve"
 
 ###############################################################################
+# Phase 6: Install to PATH (~/.local/bin symlink)
+###############################################################################
+echo ""
+LOCAL_BIN="${HOME}/.local/bin"
+LLM_SERVE_LINK="${LOCAL_BIN}/llm-serve"
+
+if [[ -L "${LLM_SERVE_LINK}" ]]; then
+    ok "llm-serve already linked: ${LLM_SERVE_LINK} -> $(readlink "${LLM_SERVE_LINK}")"
+elif [[ -e "${LLM_SERVE_LINK}" ]]; then
+    warn "${LLM_SERVE_LINK} exists but is not a symlink (skipping)"
+else
+    mkdir -p "${LOCAL_BIN}"
+    ln -s "${SCRIPT_DIR}/llm-serve" "${LLM_SERVE_LINK}"
+    ok "Linked llm-serve -> ${LOCAL_BIN}/llm-serve"
+
+    # If ~/.local/bin isn't on PATH, hint about it
+    if ! echo "${PATH}" | tr ':' '\n' | grep -qxF "${LOCAL_BIN}"; then
+        warn "~/.local/bin is not on your PATH."
+        echo ""
+        echo "  Add this to your ~/.bashrc or ~/.zshrc:"
+        echo "    export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+        echo ""
+        echo "  Then restart your shell or run: source ~/.bashrc"
+        echo ""
+    fi
+fi
+
+###############################################################################
 # Done
 ###############################################################################
 echo ""
