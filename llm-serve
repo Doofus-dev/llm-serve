@@ -205,6 +205,78 @@ do_stop() {
     fi
 }
 
+# Uninstall subcommand: remove llm-serve build artifacts.
+#   llm-serve uninstall          interactive (asks confirmation)
+#   llm-serve uninstall --force  non-interactive (no confirmation)
+do_uninstall() {
+    local force=0
+    [[ "${1:-}" == "--force" ]] && force=1
+
+    local local_bin_link="${HOME}/.local/bin/llm-serve"
+    local llama_dir="${SCRIPT_DIR}/llama.cpp"
+    local logs_dir="${SCRIPT_DIR}/logs"
+
+    # Stop any running servers first
+    if [[ -f "$PID_FILE" ]]; then
+        read -r pid _ < "$PID_FILE"
+        if check_pid "$pid" 2>/dev/null; then
+            echo "Stopping running server (PID: $pid)..."
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 1
+            check_pid "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    echo ""
+    echo "This will remove:"
+    echo ""
+    [[ -L "$local_bin_link" ]] && echo "  ~/.local/bin/llm-serve  (symlink)"
+    [[ -d "$llama_dir" ]]      && echo "  llama.cpp/              (clone + build, ~1.5 GB)"
+    [[ -d "$logs_dir" ]]       && echo "  logs/                   (runtime logs)"
+    echo ""
+    echo "These will NOT be removed:"
+    echo "  models/                 (your model files)"
+    echo "  models.conf             (your config)"
+    echo "  System packages         (cmake, git, g++, make)"
+    echo ""
+
+    if [[ "$force" -eq 0 ]]; then
+        read -r -p "Proceed? [y/N] " reply
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Cancelled."; exit 0 ;;
+        esac
+    fi
+
+    local removed=0
+
+    if [[ -L "$local_bin_link" ]]; then
+        rm -f "$local_bin_link"
+        echo "Removed ~/.local/bin/llm-serve symlink"
+        removed=$(( removed + 1 ))
+    fi
+
+    if [[ -d "$llama_dir" ]]; then
+        rm -rf "$llama_dir"
+        echo "Removed llama.cpp/ (clone + build)"
+        removed=$(( removed + 1 ))
+    fi
+
+    if [[ -d "$logs_dir" ]]; then
+        rm -rf "$logs_dir"
+        echo "Removed logs/"
+        removed=$(( removed + 1 ))
+    fi
+
+    if (( removed == 0 )); then
+        echo "Nothing to remove — already clean."
+    else
+        echo ""
+        echo "Done. To reinstall:  ./setup.sh"
+    fi
+}
+
 # Source models.conf (needed for list, stop <model>, and model launching)
 [[ -f "${CONF}" ]] || { echo "Error: models.conf not found at ${CONF}" >&2; exit 1; }
 # shellcheck source=models.conf
@@ -233,6 +305,7 @@ list_models() {
     echo "  llm-serve status              Show running model info"
     echo "  llm-serve stop                Stop all servers"
     echo "  llm-serve stop <model>        Stop specific model"
+    echo "  llm-serve uninstall           Remove build artifacts (keep models/)"
     echo
     echo "Env overrides:"
     echo "  PORT=           HOST=           CONTEXT_SIZE=   GPU_LAYERS="
@@ -502,6 +575,9 @@ if [[ "${ARGS[0]:-}" == "stop" ]]; then
     do_stop "${ARGS[@]:1}"
     exit 0
 fi
+
+# Uninstall (does not need models.conf)
+[[ "${ARGS[0]:-}" == "uninstall" ]] && { do_uninstall "${ARGS[1]:-}"; exit 0; }
 
 # List / no args
 if [[ ${#ARGS[@]} -eq 0 ]] || [[ "${ARGS[0]:-}" == "list" ]]; then
