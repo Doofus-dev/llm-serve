@@ -5,13 +5,14 @@
 # Prepares a fresh clone of the llm-serve repo for first use:
 #   - Checks prerequisites (bash, git, cmake, C++ compiler)
 #   - Clones llama.cpp if not present
-#   - Builds llama-server binary
+#   - Builds llama-server binary (auto-detects NVIDIA GPU → CUDA, else CPU)
 #   - Creates models/ and logs/ directories
 #   - Copies models.conf.example → models.conf (if no config exists)
 #
 # Usage:
-#   ./setup.sh              # CPU-only build
-#   ./setup.sh --cuda       # Build with CUDA GPU support
+#   ./setup.sh              # Auto-detect GPU (NVIDIA → CUDA build, else CPU)
+#   ./setup.sh --cpu        # Force CPU-only build
+#   ./setup.sh --cuda       # Force CUDA build
 #   ./setup.sh --help       # Show this help
 #
 # Idempotent — safe to re-run. Skips steps that are already done.
@@ -91,21 +92,33 @@ pkg_hint() {
 # ── Defaults ─────────────────────────────────────────────────────────────────
 LLAMA_DIR="${SCRIPT_DIR}/llama.cpp"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
-CUDA_BUILD=0
+BUILD_FORCE=""   # empty=auto-detect, cpu, or cuda
+
+# shellcheck source=lib/llama-build.sh
+source "${SCRIPT_DIR}/lib/llama-build.sh"
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --cpu)
+            [[ -z "$BUILD_FORCE" || "$BUILD_FORCE" == "cpu" ]] \
+                || fail "Cannot combine --cpu and --cuda"
+            BUILD_FORCE="cpu"
+            shift
+            ;;
         --cuda)
-            CUDA_BUILD=1
+            [[ -z "$BUILD_FORCE" || "$BUILD_FORCE" == "cuda" ]] \
+                || fail "Cannot combine --cpu and --cuda"
+            BUILD_FORCE="cuda"
             shift
             ;;
         --help|-h)
             echo "llm-serve setup script"
             echo ""
             echo "Usage:"
-            echo "  ./setup.sh              CPU-only build"
-            echo "  ./setup.sh --cuda       Build with CUDA GPU support"
+            echo "  ./setup.sh              Auto-detect GPU (NVIDIA → CUDA, else CPU)"
+            echo "  ./setup.sh --cpu        Force CPU-only build"
+            echo "  ./setup.sh --cuda       Force CUDA build"
             echo "  ./setup.sh --help       Show this help"
             echo ""
             echo "Checks prerequisites, clones & builds llama.cpp,"
@@ -247,24 +260,29 @@ if ! command -v make &>/dev/null; then
 fi
 ok "make $(make --version | head -1 | cut -d' ' -f4)"
 
-# CUDA (optional — only if requested)
-if [[ "$CUDA_BUILD" -eq 1 ]]; then
-    if ! command -v nvcc &>/dev/null; then
-        fail "CUDA build requested (--cuda) but nvcc not found."
-        echo ""
-        echo "Install the NVIDIA driver and CUDA toolkit first:"
-        echo "  $(pkg_hint nvcc)"
-        echo "  Or visit: https://developer.nvidia.com/cuda-downloads"
-    fi
-    ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
+# GPU / build type (auto-detect NVIDIA by default)
+echo ""
+info "Detecting build type..."
+if ! llama_resolve_build_type "$BUILD_FORCE"; then
+    exit 1
+fi
+BUILD_TYPE="$_LLAMA_BUILD_TYPE"
 
-    # Check for NVIDIA GPU
-    if command -v nvidia-smi &>/dev/null; then
-        GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
-        ok "GPU: ${GPU_NAME}"
-    else
-        warn "nvidia-smi not found — CUDA build will proceed but GPU may not be available"
-    fi
+if [[ "$BUILD_TYPE" == "cuda" ]]; then
+    [[ -n "$_LLAMA_GPU_NAME" ]] && ok "NVIDIA GPU: ${_LLAMA_GPU_NAME}"
+    ok "Build type: CUDA (GPU acceleration)"
+    ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
+else
+    case "$BUILD_FORCE" in
+        cpu) ok "Build type: CPU (--cpu)" ;;
+        *)
+            if llama_has_nvidia_gpu; then
+                ok "Build type: CPU (CUDA toolkit unavailable — see warnings above)"
+            else
+                ok "Build type: CPU (no NVIDIA GPU detected)"
+            fi
+            ;;
+    esac
 fi
 
 # nproc (for parallel builds)
@@ -288,54 +306,58 @@ else
 fi
 
 ###############################################################################
-# Phase 3: Build llama-server
+# Phase 3: Sync llama.cpp + build llama-server (stamp-aware, auto-pull)
 ###############################################################################
 echo ""
-BUILD_DIR="${LLAMA_DIR}/build"
 
-if [[ -x "${LLAMA_SERVER}" ]]; then
-    info "llama-server already built at ${LLAMA_SERVER}"
-    # Check if it was built with CUDA if we requested CUDA
-    if [[ "$CUDA_BUILD" -eq 1 ]]; then
-        if "${LLAMA_SERVER}" --help 2>&1 | grep -qi 'cuda'; then
-            ok "llama-server already built with CUDA support"
+if [[ -d "${LLAMA_DIR}/.git" ]]; then
+    info "Checking llama.cpp for updates..."
+    if llama_fetch_status; then
+        if [[ "$_LLAMA_UPSTREAM_AHEAD" -eq 1 ]]; then
+            info "Pulling llama.cpp (${_LLAMA_LOCAL_HEAD:0:7} → ${_LLAMA_REMOTE_HEAD:0:7})..."
+            llama_pull_upstream
+            ok "llama.cpp updated"
         else
-            warn "Existing build lacks CUDA support. Rebuilding with CUDA..."
-            rm -rf "${BUILD_DIR}"
+            ok "llama.cpp is current @ $(llama_local_head | cut -c1-7)"
         fi
     else
-        ok "Skipping build (already exists)"
+        warn "Could not reach llama.cpp upstream (offline?). Using local clone."
     fi
 fi
 
-# Build if needed
-if [[ ! -x "${LLAMA_SERVER}" ]]; then
-    info "Building llama-server (${NPROC} cores)..."
-    mkdir -p "${BUILD_DIR}"
-    cd "${BUILD_DIR}"
-
-    # Detect CUDA for cmake
-    if [[ "$CUDA_BUILD" -eq 1 ]]; then
-        info "Configuring with CUDA support..."
-        cmake -DBUILD_SHARED_LIBS=OFF -DLLAMA_CUDA=ON ..
-    else
-        info "Configuring (CPU-only)..."
-        cmake -DBUILD_SHARED_LIBS=OFF ..
+if llama_binary_is_current "$BUILD_TYPE"; then
+    llama_read_stamp
+    ok "llama-server is current (${BUILD_TYPE} build @ ${_LLAMA_STAMP_COMMIT:0:7}). Skipping build."
+else
+    if [[ -x "${LLAMA_SERVER}" ]]; then
+        llama_read_stamp
+        if [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
+            warn "Existing binary has no build stamp. Rebuilding to establish one..."
+        elif [[ "$_LLAMA_STAMP_TYPE" != "$BUILD_TYPE" ]]; then
+            warn "Existing build is ${_LLAMA_STAMP_TYPE}; you requested ${BUILD_TYPE}. Rebuilding..."
+        else
+            local_head="$(llama_local_head)"
+            warn "llama.cpp moved since last build (@ ${_LLAMA_STAMP_COMMIT:0:7} → ${local_head:0:7}). Rebuilding..."
+        fi
     fi
 
+    info "Building llama-server (${BUILD_TYPE}, ${NPROC} cores)..."
+    llama_wipe_build
+    if [[ "$BUILD_TYPE" == "cuda" ]]; then
+        info "Configuring with CUDA support..."
+    else
+        info "Configuring (CPU-only)..."
+    fi
     info "Compiling (this may take a while)..."
-    make -j"${NPROC}" llama-server
-
-    cd "${SCRIPT_DIR}"
-
-    if [[ -x "${LLAMA_SERVER}" ]]; then
-        ok "llama-server built successfully"
+    if llama_build_server "$BUILD_TYPE" "$NPROC"; then
+        ok "llama-server built successfully (${BUILD_TYPE} @ $(llama_local_head | cut -c1-7))"
     else
         fail "Build failed. Check the output above for errors."
     fi
 fi
 
 # Show build info
+[[ -x "${LLAMA_SERVER}" ]] || fail "llama-server not found at ${LLAMA_SERVER}"
 "${LLAMA_SERVER}" --help 2>&1 | head -1
 
 ###############################################################################

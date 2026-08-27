@@ -10,6 +10,8 @@
 #   llm-serve status                  show running model info
 #   llm-serve stop                    stop all running servers
 #   llm-serve stop <model>            stop a specific model
+#   llm-serve update                  pull + rebuild llama.cpp (interactive)
+#   llm-serve update --yes            pull + rebuild without confirmation
 #
 # Hermes integration (when register_hermes_config is defined for a model):
 #   - Syncs model/context/reasoning/provider settings to the target profile
@@ -30,6 +32,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CONF="${SCRIPT_DIR}/models.conf"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
+
+# shellcheck source=lib/llama-build.sh
+source "${SCRIPT_DIR}/lib/llama-build.sh"
 
 # Model files directory — defaults to repo root models/
 # Override: MODEL_DIR=/path/to/your/models llm-serve my-model
@@ -278,13 +283,103 @@ do_uninstall() {
     fi
 }
 
+# Update subcommand: pull llama.cpp (if upstream is ahead) and rebuild llama-server.
+#   llm-serve update          interactive (asks confirmation)
+#   llm-serve update --yes    non-interactive
+#   llm-serve update --cpu    force CPU rebuild
+#   llm-serve update --cuda   force CUDA rebuild
+do_update() {
+    local force_yes=0 build_override=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) force_yes=1 ;;
+            --cpu)    build_override="cpu" ;;
+            --cuda)   build_override="cuda" ;;
+            --help|-h)
+                echo "Usage: llm-serve update [--yes] [--cpu|--cuda]"
+                echo ""
+                echo "Pull the latest llama.cpp and rebuild llama-server."
+                echo "Build type is auto-detected (stamp, binary, or NVIDIA GPU)"
+                echo "unless --cpu or --cuda is passed."
+                exit 0
+                ;;
+            *) die "Unknown update argument: $1 (try: llm-serve update --help)" ;;
+        esac
+        shift
+    done
+
+    [[ -d "${LLAMA_DIR}/.git" ]] \
+        || die "llama.cpp not found at ${LLAMA_DIR}. Run ./setup.sh first."
+
+    local build_type nproc head
+    build_type="$(llama_detect_build_type "$build_override")"
+    nproc="$(llama_nproc)"
+
+    if [[ "$build_type" == "cuda" ]] && ! llama_ensure_nvcc; then
+        die "CUDA rebuild requested but nvcc not found. Run ./setup.sh or install the CUDA toolkit."
+    fi
+
+    if ! llama_fetch_status; then
+        echo "Warning: could not reach llama.cpp upstream (offline?). Using local clone." >&2
+    fi
+
+    local needs_update=0 update_reason=""
+    if [[ "${_LLAMA_UPSTREAM_AHEAD:-0}" -eq 1 ]]; then
+        needs_update=1
+        update_reason="upstream has newer commits (${_LLAMA_LOCAL_HEAD:0:7} → ${_LLAMA_REMOTE_HEAD:0:7})"
+    elif llama_needs_rebuild "$build_type"; then
+        needs_update=1
+        llama_read_stamp
+        head="$(llama_local_head)"
+        if [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
+            update_reason="no build stamp on existing binary"
+        elif [[ "$_LLAMA_STAMP_TYPE" != "$build_type" ]]; then
+            update_reason="build type changed (${_LLAMA_STAMP_TYPE} → ${build_type})"
+        else
+            update_reason="binary @ ${_LLAMA_STAMP_COMMIT:0:7}, llama.cpp now @ ${head:0:7}"
+        fi
+    fi
+
+    if [[ "$needs_update" -eq 0 ]]; then
+        head="$(llama_local_head)"
+        echo "llama-server is already up to date (${build_type} @ ${head:0:7})."
+        exit 0
+    fi
+
+    echo ""
+    echo "llama-server update available: ${update_reason}"
+    echo "This will pull llama.cpp (if needed) and rebuild (${build_type}, ${nproc} cores)."
+    echo "This may take several minutes."
+    echo ""
+
+    if [[ "$force_yes" -eq 0 ]]; then
+        read -r -p "Proceed? [y/N] " reply
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Cancelled."; exit 0 ;;
+        esac
+    fi
+
+    echo "Rebuilding llama-server (${build_type})..."
+    if llama_do_update "$build_type" "$nproc"; then
+        head="$(llama_local_head)"
+        echo ""
+        echo "Done. llama-server updated (${build_type} @ ${head:0:7})."
+    else
+        die "Rebuild failed. Check the output above for errors."
+    fi
+}
+
 # Source models.conf (needed for list, stop <model>, and model launching)
-# Uninstall is special: dispatched BEFORE models.conf source, because when
-# invoked through the ~/.local/bin symlink (before readlink fix) or when
-# models.conf has been deleted, we still need it to work.  Uses raw $1
-# since ARGS hasn't been parsed yet.
+# Uninstall/update dispatch BEFORE models.conf source — they must work even
+# when models.conf is missing. Uses raw $1 since ARGS hasn't been parsed yet.
 if [[ "${1:-}" == "uninstall" ]]; then
     do_uninstall "${2:-}"
+    exit 0
+fi
+if [[ "${1:-}" == "update" ]]; then
+    shift
+    do_update "$@"
     exit 0
 fi
 
@@ -315,6 +410,7 @@ list_models() {
     echo "  llm-serve status              Show running model info"
     echo "  llm-serve stop                Stop all servers"
     echo "  llm-serve stop <model>        Stop specific model"
+    echo "  llm-serve update              Pull + rebuild llama.cpp"
     echo "  llm-serve uninstall           Remove build artifacts (keep models/)"
     echo
     echo "Env overrides:"
@@ -605,6 +701,9 @@ MODEL="$(resolve_alias "${REQUESTED}")"
 # Validate
 [[ -n "${_M["${MODEL}:file"]:-}" ]] \
     || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
+
+# Best-effort version check — log only, never block launch.
+llama_warn_if_outdated
 
 # Check if model is already running
 if [[ -f "$PID_FILE" ]]; then
