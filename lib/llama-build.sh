@@ -67,7 +67,8 @@ llama_amd_gpu_name() {
 # Put distro ROCm/HIP locations on PATH/LD_LIBRARY_PATH for cmake and runtime.
 llama_export_rocm_paths() {
     local d
-    for d in /opt/rocm/bin /opt/rocm/llvm/bin; do
+    export ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+    for d in /opt/rocm/bin /opt/rocm/lib/llvm/bin /opt/rocm/llvm/bin; do
         if [[ -d "$d" ]]; then
             export PATH="${d}:${PATH}"
         fi
@@ -340,8 +341,13 @@ llama_build_server() {
                 ;;
             rocm)
                 llama_export_rocm_paths
-                HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
-                    cmake -DBUILD_SHARED_LIBS=OFF -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release ..
+                # hipcc sets up HIP include/lib paths; raw clang misses hip/hip_fp16.h on Arch.
+                cmake -DBUILD_SHARED_LIBS=OFF \
+                    -DGGML_HIP=ON \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=hipcc \
+                    -DCMAKE_CXX_COMPILER=hipcc \
+                    ..
                 ;;
             *)
                 cmake -DBUILD_SHARED_LIBS=OFF ..
