@@ -288,6 +288,7 @@ do_uninstall() {
 #   llm-serve update --yes    non-interactive
 #   llm-serve update --cpu    force CPU rebuild
 #   llm-serve update --cuda   force CUDA rebuild
+#   llm-serve update --rocm   force ROCm rebuild
 do_update() {
     local force_yes=0 build_override=""
     while [[ $# -gt 0 ]]; do
@@ -295,12 +296,13 @@ do_update() {
             --yes|-y) force_yes=1 ;;
             --cpu)    build_override="cpu" ;;
             --cuda)   build_override="cuda" ;;
+            --rocm)   build_override="rocm" ;;
             --help|-h)
-                echo "Usage: llm-serve update [--yes] [--cpu|--cuda]"
+                echo "Usage: llm-serve update [--yes] [--cpu|--cuda|--rocm]"
                 echo ""
                 echo "Pull the latest llama.cpp and rebuild llama-server."
-                echo "Build type is auto-detected (stamp, binary, or NVIDIA GPU)"
-                echo "unless --cpu or --cuda is passed."
+                echo "Build type is auto-detected (stamp, binary, or GPU)"
+                echo "unless --cpu, --cuda, or --rocm is passed."
                 exit 0
                 ;;
             *) die "Unknown update argument: $1 (try: llm-serve update --help)" ;;
@@ -315,9 +317,14 @@ do_update() {
     build_type="$(llama_detect_build_type "$build_override")"
     nproc="$(llama_nproc)"
 
-    if [[ "$build_type" == "cuda" ]] && ! llama_ensure_nvcc; then
-        die "CUDA rebuild requested but nvcc not found. Run ./setup.sh or install the CUDA toolkit."
-    fi
+    case "$build_type" in
+        cuda)
+            llama_ensure_nvcc || die "CUDA rebuild requested but nvcc not found. Run ./setup.sh or install the CUDA toolkit."
+            ;;
+        rocm)
+            llama_ensure_rocm || die "ROCm rebuild requested but HIP SDK not found. Run ./setup.sh or install rocm-hip-sdk."
+            ;;
+    esac
 
     if ! llama_fetch_status; then
         echo "Warning: could not reach llama.cpp upstream (offline?). Using local clone." >&2
@@ -784,12 +791,13 @@ TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
 THINKING="$(m_get "${MODEL}" thinking "")"
 PER_SLOT_MIN="$(m_get "${MODEL}" per_slot_min 0)"
 
-# CUDA paths (detect common locations; override with LD_LIBRARY_PATH if needed)
+# CUDA / ROCm paths (detect common locations; override with env vars if needed)
 [[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"
 [[ -d /usr/local/cuda/lib64 ]] && export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-# Alternative: CUDA may be under /opt/cuda on some distros
 [[ -d /opt/cuda/bin ]] && export PATH="/opt/cuda/bin:${PATH}"
 [[ -d /opt/cuda/lib64 ]] && export LD_LIBRARY_PATH="/opt/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+[[ -d /opt/rocm/bin ]] && export PATH="/opt/rocm/bin:${PATH}"
+[[ -d /opt/rocm/lib ]] && export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # Validate binary and model file
 [[ -x "${LLAMA_SERVER}" ]] || die "llama-server not found at ${LLAMA_SERVER}"

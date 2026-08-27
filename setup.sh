@@ -5,14 +5,15 @@
 # Prepares a fresh clone of the llm-serve repo for first use:
 #   - Checks prerequisites (bash, git, cmake, C++ compiler)
 #   - Clones llama.cpp if not present
-#   - Builds llama-server binary (auto-detects NVIDIA GPU → CUDA, else CPU)
+#   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
 #   - Creates models/ and logs/ directories
 #   - Copies models.conf.example → models.conf (if no config exists)
 #
 # Usage:
-#   ./setup.sh              # Auto-detect GPU (NVIDIA → CUDA build, else CPU)
+#   ./setup.sh              # Auto-detect GPU
 #   ./setup.sh --cpu        # Force CPU-only build
-#   ./setup.sh --cuda       # Force CUDA build
+#   ./setup.sh --cuda       # Force CUDA build (NVIDIA)
+#   ./setup.sh --rocm       # Force ROCm build (AMD)
 #   ./setup.sh --help       # Show this help
 #
 # Idempotent — safe to re-run. Skips steps that are already done.
@@ -58,6 +59,7 @@ pkg_hint() {
             cmake) echo "sudo pacman -S cmake" ;;
             g++)   echo "sudo pacman -S gcc" ;;
             nvcc)  echo "sudo pacman -S cuda" ;;
+            rocm)  echo "sudo pacman -S rocm-hip-sdk" ;;
             *)     echo "sudo pacman -S $tool" ;;
         esac
     elif command -v apt-get &>/dev/null; then
@@ -66,6 +68,7 @@ pkg_hint() {
             cmake) echo "sudo apt-get install cmake" ;;
             g++)   echo "sudo apt-get install g++" ;;
             nvcc)  echo "sudo apt-get install nvidia-cuda-toolkit" ;;
+            rocm)  echo "sudo apt-get install rocm-hip-sdk" ;;
             *)     echo "sudo apt-get install $tool" ;;
         esac
     elif command -v dnf &>/dev/null; then
@@ -92,33 +95,40 @@ pkg_hint() {
 # ── Defaults ─────────────────────────────────────────────────────────────────
 LLAMA_DIR="${SCRIPT_DIR}/llama.cpp"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
-BUILD_FORCE=""   # empty=auto-detect, cpu, or cuda
+BUILD_FORCE=""   # empty=auto-detect, cpu, cuda, or rocm
 
 # shellcheck source=lib/llama-build.sh
 source "${SCRIPT_DIR}/lib/llama-build.sh"
+
+_set_build_force() {
+    local val="$1"
+    [[ -z "$BUILD_FORCE" ]] || fail "Cannot combine --cpu, --cuda, and --rocm"
+    BUILD_FORCE="$val"
+}
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cpu)
-            [[ -z "$BUILD_FORCE" || "$BUILD_FORCE" == "cpu" ]] \
-                || fail "Cannot combine --cpu and --cuda"
-            BUILD_FORCE="cpu"
+            _set_build_force "cpu"
             shift
             ;;
         --cuda)
-            [[ -z "$BUILD_FORCE" || "$BUILD_FORCE" == "cuda" ]] \
-                || fail "Cannot combine --cpu and --cuda"
-            BUILD_FORCE="cuda"
+            _set_build_force "cuda"
+            shift
+            ;;
+        --rocm)
+            _set_build_force "rocm"
             shift
             ;;
         --help|-h)
             echo "llm-serve setup script"
             echo ""
             echo "Usage:"
-            echo "  ./setup.sh              Auto-detect GPU (NVIDIA → CUDA, else CPU)"
+            echo "  ./setup.sh              Auto-detect GPU (NVIDIA→CUDA, AMD→ROCm, else CPU)"
             echo "  ./setup.sh --cpu        Force CPU-only build"
-            echo "  ./setup.sh --cuda       Force CUDA build"
+            echo "  ./setup.sh --cuda       Force CUDA build (NVIDIA)"
+            echo "  ./setup.sh --rocm       Force ROCm build (AMD)"
             echo "  ./setup.sh --help       Show this help"
             echo ""
             echo "Checks prerequisites, clones & builds llama.cpp,"
@@ -260,7 +270,7 @@ if ! command -v make &>/dev/null; then
 fi
 ok "make $(make --version | head -1 | cut -d' ' -f4)"
 
-# GPU / build type (auto-detect NVIDIA by default)
+# GPU / build type (auto-detect by default)
 echo ""
 info "Detecting build type..."
 if ! llama_resolve_build_type "$BUILD_FORCE"; then
@@ -268,22 +278,30 @@ if ! llama_resolve_build_type "$BUILD_FORCE"; then
 fi
 BUILD_TYPE="$_LLAMA_BUILD_TYPE"
 
-if [[ "$BUILD_TYPE" == "cuda" ]]; then
-    [[ -n "$_LLAMA_GPU_NAME" ]] && ok "NVIDIA GPU: ${_LLAMA_GPU_NAME}"
-    ok "Build type: CUDA (GPU acceleration)"
-    ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
-else
-    case "$BUILD_FORCE" in
-        cpu) ok "Build type: CPU (--cpu)" ;;
-        *)
-            if llama_has_nvidia_gpu; then
-                ok "Build type: CPU (CUDA toolkit unavailable — see warnings above)"
-            else
-                ok "Build type: CPU (no NVIDIA GPU detected)"
-            fi
-            ;;
-    esac
-fi
+case "$BUILD_TYPE" in
+    cuda)
+        [[ -n "$_LLAMA_GPU_NAME" ]] && ok "NVIDIA GPU: ${_LLAMA_GPU_NAME}"
+        ok "Build type: CUDA (GPU acceleration)"
+        ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
+        ;;
+    rocm)
+        [[ -n "$_LLAMA_GPU_NAME" ]] && ok "AMD GPU: ${_LLAMA_GPU_NAME}"
+        ok "Build type: ROCm/HIP (GPU acceleration)"
+        ok "hipcc $(hipcc --version 2>/dev/null | head -1 || echo 'installed')"
+        ;;
+    *)
+        case "$BUILD_FORCE" in
+            cpu) ok "Build type: CPU (--cpu)" ;;
+            *)
+                if llama_has_nvidia_gpu || llama_has_amd_gpu; then
+                    ok "Build type: CPU (GPU toolkit unavailable — see warnings above)"
+                else
+                    ok "Build type: CPU (no supported GPU detected)"
+                fi
+                ;;
+        esac
+        ;;
+esac
 
 # nproc (for parallel builds)
 NPROC="$(nproc 2>/dev/null || echo 1)"
@@ -343,11 +361,11 @@ else
 
     info "Building llama-server (${BUILD_TYPE}, ${NPROC} cores)..."
     llama_wipe_build
-    if [[ "$BUILD_TYPE" == "cuda" ]]; then
-        info "Configuring with CUDA support..."
-    else
-        info "Configuring (CPU-only)..."
-    fi
+    case "$BUILD_TYPE" in
+        cuda) info "Configuring with CUDA support..." ;;
+        rocm) info "Configuring with ROCm/HIP support..." ;;
+        *)    info "Configuring (CPU-only)..." ;;
+    esac
     info "Compiling (this may take a while)..."
     if llama_build_server "$BUILD_TYPE" "$NPROC"; then
         ok "llama-server built successfully (${BUILD_TYPE} @ $(llama_local_head | cut -c1-7))"

@@ -49,6 +49,73 @@ llama_nvidia_gpu_name() {
     fi
 }
 
+# True when an AMD GPU is present (via lspci — does not require ROCm to be installed).
+llama_has_amd_gpu() {
+    command -v lspci &>/dev/null || return 1
+    lspci 2>/dev/null | grep -iE 'vga|3d|display' \
+        | grep -qiE 'AMD/ATI|Advanced Micro Devices'
+}
+
+llama_amd_gpu_name() {
+    if llama_has_amd_gpu; then
+        lspci 2>/dev/null | grep -iE 'vga|3d|display' \
+            | grep -iE 'AMD/ATI|Advanced Micro Devices' | head -1 \
+            | sed 's/.*: //' || true
+    fi
+}
+
+# Put distro ROCm/HIP locations on PATH/LD_LIBRARY_PATH for cmake and runtime.
+llama_export_rocm_paths() {
+    local d
+    for d in /opt/rocm/bin /opt/rocm/llvm/bin; do
+        if [[ -d "$d" ]]; then
+            export PATH="${d}:${PATH}"
+        fi
+    done
+    for d in /opt/rocm/lib /opt/rocm/lib64; do
+        if [[ -d "$d" ]]; then
+            export LD_LIBRARY_PATH="${d}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        fi
+    done
+}
+
+# Install ROCm HIP SDK via the distro package manager.
+# Returns 0 when hipcc + hipconfig are available afterward.
+llama_install_rocm() {
+    if command -v hipcc &>/dev/null && command -v hipconfig &>/dev/null; then
+        return 0
+    fi
+    if ! command -v sudo &>/dev/null; then
+        return 1
+    fi
+    echo "ROCm HIP SDK not found. Installing via package manager..." >&2
+    if command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm rocm-hip-sdk
+    elif command -v apt-get &>/dev/null; then
+        sudo apt-get install -y rocm-hip-sdk 2>/dev/null \
+            || sudo apt-get install -y hipcc rocm-hip-runtime
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y rocm-hip-sdk 2>/dev/null \
+            || sudo dnf install -y rocm-hip-runtime rocm-llvm
+    elif command -v zypper &>/dev/null; then
+        sudo zypper install -y rocm-hip-sdk 2>/dev/null \
+            || sudo zypper install -y rocm-hip-runtime
+    else
+        return 1
+    fi
+    llama_export_rocm_paths
+    command -v hipcc &>/dev/null && command -v hipconfig &>/dev/null
+}
+
+# Ensure hipcc/hipconfig exist; install via package manager when possible.
+llama_ensure_rocm() {
+    llama_export_rocm_paths
+    if command -v hipcc &>/dev/null && command -v hipconfig &>/dev/null; then
+        return 0
+    fi
+    llama_install_rocm
+}
+
 # Put distro CUDA toolkit locations on PATH/LD_LIBRARY_PATH for cmake and runtime.
 llama_export_cuda_paths() {
     local d
@@ -98,13 +165,12 @@ llama_ensure_nvcc() {
     llama_install_nvcc
 }
 
-# Resolve cpu|cuda for setup.sh.
-#   force=""   → auto-detect (NVIDIA GPU → cuda, else cpu)
-#   force=cpu  → force CPU
-#   force=cuda → force CUDA
-# Sets _LLAMA_BUILD_TYPE. Optionally sets _LLAMA_GPU_NAME when a GPU is found.
-# When CUDA is selected, tries to install nvcc; on auto-detect, falls back to
-# CPU if the toolkit cannot be installed.
+# Resolve cpu|cuda|rocm for setup.sh.
+#   force=""    → auto-detect (NVIDIA → cuda, AMD → rocm, else cpu)
+#   force=cpu   → force CPU
+#   force=cuda  → force CUDA
+#   force=rocm  → force ROCm/HIP
+# Sets _LLAMA_BUILD_TYPE and optionally _LLAMA_GPU_NAME.
 llama_resolve_build_type() {
     local force="${1:-}"
 
@@ -117,44 +183,69 @@ llama_resolve_build_type() {
 
     if [[ "$force" == "cuda" ]]; then
         _LLAMA_BUILD_TYPE="cuda"
+    elif [[ "$force" == "rocm" ]]; then
+        _LLAMA_BUILD_TYPE="rocm"
     elif llama_has_nvidia_gpu; then
         _LLAMA_BUILD_TYPE="cuda"
         _LLAMA_GPU_NAME="$(llama_nvidia_gpu_name)"
+    elif llama_has_amd_gpu; then
+        _LLAMA_BUILD_TYPE="rocm"
+        _LLAMA_GPU_NAME="$(llama_amd_gpu_name)"
     else
         _LLAMA_BUILD_TYPE="cpu"
         return 0
     fi
 
-    if [[ -n "$_LLAMA_GPU_NAME" ]]; then
-        : # caller prints GPU name
-    elif [[ "$force" == "cuda" ]]; then
+    if [[ "$_LLAMA_BUILD_TYPE" == "cuda" ]]; then
+    if [[ -z "$_LLAMA_GPU_NAME" && "$force" == "cuda" && ! llama_has_nvidia_gpu ]]; then
         echo "Warning: --cuda requested but nvidia-smi not found; proceeding with CUDA build anyway." >&2
     fi
-
-    if llama_ensure_nvcc; then
+        if llama_ensure_nvcc; then
+            return 0
+        fi
+        if [[ "$force" == "cuda" ]]; then
+            echo "Error: CUDA build requested but nvcc could not be installed." >&2
+            echo "Install the CUDA toolkit manually, then re-run setup." >&2
+            if command -v pacman &>/dev/null; then
+                echo "  sudo pacman -S cuda" >&2
+            elif command -v apt-get &>/dev/null; then
+                echo "  sudo apt-get install nvidia-cuda-toolkit" >&2
+            else
+                echo "  See: https://developer.nvidia.com/cuda-downloads" >&2
+            fi
+            return 1
+        fi
+        echo "Warning: NVIDIA GPU detected but CUDA toolkit could not be installed (need sudo?). Building CPU-only." >&2
+        _LLAMA_BUILD_TYPE="cpu"
         return 0
     fi
 
-    if [[ "$force" == "cuda" ]]; then
-        echo "Error: CUDA build requested but nvcc could not be installed." >&2
-        echo "Install the CUDA toolkit manually, then re-run setup." >&2
+    # ROCm path
+    if [[ -z "$_LLAMA_GPU_NAME" && "$force" == "rocm" && ! llama_has_amd_gpu ]]; then
+        echo "Warning: --rocm requested but no AMD GPU found via lspci; proceeding with ROCm build anyway." >&2
+    fi
+    if llama_ensure_rocm; then
+        return 0
+    fi
+    if [[ "$force" == "rocm" ]]; then
+        echo "Error: ROCm build requested but HIP SDK could not be installed." >&2
+        echo "Install ROCm manually, then re-run setup." >&2
         if command -v pacman &>/dev/null; then
-            echo "  sudo pacman -S cuda" >&2
+            echo "  sudo pacman -S rocm-hip-sdk" >&2
         elif command -v apt-get &>/dev/null; then
-            echo "  sudo apt-get install nvidia-cuda-toolkit" >&2
+            echo "  See: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/" >&2
         else
-            echo "  See: https://developer.nvidia.com/cuda-downloads" >&2
+            echo "  See: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/" >&2
         fi
         return 1
     fi
-
-    echo "Warning: NVIDIA GPU detected but CUDA toolkit could not be installed (need sudo?). Building CPU-only." >&2
-    echo "         Install the toolkit and re-run ./setup.sh to enable GPU acceleration." >&2
+    echo "Warning: AMD GPU detected but ROCm HIP SDK could not be installed (need sudo?). Building CPU-only." >&2
+    echo "         Install rocm-hip-sdk and re-run ./setup.sh to enable GPU acceleration." >&2
     _LLAMA_BUILD_TYPE="cpu"
     return 0
 }
 
-# Resolve cpu|cuda: explicit override > stamp > binary heuristic > NVIDIA auto-detect > cpu.
+# Resolve cpu|cuda|rocm: explicit override > stamp > binary heuristic > GPU auto-detect > cpu.
 llama_detect_build_type() {
     local explicit="${1:-}"
     if [[ -n "$explicit" ]]; then
@@ -170,8 +261,16 @@ llama_detect_build_type() {
         echo "cuda"
         return 0
     fi
+    if [[ -x "${LLAMA_SERVER}" ]] && "${LLAMA_SERVER}" --help 2>&1 | grep -qiE 'hip|rocm'; then
+        echo "rocm"
+        return 0
+    fi
     if llama_has_nvidia_gpu; then
         echo "cuda"
+        return 0
+    fi
+    if llama_has_amd_gpu; then
+        echo "rocm"
         return 0
     fi
     echo "cpu"
@@ -233,15 +332,21 @@ llama_build_server() {
     build_dir="$(llama_build_dir)"
     mkdir -p "$build_dir"
     (
-        if [[ "$build_type" == "cuda" ]]; then
-            llama_export_cuda_paths
-        fi
         cd "$build_dir"
-        if [[ "$build_type" == "cuda" ]]; then
-            cmake -DBUILD_SHARED_LIBS=OFF -DLLAMA_CUDA=ON ..
-        else
-            cmake -DBUILD_SHARED_LIBS=OFF ..
-        fi
+        case "$build_type" in
+            cuda)
+                llama_export_cuda_paths
+                cmake -DBUILD_SHARED_LIBS=OFF -DLLAMA_CUDA=ON ..
+                ;;
+            rocm)
+                llama_export_rocm_paths
+                HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
+                    cmake -DBUILD_SHARED_LIBS=OFF -DGGML_HIP=ON -DCMAKE_BUILD_TYPE=Release ..
+                ;;
+            *)
+                cmake -DBUILD_SHARED_LIBS=OFF ..
+                ;;
+        esac
         make -j"${nproc}" llama-server
     )
 

@@ -21,8 +21,9 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 
 - **Linux** — setup.sh currently requires a Linux distro with pacman, apt, dnf, or zypper (for auto-installing missing packages)
 - **Bash 4.4+** — Required for associative arrays. Most modern Linux distributions include this.
-- **NVIDIA GPU** — (Optional) Detected automatically; setup installs the CUDA toolkit and builds with GPU support
-- **AMD / Intel GPU** — Not auto-detected yet; builds CPU-only (ROCm/Vulkan support planned)
+- **NVIDIA GPU** — Detected automatically via `nvidia-smi`; setup installs CUDA toolkit and builds with GPU support
+- **AMD GPU** — Detected automatically via `lspci`; setup installs ROCm HIP SDK and builds with `-DGGML_HIP=ON`
+- **Overrides** — `./setup.sh --cpu`, `--cuda`, or `--rocm` to force a build type
 - **Hermes Agent** — (Optional) Required only for the Hermes config sync feature
 
 ## Quick Start
@@ -32,9 +33,10 @@ git clone https://github.com/doofus-dev/llm-serve.git
 cd llm-serve
 
 # Run setup (handles everything: prereqs, llama.cpp clone + build, dirs, config)
-./setup.sh              # Auto-detects NVIDIA GPU → CUDA build, else CPU
+./setup.sh              # Auto-detects GPU (NVIDIA→CUDA, AMD→ROCm, else CPU)
 ./setup.sh --cpu        # Force CPU-only
-./setup.sh --cuda       # Force CUDA build
+./setup.sh --cuda       # Force CUDA (NVIDIA)
+./setup.sh --rocm       # Force ROCm (AMD)
 
 # Drop a .gguf model in models/
 
