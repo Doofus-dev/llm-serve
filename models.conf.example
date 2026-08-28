@@ -23,8 +23,8 @@
 # Aliases let you use friendly names instead of typing the full profile name:
 #   ./llm-serve coding   → launches whatever profile the "coding" alias points to
 
-register_alias default qwen36       # your everyday primary model
-register_alias coding qwen36-deep  # your deep-thinking / coding model
+register_alias default qwen36       # everyday primary model
+register_alias coding qwen36-deep  # deep-thinking / coding model
 
 # ── Hermes config defaults (OPTIONAL — only needed if you use Hermes Agent) ──
 HERMES_DEFAULT_MAX_TURNS=150
@@ -220,11 +220,9 @@ HERMES_DEFAULT_SYNC_AUX=1
 # EXAMPLE MODEL PROFILES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Example: Qwen3.6 27B (Q3_K_S, full GPU) ──────────────────────────────────
-# ★ Today's most popular local LLM for agent workflows. Dense 27B, MLA attention
-#   (tiny KV cache even at 64K ctx), fits 16 GB VRAM at Q3_K_S with room to spare.
-#   thinking=off disables built-in chain-of-thought for normal chat speed.
-#   Download: look for "Qwen3.6-27B-Q3_K_S.gguf" on Hugging Face.
+# ── Qwen3.6 27B (Q3_K_S, full GPU) ───────────────────────────────────────────
+# General-purpose model for everyday use. Q3_K_S quantization fits on 16 GB VRAM.
+# All layers on GPU, no thinking mode — optimized for speed.
 register_model "qwen36" \
     file="Qwen3.6-27B-Q3_K_S.gguf" \
     port=8081 \
@@ -273,12 +271,10 @@ register_model "qwen36" \
     sync_aux=1 \
     notes="Qwen3.6 27B Q3_K_S — agent-safe VRAM tuning, MLA KV, fast prefill"
 
-# ── Example: Qwen3.6 27B Deep Thinking (UD-Q3_K_XL, thinking enabled) ─────────
-# Higher-quality quant for coding and deep-reasoning tasks. Thinking mode
-# produces a scratchpad before replying (uses extra tokens + VRAM per turn).
-# Partial GPU offload (58/64 layers) is normal for this larger quant — the
-# CPU handles ~6 layers, MLA keeps KV small, and the quality trade-off is
-# worth it for code and reasoning workloads.
+# ── Qwen3.6 27B Deep Thinking (UD-Q3_K_XL, thinking enabled) ──────────────────
+# Higher-quality quant for coding and deep reasoning tasks. Chain-of-thought
+# reasoning enabled — uses extra tokens and VRAM per turn. Partial GPU offload
+# (58/64 layers) keeps the larger quant fitting on consumer hardware.
 register_model "qwen36-deep" \
     file="Qwen3.6-27B-UD-Q3_K_XL.gguf" \
     port=8081 \
