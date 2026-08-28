@@ -427,7 +427,20 @@ LOCAL_BIN="${HOME}/.local/bin"
 LLM_SERVE_LINK="${LOCAL_BIN}/llm-serve"
 
 if [[ -L "${LLM_SERVE_LINK}" ]]; then
-    ok "llm-serve already linked: ${LLM_SERVE_LINK} -> $(readlink "${LLM_SERVE_LINK}")"
+    CURRENT_TARGET="$(readlink "${LLM_SERVE_LINK}")"
+    EXPECTED_TARGET="${SCRIPT_DIR}/llm-serve"
+    if [[ "$CURRENT_TARGET" == "$EXPECTED_TARGET" ]]; then
+        ok "llm-serve already linked: ${LLM_SERVE_LINK} -> ${CURRENT_TARGET}"
+    else
+        warn "llm-serve symlink points to a different location."
+        echo "       Current: ${LLM_SERVE_LINK} -> ${CURRENT_TARGET}"
+        echo "       New:     ${LLM_SERVE_LINK} -> ${EXPECTED_TARGET}"
+        echo ""
+        info "Updating symlink..."
+        rm -f "${LLM_SERVE_LINK}"
+        ln -s "${EXPECTED_TARGET}" "${LLM_SERVE_LINK}"
+        ok "Symlink updated."
+    fi
 elif [[ -e "${LLM_SERVE_LINK}" ]]; then
     warn "${LLM_SERVE_LINK} exists but is not a symlink (skipping)"
 else
