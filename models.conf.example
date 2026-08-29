@@ -23,8 +23,8 @@
 # Aliases let you use friendly names instead of typing the full profile name:
 #   ./llm-serve coding   → launches whatever profile the "coding" alias points to
 
-register_alias default my-model    # your everyday primary model
-register_alias coding my-coder     # your coding model
+register_alias default qwen36       # everyday primary model
+register_alias coding qwen36-deep  # deep-thinking / coding model
 
 # ── Hermes config defaults (OPTIONAL — only needed if you use Hermes Agent) ──
 HERMES_DEFAULT_MAX_TURNS=150
@@ -116,13 +116,15 @@ HERMES_DEFAULT_SYNC_AUX=1
 #
 #   host
 #     Bind address (default 127.0.0.1). Override: HOST=0.0.0.0
+#     0.0.0.0 = all interfaces. Prefer `llm-serve <model> --remote` for LAN/Meshnet access.
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 # SERVER RUNTIME PARAMETERS
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 #   flash_attn        Flash attention: on | off | auto. Default on.
-#   checkpoint_every  Prefill checkpoint interval (-1 = disabled). Default -1.
+#   checkpoint_every  Min spacing between context checkpoints in tokens
+#                     (maps to --checkpoint-min-step). -1 = use llama-server default. Default -1.
 #   jinja             Jinja chat template: on | off. Default on (required for tools).
 #   threads_batch     CPU threads for batch/prefill. Empty = same as --threads.
 #   timeout           Server read/write timeout (seconds). Default 600.
@@ -218,16 +220,17 @@ HERMES_DEFAULT_SYNC_AUX=1
 # EXAMPLE MODEL PROFILES
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Example: Llama 3.1 8B Instruct (Q4_K_M quant) ────────────────────────────
-# A solid general-purpose model. Fits comfortably on 8 GB GPU.
-register_model "llama3-8b" \
-    file="llama-3.1-8b-instruct-q4_k_m.gguf" \
+# ── Qwen3.6 27B (Q3_K_S, full GPU) ───────────────────────────────────────────
+# General-purpose model for everyday use. Q3_K_S quantization fits on 16 GB VRAM.
+# All layers on GPU, no thinking mode — optimized for speed.
+register_model "qwen36" \
+    file="Qwen3.6-27B-Q3_K_S.gguf" \
     port=8081 \
     host=127.0.0.1 \
-    total_layers=32 \
+    total_layers=64 \
     gpu_layers=99 \
     n_cpu_moe= \
-    ctx=32768 \
+    ctx=65536 \
     cache_k=q4_0 \
     cache_v=q4_0 \
     batch=2048 \
@@ -236,9 +239,9 @@ register_model "llama3-8b" \
     parallel=1 \
     n_predict=8192 \
     defrag=0.1 \
-    thinking= \
+    thinking=off \
     mtp=0 \
-    per_slot_min=0 \
+    per_slot_min=64000 \
     flash_attn=on \
     checkpoint_every=-1 \
     jinja=on \
@@ -248,12 +251,12 @@ register_model "llama3-8b" \
     cache_reuse=0 \
     cont_batching=on \
     ctx_checkpoints= \
-    temp=0.7 \
-    top_p=0.9 \
-    top_k=50 \
+    temp=0.8 \
+    top_p=0.95 \
+    top_k=40 \
     min_p=0.05 \
     seed=-1 \
-    repeat_penalty=1.1 \
+    repeat_penalty=1.0 \
     repeat_last_n=64 \
     presence_penalty=0.0 \
     frequency_penalty=0.0 \
@@ -266,17 +269,19 @@ register_model "llama3-8b" \
     compression_threshold=0.85 \
     api_max_retries=3 \
     sync_aux=1 \
-    notes="General purpose chat and reasoning"
+    notes="Qwen3.6 27B Q3_K_S — agent-safe VRAM tuning, MLA KV, fast prefill"
 
-# ── Example: Qwen3-Coder (MoE, Q4_K_M) ────────────────────────────────────────
-# Code-focused MoE model. Uses n_cpu_moe to fit on consumer GPU.
-register_model "qwen-coder" \
-    file="qwen3-coder-3b-q4_k_m.gguf" \
+# ── Qwen3.6 27B Deep Thinking (UD-Q3_K_XL, thinking enabled) ──────────────────
+# Higher-quality quant for coding and deep reasoning tasks. Chain-of-thought
+# reasoning enabled — uses extra tokens and VRAM per turn. Partial GPU offload
+# (58/64 layers) keeps the larger quant fitting on consumer hardware.
+register_model "qwen36-deep" \
+    file="Qwen3.6-27B-UD-Q3_K_XL.gguf" \
     port=8081 \
     host=127.0.0.1 \
-    total_layers=28 \
-    gpu_layers=99 \
-    n_cpu_moe=28 \
+    total_layers=64 \
+    gpu_layers=58 \
+    n_cpu_moe= \
     ctx=65536 \
     cache_k=q4_0 \
     cache_v=q4_0 \
@@ -284,11 +289,11 @@ register_model "qwen-coder" \
     ubatch=256 \
     threads=8 \
     parallel=1 \
-    n_predict=16384 \
+    n_predict=8192 \
     defrag=0.1 \
-    thinking= \
+    thinking=on \
     mtp=0 \
-    per_slot_min=0 \
+    per_slot_min=64000 \
     flash_attn=on \
     checkpoint_every=-1 \
     jinja=on \
@@ -298,9 +303,9 @@ register_model "qwen-coder" \
     cache_reuse=0 \
     cont_batching=on \
     ctx_checkpoints= \
-    temp=0.3 \
-    top_p=0.9 \
-    top_k=50 \
+    temp=0.8 \
+    top_p=0.95 \
+    top_k=40 \
     min_p=0.05 \
     seed=-1 \
     repeat_penalty=1.0 \
@@ -311,12 +316,12 @@ register_model "qwen-coder" \
     reasoning_budget= \
     spec_draft_n_max=2 \
     spec_draft_n_min=0 \
-    tool_use_enforcement=true \
+    tool_use_enforcement=false \
     compression_enabled=true \
     compression_threshold=0.85 \
     api_max_retries=3 \
     sync_aux=1 \
-    notes="MoE coding model with expert offload"
+    notes="Qwen3.6 27B UD-Q3_K_XL — deep thinking enabled, 58/64 GPU layers"
 
 # ── Hermes config for models (OPTIONAL — only if you use Hermes Agent) ────────
 #
@@ -324,12 +329,12 @@ register_model "qwen-coder" \
 #   Auto-derives context_length, model, max_turns, provider, base_url from
 #   the register_model entry above. Pass explicit overrides as needed:
 #
-# register_hermes_config "llama3-8b" \
+# register_hermes_config "qwen36" \
 #     hermes_profile=default \
 #     reasoning=off \
 #     max_turns=150
 #
-# register_hermes_config "qwen-coder" \
+# register_hermes_config "qwen36-deep" \
 #     hermes_profile=default \
-#     reasoning=off \
+#     reasoning=on \
 #     max_turns=100
