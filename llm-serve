@@ -5,10 +5,13 @@
 #   llm-serve                         list available models
 #   llm-serve <model>                 launch model in background
 #   llm-serve <model> --live          launch model in foreground (live logs)
+#   llm-serve <model> --remote        bind 0.0.0.0 for LAN/Meshnet access
 #   llm-serve list                    same as no args
 #   llm-serve status                  show running model info
 #   llm-serve stop                    stop all running servers
 #   llm-serve stop <model>            stop a specific model
+#   llm-serve update                  pull + rebuild llama.cpp (interactive)
+#   llm-serve update --yes            pull + rebuild without confirmation
 #
 # Hermes integration (when register_hermes_config is defined for a model):
 #   - Syncs model/context/reasoning/provider settings to the target profile
@@ -25,10 +28,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CONF="${SCRIPT_DIR}/models.conf"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
+
+# shellcheck source=lib/llama-build.sh
+source "${SCRIPT_DIR}/lib/llama-build.sh"
 
 # Model files directory — defaults to repo root models/
 # Override: MODEL_DIR=/path/to/your/models llm-serve my-model
@@ -205,7 +211,185 @@ do_stop() {
     fi
 }
 
+# Uninstall subcommand: remove llm-serve build artifacts.
+#   llm-serve uninstall          interactive (asks confirmation)
+#   llm-serve uninstall --force  non-interactive (no confirmation)
+do_uninstall() {
+    local force=0
+    [[ "${1:-}" == "--force" ]] && force=1
+
+    local local_bin_link="${HOME}/.local/bin/llm-serve"
+    local llama_dir="${SCRIPT_DIR}/llama.cpp"
+    local logs_dir="${SCRIPT_DIR}/logs"
+
+    # Stop any running servers first
+    if [[ -f "$PID_FILE" ]]; then
+        read -r pid _ < "$PID_FILE"
+        if check_pid "$pid" 2>/dev/null; then
+            echo "Stopping running server (PID: $pid)..."
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 1
+            check_pid "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    echo ""
+    echo "This will remove:"
+    echo ""
+    [[ -L "$local_bin_link" ]] && echo "  ~/.local/bin/llm-serve  (symlink)"
+    [[ -d "$llama_dir" ]]      && echo "  llama.cpp/              (clone + build, ~1.5 GB)"
+    [[ -d "$logs_dir" ]]       && echo "  logs/                   (runtime logs)"
+    echo ""
+    echo "These will NOT be removed:"
+    echo "  models/                 (your model files)"
+    echo "  models.conf             (your config)"
+    echo "  System packages         (cmake, git, g++, make)"
+    echo ""
+
+    if [[ "$force" -eq 0 ]]; then
+        read -r -p "Proceed? [y/N] " reply
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Cancelled."; exit 0 ;;
+        esac
+    fi
+
+    local removed=0
+
+    if [[ -L "$local_bin_link" ]]; then
+        rm -f "$local_bin_link"
+        echo "Removed ~/.local/bin/llm-serve symlink"
+        removed=$(( removed + 1 ))
+    fi
+
+    if [[ -d "$llama_dir" ]]; then
+        rm -rf "$llama_dir"
+        echo "Removed llama.cpp/ (clone + build)"
+        removed=$(( removed + 1 ))
+    fi
+
+    if [[ -d "$logs_dir" ]]; then
+        rm -rf "$logs_dir"
+        echo "Removed logs/"
+        removed=$(( removed + 1 ))
+    fi
+
+    if (( removed == 0 )); then
+        echo "Nothing to remove — already clean."
+    else
+        echo ""
+        echo "Done. To reinstall:  ./setup.sh"
+    fi
+}
+
+# Update subcommand: pull llama.cpp (if upstream is ahead) and rebuild llama-server.
+#   llm-serve update          interactive (asks confirmation)
+#   llm-serve update --yes    non-interactive
+#   llm-serve update --cpu    force CPU rebuild
+#   llm-serve update --cuda   force CUDA rebuild
+#   llm-serve update --rocm   force ROCm rebuild
+do_update() {
+    local force_yes=0 build_override=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --yes|-y) force_yes=1 ;;
+            --cpu)    build_override="cpu" ;;
+            --cuda)   build_override="cuda" ;;
+            --rocm)   build_override="rocm" ;;
+            --help|-h)
+                echo "Usage: llm-serve update [--yes] [--cpu|--cuda|--rocm]"
+                echo ""
+                echo "Pull the latest llama.cpp and rebuild llama-server."
+                echo "Build type is auto-detected (stamp, binary, or GPU)"
+                echo "unless --cpu, --cuda, or --rocm is passed."
+                exit 0
+                ;;
+            *) die "Unknown update argument: $1 (try: llm-serve update --help)" ;;
+        esac
+        shift
+    done
+
+    [[ -d "${LLAMA_DIR}/.git" ]] \
+        || die "llama.cpp not found at ${LLAMA_DIR}. Run ./setup.sh first."
+
+    local build_type nproc head
+    build_type="$(llama_detect_build_type "$build_override")"
+    nproc="$(llama_nproc)"
+
+    case "$build_type" in
+        cuda)
+            llama_ensure_nvcc || die "CUDA rebuild requested but nvcc not found. Run ./setup.sh or install the CUDA toolkit."
+            ;;
+        rocm)
+            llama_ensure_rocm || die "ROCm rebuild requested but HIP SDK not found. Run ./setup.sh or install rocm-hip-sdk."
+            ;;
+    esac
+
+    if ! llama_fetch_status; then
+        echo "Warning: could not reach llama.cpp upstream (offline?). Using local clone." >&2
+    fi
+
+    local needs_update=0 update_reason=""
+    if [[ "${_LLAMA_UPSTREAM_AHEAD:-0}" -eq 1 ]]; then
+        needs_update=1
+        update_reason="upstream has newer commits (${_LLAMA_LOCAL_HEAD:0:7} → ${_LLAMA_REMOTE_HEAD:0:7})"
+    elif llama_needs_rebuild "$build_type"; then
+        needs_update=1
+        llama_read_stamp
+        head="$(llama_local_head)"
+        if [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
+            update_reason="no build stamp on existing binary"
+        elif [[ "$_LLAMA_STAMP_TYPE" != "$build_type" ]]; then
+            update_reason="build type changed (${_LLAMA_STAMP_TYPE} → ${build_type})"
+        else
+            update_reason="binary @ ${_LLAMA_STAMP_COMMIT:0:7}, llama.cpp now @ ${head:0:7}"
+        fi
+    fi
+
+    if [[ "$needs_update" -eq 0 ]]; then
+        head="$(llama_local_head)"
+        echo "llama-server is already up to date (${build_type} @ ${head:0:7})."
+        exit 0
+    fi
+
+    echo ""
+    echo "llama-server update available: ${update_reason}"
+    echo "This will pull llama.cpp (if needed) and rebuild (${build_type}, ${nproc} cores)."
+    echo "This may take several minutes."
+    echo ""
+
+    if [[ "$force_yes" -eq 0 ]]; then
+        read -r -p "Proceed? [y/N] " reply
+        case "$reply" in
+            [yY]|[yY][eE][sS]) ;;
+            *) echo "Cancelled."; exit 0 ;;
+        esac
+    fi
+
+    echo "Rebuilding llama-server (${build_type})..."
+    if llama_do_update "$build_type" "$nproc"; then
+        head="$(llama_local_head)"
+        echo ""
+        echo "Done. llama-server updated (${build_type} @ ${head:0:7})."
+    else
+        die "Rebuild failed. Check the output above for errors."
+    fi
+}
+
 # Source models.conf (needed for list, stop <model>, and model launching)
+# Uninstall/update dispatch BEFORE models.conf source — they must work even
+# when models.conf is missing. Uses raw $1 since ARGS hasn't been parsed yet.
+if [[ "${1:-}" == "uninstall" ]]; then
+    do_uninstall "${2:-}"
+    exit 0
+fi
+if [[ "${1:-}" == "update" ]]; then
+    shift
+    do_update "$@"
+    exit 0
+fi
+
 [[ -f "${CONF}" ]] || { echo "Error: models.conf not found at ${CONF}" >&2; exit 1; }
 # shellcheck source=models.conf
 source "${CONF}"
@@ -233,6 +417,8 @@ list_models() {
     echo "  llm-serve status              Show running model info"
     echo "  llm-serve stop                Stop all servers"
     echo "  llm-serve stop <model>        Stop specific model"
+    echo "  llm-serve update              Pull + rebuild llama.cpp"
+    echo "  llm-serve uninstall           Remove build artifacts (keep models/)"
     echo
     echo "Env overrides:"
     echo "  PORT=           HOST=           CONTEXT_SIZE=   GPU_LAYERS="
@@ -245,6 +431,7 @@ list_models() {
     echo "  --no-hermes           Skip Hermes config update (server only)"
     echo "  --no-gateway-restart  Skip Hermes gateway restart after config sync"
     echo "  --live                Start in foreground with live logs"
+    echo "  --remote              Bind 0.0.0.0 for LAN/Meshnet access (skips Hermes sync)"
     echo "  --dry-run             Show the command that would be run (no launch)"
 }
 
@@ -481,6 +668,7 @@ SKIP_HERMES="${SKIP_HERMES:-0}"
 SKIP_GATEWAY_RESTART="${SKIP_GATEWAY_RESTART:-0}"
 LIVE="${LIVE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+REMOTE="${REMOTE:-0}"
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -488,6 +676,7 @@ for arg in "$@"; do
         --no-gateway-restart) SKIP_GATEWAY_RESTART=1 ;;
         --live) LIVE=1 ;;
         --dry-run) DRY_RUN=1 ;;
+        --remote) REMOTE=1 ;;
         *) ARGS+=("$arg") ;;
     esac
 done
@@ -520,6 +709,9 @@ MODEL="$(resolve_alias "${REQUESTED}")"
 [[ -n "${_M["${MODEL}:file"]:-}" ]] \
     || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
 
+# Best-effort version check — log only, never block launch.
+llama_warn_if_outdated
+
 # Check if model is already running
 if [[ -f "$PID_FILE" ]]; then
     read -r old_pid old_model old_port old_ts < "$PID_FILE"
@@ -531,7 +723,13 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# Apply Hermes config (skip with --no-hermes)
+# ── Remote mode (--remote): bind all interfaces + skip Hermes base_url sync ──
+if [[ "$REMOTE" == "1" ]]; then
+    HOST="${HOST:-0.0.0.0}"
+    SKIP_HERMES=1
+fi
+
+# Apply Hermes config (skip with --no-hermes or --remote)
 [[ "$SKIP_HERMES" != "1" ]] && apply_hermes_config "$MODEL"
 
 # Resolve config with env overrides
@@ -593,12 +791,13 @@ TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
 THINKING="$(m_get "${MODEL}" thinking "")"
 PER_SLOT_MIN="$(m_get "${MODEL}" per_slot_min 0)"
 
-# CUDA paths (detect common locations; override with LD_LIBRARY_PATH if needed)
+# CUDA / ROCm paths (detect common locations; override with env vars if needed)
 [[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"
 [[ -d /usr/local/cuda/lib64 ]] && export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-# Alternative: CUDA may be under /opt/cuda on some distros
 [[ -d /opt/cuda/bin ]] && export PATH="/opt/cuda/bin:${PATH}"
 [[ -d /opt/cuda/lib64 ]] && export LD_LIBRARY_PATH="/opt/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+[[ -d /opt/rocm/bin ]] && export PATH="/opt/rocm/bin:${PATH}"
+[[ -d /opt/rocm/lib ]] && export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 # Validate binary and model file
 [[ -x "${LLAMA_SERVER}" ]] || die "llama-server not found at ${LLAMA_SERVER}"
@@ -642,7 +841,10 @@ _append_server_arg SERVER_ARGS --n-predict "${N_PREDICT}"
 _append_server_arg SERVER_ARGS -tb "${THREADS_BATCH}"
 _append_server_arg SERVER_ARGS --timeout "${SERVER_TIMEOUT}"
 _append_server_arg SERVER_ARGS --cache-reuse "${CACHE_REUSE}"
-_append_server_arg SERVER_ARGS --checkpoint-every-n-tokens "${CHECKPOINT_EVERY}"
+# llama.cpp removed --checkpoint-every-n-tokens; use --checkpoint-min-step (0 = no minimum).
+if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
+    _append_server_arg SERVER_ARGS --checkpoint-min-step "${CHECKPOINT_EVERY}"
+fi
 _append_server_arg SERVER_ARGS --ctx-checkpoints "${CTX_CHECKPOINTS}"
 
 _append_server_bool SERVER_ARGS --jinja --no-jinja "${JINJA}"
@@ -690,7 +892,11 @@ fi
 [[ -n "${UBATCH}" ]]       && echo "  UBatch:       ${UBATCH}"
 [[ -n "${N_PREDICT}" ]]    && echo "  Max response: ${N_PREDICT} tokens"
 echo "  Sampling:     temp=${TEMP} top_p=${TOP_P} top_k=${TOP_K} seed=${SEED}"
-echo "  Checkpoints:  every=${CHECKPOINT_EVERY} tokens"
+if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
+    echo "  Checkpoints:  min-step=${CHECKPOINT_EVERY} tokens"
+else
+    echo "  Checkpoints:  llama-server default (min-step not overridden)"
+fi
 [[ "${THINKING}" == "off" ]] && echo "  Thinking:     disabled (--reasoning off)"
 [[ "${THINKING}" == "on"  ]] && echo "  Thinking:     enabled (--reasoning on)"
 [[ -z "${THINKING}"       ]] && echo "  Thinking:     auto (llama-server default — Qwen3 may show thinking=1 in logs)"
@@ -700,6 +906,19 @@ fi
 echo "  Hermes agent: tool_use=$(m_get "${MODEL}" tool_use_enforcement false) compression=$(m_get "${MODEL}" compression_threshold 0.85) sync_aux=$(m_get "${MODEL}" sync_aux 1)"
 echo "  Notes:        $(m_get "${MODEL}" notes)"
 [[ "$SKIP_HERMES" == "1" ]] && echo "  Hermes config: skipped (--no-hermes)"
+if [[ "$REMOTE" == "1" ]]; then
+    echo "  Remote mode:  bound to 0.0.0.0 — reachable from other devices at:"
+    if command -v ip >/dev/null 2>&1; then
+        _REMOTE_IPS="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u || true)"
+    else
+        _REMOTE_IPS="$(hostname -I 2>/dev/null | tr ' ' $'\n' | sort -u | grep -vE '^$' || true)"
+    fi
+    while IFS= read -r _REMOTE_IP; do
+        [[ -z "$_REMOTE_IP" ]] && continue
+        echo "      http://${_REMOTE_IP}:${PORT}/v1"
+    done <<< "$_REMOTE_IPS"
+    echo "      (Meshnet devices use the 100.x.x.x address; LAN devices use your local IP.)"
+fi
 echo
 
 # ── Dry-run mode: show command without launching ─────────────────────────────
@@ -721,6 +940,16 @@ else
     bg_pid=$!
 
     write_pid "$bg_pid" "$MODEL" "$PORT"
+
+    # Fail fast if llama-server dies during model load (bad flags, OOM, missing CUDA, etc.)
+    sleep 1
+    if ! check_pid "$bg_pid"; then
+        echo "Error: llama-server exited immediately (PID: $bg_pid)." >&2
+        echo "Last log lines:" >&2
+        tail -10 "$LOG_FILE" >&2 || true
+        rm -f "$PID_FILE"
+        exit 1
+    fi
 
     echo "Started $MODEL in background (PID: $bg_pid)"
     echo "Logs:   $LOG_FILE"
