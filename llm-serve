@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# llm-serve — unified llama-server launcher
+# llm-serve — unified llama-server launcher (JSON config)
 #
 # Usage:
 #   llm-serve                         list available models
@@ -13,86 +13,75 @@
 #   llm-serve update                  pull + rebuild llama.cpp (interactive)
 #   llm-serve update --yes            pull + rebuild without confirmation
 #
-# Hermes integration (when register_hermes_config is defined for a model):
-#   - Syncs model/context/reasoning/provider settings to the target profile
-#   - Restarts the profile's gateway automatically (use --no-gateway-restart to skip)
+# Config is read from models.json (TUI-managed). Requires jq.
 #
 # Any default can be overridden with an env var:
 #   PORT=9000 llm-serve hermes3-8b
 #   CONTEXT_SIZE=32768 GPU_LAYERS=60 llm-serve qwen36-uncensored
-#   ENABLE_MTP=0/1  optional override for mtp= in models.conf
-#   MODEL_PATH=/path/to/custom.gguf llm-serve qwen36
-#
-# Models are defined in models.conf (same directory as this script).
-# Background logs go to: logs/llm-serve.log (relative to this script)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-CONF="${SCRIPT_DIR}/models.conf"
+MODELS_JSON="${SCRIPT_DIR}/models.json"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
 
 # shellcheck source=lib/llama-build.sh
 source "${SCRIPT_DIR}/lib/llama-build.sh"
 
-# Model files directory — defaults to repo root models/
-# Override: MODEL_DIR=/path/to/your/models llm-serve my-model
+# Model files directory
 MODEL_DIR="${MODEL_DIR:-${SCRIPT_DIR}/models}"
 
-# ── Log/PID paths (for status/stop subcommands) ──────────────────────────────
+# Log/PID paths
 LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs}"
 LOG_FILE="${LOG_FILE:-${LOG_DIR}/llm-serve.log}"
 PID_FILE="${PID_FILE:-${LOG_DIR}/.llm-serve.pid}"
 
-# ── Model registry ────────────────────────────────────────────────────────────
-declare -a _MODEL_NAMES=()
-declare -A _M=()        # _M["name:key"] = value
-declare -A _ALIAS=()    # _ALIAS["alias"] = target model (or another alias)
-declare -a _ALIAS_NAMES=()
-declare -A _HC_KEYS=()  # _HC_KEYS["model:key"] = hermes config value
+# ── JSON helpers ────────────────────────────────────────────────────────────
 
-register_model() {
-    local name="$1"; shift
-    _MODEL_NAMES+=("$name")
-    while [[ $# -gt 0 ]]; do
-        local pair="$1"; shift
-        local key="${pair%%=*}"
-        local val="${pair#*=}"
-        _M["${name}:${key}"]="${val}"
-    done
+# Check jq is available
+command -v jq >/dev/null 2>&1 || {
+    echo "Error: jq is required but not installed." >&2
+    echo "Install: sudo pacman -S jq (Arch) or sudo apt install jq (Debian/Ubuntu)" >&2
+    exit 1
 }
 
-# register_alias <alias> <target>
-#   Maps a friendly name to a model (or to another alias). Example:
-#     register_alias profile1 qwen36
-#   then `llm-serve profile1` runs the qwen36 model.
-register_alias() {
-    local name="$1" target="$2"
-    _ALIAS["${name}"]="${target}"
-    _ALIAS_NAMES+=("${name}")
+# Check models.json exists
+[[ -f "$MODELS_JSON" ]] || {
+    echo "Error: models.json not found at ${MODELS_JSON}" >&2
+    echo "Run migrate-to-json.py to convert from models.conf" >&2
+    exit 1
 }
 
-# Resolve an alias chain to a concrete model name (guards against cycles).
+# Resolve alias → model name
 resolve_alias() {
-    local name="$1" seen=":" hops=0
-    while [[ -n "${_ALIAS["${name}"]:-}" ]]; do
-        case "${seen}" in *":${name}:"*) echo "Error: alias loop detected at '${name}'" >&2; exit 1;; esac
-        seen="${seen}${name}:"
-        name="${_ALIAS["${name}"]}"
-        (( ++hops > 32 )) && { echo "Error: alias chain too deep starting from '$1'" >&2; exit 1; }
-    done
-    echo "${name}"
+    local name="$1"
+    jq -r --arg n "$name" '.aliases[$n] // $n' "$MODELS_JSON"
 }
 
-# ── Helpers (defined before source so models.conf can use m_get) ──────────────
-m_get() { echo "${_M["${1}:${2}"]:-${3:-}}"; }  # m_get NAME KEY [DEFAULT]
+# Get a model parameter
+m_get() {
+    local model="$1" key="$2" default="${3:-}"
+    jq -r --arg m "$model" --arg k "$key" --arg d "$default" \
+        '.models[$m][$k] // $d' "$MODELS_JSON"
+}
+
+# Check if a model exists
+model_exists() {
+    local model="$1"
+    jq -e --arg m "$model" '.models[$m]' "$MODELS_JSON" >/dev/null 2>&1
+}
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-# ── Background helpers ────────────────────────────────────────────────────────
+check_pid() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
 
-# Rotate log file: keep last MAX_LOG_LINES to prevent infinite growth.
+# Rotate log file
 rotate_log() {
     local MAX_LOG_LINES=1000
     [[ -f "$LOG_FILE" ]] || return 0
@@ -104,67 +93,50 @@ rotate_log() {
     fi
 }
 
-# Write PID file: PID MODEL PORT TIMESTAMP
+# Write PID file
 write_pid() {
     local pid="$1" model="$2" port="$3"
     echo "$pid $model $port $(date +%s)" > "$PID_FILE"
 }
 
-# Check if a PID is alive.
-check_pid() {
-    kill -0 "$1" 2>/dev/null
-}
+# ── Subcommands ─────────────────────────────────────────────────────────────
 
-# Status subcommand: show running model info.
 do_status() {
     if [[ ! -f "$PID_FILE" ]]; then
         echo "No model running"
         return 0
     fi
 
-    read -r pid model port timestamp < "$PID_FILE"
+    local pid model port ts
+    read -r pid model port ts < "$PID_FILE"
 
-    if check_pid "$pid"; then
-        local uptime_secs=$(( $(date +%s) - timestamp ))
-        local uptime_hr=$(( uptime_secs / 3600 ))
-        local uptime_min=$(( (uptime_secs % 3600) / 60 ))
-        local uptime_sec=$(( uptime_secs % 60 ))
-
-        echo "Running: $model"
-        echo "  PID:    $pid"
-        echo "  Port:   $port"
-        if (( uptime_hr > 0 )); then
-            printf "  Uptime: %dh %dm %ds\n" "$uptime_hr" "$uptime_min" "$uptime_sec"
-        elif (( uptime_min > 0 )); then
-            printf "  Uptime: %dm %ds\n" "$uptime_min" "$uptime_sec"
-        else
-            printf "  Uptime: %ds\n" "$uptime_sec"
-        fi
-
-        echo
-        echo "Last log lines:"
-        if [[ -f "$LOG_FILE" ]]; then
-            tail -5 "$LOG_FILE"
-        else
-            echo "(no log file found)"
-        fi
-    else
-        echo "Stale PID file (process $pid not running)"
-        echo "Cleaning up..."
+    if ! check_pid "$pid"; then
+        echo "Stale PID file (PID $pid not running)"
         rm -f "$PID_FILE"
         return 1
     fi
+
+    local uptime=$(( $(date +%s) - ts ))
+    local uptime_str
+    printf -v uptime_str '%dh %dm %ds' $((uptime/3600)) $(( (uptime%3600)/60 )) $((uptime%60))
+
+    echo "Running: $model"
+    echo "  PID:    $pid"
+    echo "  Port:   $port"
+    echo "  Uptime: $uptime_str"
+    echo ""
+    echo "Last log lines:"
+    tail -10 "$LOG_FILE" 2>/dev/null || echo "  (no log file)"
 }
 
-# Stop subcommand: stop all or a specific model.
 do_stop() {
     local model="${1:-}"
 
     if [[ -z "$model" ]]; then
-        # ── Stop ALL running servers ──
+        # Stop ALL running servers
         local pids
         pids=$(pgrep -x llama-server 2>/dev/null || true)
-        # Fallback: PID file (handles wrappers/renamed binaries pgrep can't see)
+        # Fallback: PID file
         if [[ -z "$pids" && -f "$PID_FILE" ]]; then
             local fpid
             read -r fpid _ < "$PID_FILE"
@@ -186,245 +158,62 @@ do_stop() {
         echo "Stopping all llama-server processes..."
         echo "$pids" | xargs kill -TERM 2>/dev/null || true
         sleep 2
-        # Force kill anything still alive
         pids=$(pgrep -x llama-server 2>/dev/null || true)
         [[ -n "$pids" ]] && echo "$pids" | xargs kill -9 2>/dev/null || true
         echo "All servers stopped"
         rm -f "$PID_FILE"
     else
-        # ── Stop specific model ──
+        # Stop specific model
         local resolved_model
         resolved_model="$(resolve_alias "$model")"
-        [[ -n "${_M["${resolved_model}:file"]:-}" ]] || die "unknown model '$model'"
+        model_exists "$resolved_model" || die "unknown model '$model'"
 
         if [[ ! -f "$PID_FILE" ]]; then
             echo "No model running"
             return 0
         fi
 
-        read -r pid stored_model port timestamp < "$PID_FILE"
+        local pid running_model port ts
+        read -r pid running_model port ts < "$PID_FILE"
 
-        if [[ "$stored_model" != "$resolved_model" ]]; then
-            echo "Error: running model is '$stored_model', not '$model'"
-            echo "Use 'llm-serve stop' to stop all servers"
+        if [[ "$running_model" != "$resolved_model" ]]; then
+            echo "Model '$resolved_model' is not running (currently running: $running_model)"
             return 1
         fi
 
         if ! check_pid "$pid"; then
-            echo "Process not running (stale PID file removed)"
+            echo "Stale PID file (PID $pid not running)"
             rm -f "$PID_FILE"
-            return 0
+            return 1
         fi
 
         echo "Stopping $resolved_model (PID: $pid)..."
         kill -TERM "$pid" 2>/dev/null || true
         sleep 2
         check_pid "$pid" && kill -9 "$pid" 2>/dev/null || true
-        echo "Stopped $resolved_model"
         rm -f "$PID_FILE"
+        echo "Stopped"
     fi
 }
 
-# Uninstall subcommand: remove llm-serve build artifacts.
-#   llm-serve uninstall          interactive (asks confirmation)
-#   llm-serve uninstall --force  non-interactive (no confirmation)
-do_uninstall() {
-    local force=0
-    [[ "${1:-}" == "--force" ]] && force=1
-
-    local local_bin_link="${HOME}/.local/bin/llm-serve"
-    local llama_dir="${SCRIPT_DIR}/llama.cpp"
-    local logs_dir="${SCRIPT_DIR}/logs"
-
-    # Stop any running servers first
-    if [[ -f "$PID_FILE" ]]; then
-        read -r pid _ < "$PID_FILE"
-        if check_pid "$pid" 2>/dev/null; then
-            echo "Stopping running server (PID: $pid)..."
-            kill -TERM "$pid" 2>/dev/null || true
-            sleep 1
-            check_pid "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
-
-    echo ""
-    echo "This will remove:"
-    echo ""
-    [[ -L "$local_bin_link" ]] && echo "  ~/.local/bin/llm-serve  (symlink)"
-    [[ -d "$llama_dir" ]]      && echo "  llama.cpp/              (clone + build, ~1.5 GB)"
-    [[ -d "$logs_dir" ]]       && echo "  logs/                   (runtime logs)"
-    echo ""
-    echo "These will NOT be removed:"
-    echo "  models/                 (your model files)"
-    echo "  models.conf             (your config)"
-    echo "  System packages         (cmake, git, g++, make)"
-    echo ""
-
-    if [[ "$force" -eq 0 ]]; then
-        read -r -p "Proceed? [y/N] " reply
-        case "$reply" in
-            [yY]|[yY][eE][sS]) ;;
-            *) echo "Cancelled."; exit 0 ;;
-        esac
-    fi
-
-    local removed=0
-
-    if [[ -L "$local_bin_link" ]]; then
-        rm -f "$local_bin_link"
-        echo "Removed ~/.local/bin/llm-serve symlink"
-        removed=$(( removed + 1 ))
-    fi
-
-    if [[ -d "$llama_dir" ]]; then
-        rm -rf "$llama_dir"
-        echo "Removed llama.cpp/ (clone + build)"
-        removed=$(( removed + 1 ))
-    fi
-
-    if [[ -d "$logs_dir" ]]; then
-        rm -rf "$logs_dir"
-        echo "Removed logs/"
-        removed=$(( removed + 1 ))
-    fi
-
-    if (( removed == 0 )); then
-        echo "Nothing to remove — already clean."
-    else
-        echo ""
-        echo "Done. To reinstall:  ./setup.sh"
-    fi
-}
-
-# Update subcommand: pull llama.cpp (if upstream is ahead) and rebuild llama-server.
-#   llm-serve update          interactive (asks confirmation)
-#   llm-serve update --yes    non-interactive
-#   llm-serve update --cpu    force CPU rebuild
-#   llm-serve update --cuda   force CUDA rebuild
-#   llm-serve update --rocm   force ROCm rebuild
-do_update() {
-    local force_yes=0 build_override=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --yes|-y) force_yes=1 ;;
-            --cpu)    build_override="cpu" ;;
-            --cuda)   build_override="cuda" ;;
-            --rocm)   build_override="rocm" ;;
-            --help|-h)
-                echo "Usage: llm-serve update [--yes] [--cpu|--cuda|--rocm]"
-                echo ""
-                echo "Pull the latest llama.cpp and rebuild llama-server."
-                echo "Build type is auto-detected (stamp, binary, or GPU)"
-                echo "unless --cpu, --cuda, or --rocm is passed."
-                exit 0
-                ;;
-            *) die "Unknown update argument: $1 (try: llm-serve update --help)" ;;
-        esac
-        shift
-    done
-
-    [[ -d "${LLAMA_DIR}/.git" ]] \
-        || die "llama.cpp not found at ${LLAMA_DIR}. Run ./setup.sh first."
-
-    local build_type nproc head
-    build_type="$(llama_detect_build_type "$build_override")"
-    nproc="$(llama_nproc)"
-
-    case "$build_type" in
-        cuda)
-            llama_ensure_nvcc || die "CUDA rebuild requested but nvcc not found. Run ./setup.sh or install the CUDA toolkit."
-            ;;
-        rocm)
-            llama_ensure_rocm || die "ROCm rebuild requested but HIP SDK not found. Run ./setup.sh or install rocm-hip-sdk."
-            ;;
-    esac
-
-    if ! llama_fetch_status; then
-        echo "Warning: could not reach llama.cpp upstream (offline?). Using local clone." >&2
-    fi
-
-    local needs_update=0 update_reason=""
-    if [[ "${_LLAMA_UPSTREAM_AHEAD:-0}" -eq 1 ]]; then
-        needs_update=1
-        update_reason="upstream has newer commits (${_LLAMA_LOCAL_HEAD:0:7} → ${_LLAMA_REMOTE_HEAD:0:7})"
-    elif llama_needs_rebuild "$build_type"; then
-        needs_update=1
-        llama_read_stamp
-        head="$(llama_local_head)"
-        if [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
-            update_reason="no build stamp on existing binary"
-        elif [[ "$_LLAMA_STAMP_TYPE" != "$build_type" ]]; then
-            update_reason="build type changed (${_LLAMA_STAMP_TYPE} → ${build_type})"
-        else
-            update_reason="binary @ ${_LLAMA_STAMP_COMMIT:0:7}, llama.cpp now @ ${head:0:7}"
-        fi
-    fi
-
-    if [[ "$needs_update" -eq 0 ]]; then
-        head="$(llama_local_head)"
-        echo "llama-server is already up to date (${build_type} @ ${head:0:7})."
-        exit 0
-    fi
-
-    echo ""
-    echo "llama-server update available: ${update_reason}"
-    echo "This will pull llama.cpp (if needed) and rebuild (${build_type}, ${nproc} cores)."
-    echo "This may take several minutes."
-    echo ""
-
-    if [[ "$force_yes" -eq 0 ]]; then
-        read -r -p "Proceed? [y/N] " reply
-        case "$reply" in
-            [yY]|[yY][eE][sS]) ;;
-            *) echo "Cancelled."; exit 0 ;;
-        esac
-    fi
-
-    echo "Rebuilding llama-server (${build_type})..."
-    if llama_do_update "$build_type" "$nproc"; then
-        head="$(llama_local_head)"
-        echo ""
-        echo "Done. llama-server updated (${build_type} @ ${head:0:7})."
-    else
-        die "Rebuild failed. Check the output above for errors."
-    fi
-}
-
-# Source models.conf (needed for list, stop <model>, and model launching)
-# Uninstall/update dispatch BEFORE models.conf source — they must work even
-# when models.conf is missing. Uses raw $1 since ARGS hasn't been parsed yet.
-if [[ "${1:-}" == "uninstall" ]]; then
-    do_uninstall "${2:-}"
-    exit 0
-fi
-if [[ "${1:-}" == "update" ]]; then
-    shift
-    do_update "$@"
-    exit 0
-fi
-
-[[ -f "${CONF}" ]] || { echo "Error: models.conf not found at ${CONF}" >&2; exit 1; }
-# shellcheck source=models.conf
-source "${CONF}"
-
-# ── List models ───────────────────────────────────────────────────────────────
 list_models() {
     echo "Available models:"
-    echo
-    local name
-    for name in "${_MODEL_NAMES[@]}"; do
-        printf "  %-22s %s\n" "$name" "$(m_get "$name" notes)"
-    done
-    if (( ${#_ALIAS_NAMES[@]} > 0 )); then
-        echo
-        echo "Aliases:"
-        echo
-        for name in "${_ALIAS_NAMES[@]}"; do
-            printf "  %-22s -> %s\n" "$name" "$(resolve_alias "$name")"
+    echo ""
+    jq -r '.models | to_entries[] | "\(.key)|\(.value.notes // "")"' "$MODELS_JSON" | \
+        while IFS='|' read -r name notes; do
+            printf "  %-22s %s\n" "$name" "$notes"
         done
+
+    local aliases
+    aliases=$(jq -r '.aliases | to_entries[] | "  \(.key) -> \(.value)"' "$MODELS_JSON" 2>/dev/null || true)
+    if [[ -n "$aliases" ]]; then
+        echo ""
+        echo "Aliases:"
+        echo ""
+        echo "$aliases"
     fi
-    echo
+
+    echo ""
     echo "Commands:"
     echo "  llm-serve <model>              Start model in background"
     echo "  llm-serve <model> --live      Start model in foreground (live logs)"
@@ -433,261 +222,28 @@ list_models() {
     echo "  llm-serve stop <model>        Stop specific model"
     echo "  llm-serve update              Pull + rebuild llama.cpp"
     echo "  llm-serve uninstall           Remove build artifacts (keep models/)"
-    echo
+    echo ""
     echo "Env overrides:"
     echo "  PORT=           HOST=           CONTEXT_SIZE=   GPU_LAYERS="
     echo "  THREADS=        UBATCH=         PARALLEL=       N_PREDICT="
     echo "  CACHE_TYPE_K=   CACHE_TYPE_V=   BATCH_SIZE=     DEFRAG_THOLD="
     echo "  TEMP=           TOP_P=          SEED=           ENABLE_MTP=0"
-    echo "  N_CPU_MOE=      MODEL_PATH=     MODEL_DIR=      (see models.conf for full parameter list)"
-    echo
+    echo "  N_CPU_MOE=      MODEL_PATH=     MODEL_DIR="
+    echo ""
     echo "Flags:"
-    echo "  --no-hermes           Skip Hermes config update (server only)"
-    echo "  --no-gateway-restart  Skip Hermes gateway restart after config sync"
     echo "  --live                Start in foreground with live logs"
-    echo "  --remote              Bind 0.0.0.0 for LAN/Meshnet access (skips Hermes sync)"
+    echo "  --remote              Bind 0.0.0.0 for LAN/Meshnet access"
     echo "  --dry-run             Show the command that would be run (no launch)"
 }
 
-# ── Hermes config integration ─────────────────────────────────────────────────
-
-# Resolve ~/.hermes/profiles/<name> (or ~/.hermes for default).
-hermes_home_for_profile() {
-    local profile="$1"
-    local root="${HERMES_ROOT:-${HOME}/.hermes}"
-    if [[ -z "$profile" || "$profile" == "default" ]]; then
-        echo "${root}"
-    else
-        echo "${root}/profiles/${profile}"
-    fi
-}
-
-# Read gateway PID from gateway.pid (plain number or JSON record).
-_gateway_pid_from_file() {
-    local pid_file="$1"
-    [[ -f "$pid_file" ]] || return 1
-    if grep -q '"pid"' "$pid_file" 2>/dev/null; then
-        grep -oE '"pid"[[:space:]]*:[[:space:]]*[0-9]+' "$pid_file" | head -1 | grep -oE '[0-9]+$'
-    else
-        head -1 "$pid_file" | awk '{print $1}'
-    fi
-}
-
-# Restart the gateway for a Hermes profile (no-op if not running).
-restart_hermes_gateway() {
-    local profile="$1"
-    local hermes_home
-    hermes_home="$(hermes_home_for_profile "$profile")"
-    local pid_file="${hermes_home}/gateway.pid"
-    local profile_label="${profile:-default}"
-
-    local gw_pid
-    gw_pid="$(_gateway_pid_from_file "$pid_file" 2>/dev/null || true)"
-    if [[ -z "$gw_pid" ]] || ! check_pid "$gw_pid"; then
-        echo "  Gateway (${profile_label}): not running, skipped restart"
-        return 0
-    fi
-
-    echo "Restarting Hermes gateway (${profile_label})..."
-    if HERMES_HOME="$hermes_home" hermes gateway restart; then
-        echo "  Gateway restarted."
-    else
-        echo "  Warning: gateway restart failed for ${profile_label}" >&2
-    fi
-}
-
-# Active Hermes home + counters while apply_hermes_config runs.
-_HERMES_APPLY_HOME=""
-_HERMES_CHANGED=0
-_HERMES_TOTAL=0
-
-_hermes_set() {
-    local hermes_key="$1" val="$2"
-    (( ++_HERMES_TOTAL ))
-    if HERMES_HOME="$_HERMES_APPLY_HOME" hermes config set "$hermes_key" "$val"; then
-        echo "  ${hermes_key} = ${val}"
-        (( ++_HERMES_CHANGED )) || true
-    else
-        echo "  Warning: failed to set ${hermes_key} = ${val}" >&2
-    fi
-}
-
-# Side-task model slots synced when sync_aux=1 on the model profile.
-# Override with HERMES_AUX_TASKS env var (space-separated list).
-_HERMES_AUX_TASKS="${HERMES_AUX_TASKS:-approval compression curator kanban_decomposer mcp profile_describer skills_hub title_generation triage_specifier vision web_extract}"
-
-# Point auxiliary.* and delegation.* at the main model (same base_url/ctx).
-_sync_hermes_auxiliary_models() {
-    local model="$1" base_url="$2" ctx_len="$3" model_file="$4" provider="${5:-custom}"
-    local task
-    for task in $_HERMES_AUX_TASKS; do
-        _hermes_set "auxiliary.${task}.model" "$model_file"
-        _hermes_set "auxiliary.${task}.base_url" "$base_url"
-        _hermes_set "auxiliary.${task}.context_length" "$ctx_len"
-        _hermes_set "auxiliary.${task}.provider" "$provider"
-    done
-    _hermes_set "delegation.model" "$model_file"
-    _hermes_set "delegation.base_url" "$base_url"
-    _hermes_set "delegation.context_length" "$ctx_len"
-    _hermes_set "delegation.provider" "$provider"
-}
-
-# Append SERVER_ARGS flag when value is non-empty.
-_append_server_arg() {
-    local -n _args=$1
-    local flag="$2" val="${3:-}"
-    if [[ -n "$val" ]]; then
-        _args+=("$flag" "$val")
-    fi
-    return 0
-}
-
-# Append on/off server flags: val=on|off|true|false|1|0.
-_append_server_bool() {
-    local -n _args=$1
-    local on_flag="$2" off_flag="$3" val="${4:-}"
-    case "$val" in
-        on|true|1|yes)  _args+=("$on_flag") ;;
-        off|false|0|no) _args+=("$off_flag") ;;
-    esac
-}
-
-# Map a short register_hermes_config key to one or more Hermes config paths.
-_apply_hc_key() {
-    local short_key="$1" val="$2"
-    [[ -z "$val" ]] && return 0
-
-    case "$short_key" in
-        hermes_profile|sync_aux) return 0 ;;
-        context_length) _hermes_set "model.context_length" "$val" ;;
-        model)          _hermes_set "model.default" "$val" ;;
-        max_turns)
-            _hermes_set "model.max_turns" "$val"
-            _hermes_set "agent.max_turns" "$val"
-            ;;
-        reasoning)
-            if [[ "$val" == "off" || "$val" == "false" || "$val" == "0" ]]; then
-                _hermes_set "display.show_reasoning" "false"
-                _hermes_set "display.reasoning" "false"
-            else
-                _hermes_set "display.show_reasoning" "true"
-                _hermes_set "display.reasoning" "true"
-            fi
-            ;;
-        show_reasoning) _hermes_set "display.show_reasoning" "$val" ;;
-        reasoning_effort) _hermes_set "agent.reasoning_effort" "$val" ;;
-        provider)       _hermes_set "model.provider" "$val" ;;
-        base_url)       _hermes_set "model.base_url" "$val" ;;
-        hermes.*)
-            _hermes_set "${short_key#hermes.}" "$val"
-            ;;
-        *.*)
-            _hermes_set "$short_key" "$val"
-            ;;
-    esac
-}
-
-apply_hermes_config() {
-    local model="$1"
-    local changed=0
-    local total=0
-
-    local has_config=0
-    for hc_key in "${!_HC_KEYS[@]}"; do
-        [[ "$hc_key" == "${model}:"* ]] || continue
-        local short_key="${hc_key#${model}:}"
-        [[ "$short_key" == "hermes_profile" ]] && continue
-        has_config=1
-        break
-    done
-
-    (( has_config == 0 )) && return 0
-
-    local profile="${_HC_KEYS[$model:hermes_profile]:-${HERMES_PROFILE:-}}"
-    local hermes_home
-    hermes_home="$(hermes_home_for_profile "$profile")"
-    local profile_label=""
-    [[ -n "$profile" ]] && profile_label=" (profile: ${profile} → ${hermes_home})"
-
-    echo "Applying Hermes config for ${model}${profile_label}..."
-
-    if [[ ! -d "$hermes_home" ]]; then
-        echo "  Warning: Hermes home not found: ${hermes_home}" >&2
-        echo "  Skipping Hermes config sync." >&2
-        echo
-        return 0
-    fi
-
-    _HERMES_APPLY_HOME="$hermes_home"
-    _HERMES_CHANGED=0
-    _HERMES_TOTAL=0
-
-    local -a hc_short_keys=()
-    for hc_key in "${!_HC_KEYS[@]}"; do
-        [[ "$hc_key" == "${model}:"* ]] || continue
-        hc_short_keys+=("${hc_key#${model}:}")
-    done
-
-    # Stable order: built-ins first, then passthrough keys.
-    local -a builtin_order=(
-        context_length model max_turns reasoning show_reasoning
-        reasoning_effort provider base_url
-    )
-    local key short_key
-    for key in "${builtin_order[@]}"; do
-        _apply_hc_key "$key" "${_HC_KEYS[$model:$key]:-}"
-    done
-    for short_key in "${hc_short_keys[@]}"; do
-        case "$short_key" in
-            hermes_profile|sync_aux|context_length|model|max_turns|reasoning|show_reasoning|reasoning_effort|provider|base_url|agent.tool_use_enforcement|compression.enabled|compression.threshold|agent.api_max_retries)
-                continue
-                ;;
-        esac
-        _apply_hc_key "$short_key" "${_HC_KEYS[$model:$short_key]:-}"
-    done
-
-    # Agent behavior keys (from register_model block, auto-derived in register_hermes_config).
-    _apply_hc_key "agent.tool_use_enforcement" "${_HC_KEYS[$model:agent.tool_use_enforcement]:-$(m_get "$model" tool_use_enforcement false)}"
-    _apply_hc_key "compression.enabled" "${_HC_KEYS[$model:compression.enabled]:-$(m_get "$model" compression_enabled true)}"
-    _apply_hc_key "compression.threshold" "${_HC_KEYS[$model:compression.threshold]:-$(m_get "$model" compression_threshold 0.85)}"
-    _apply_hc_key "agent.api_max_retries" "${_HC_KEYS[$model:agent.api_max_retries]:-$(m_get "$model" api_max_retries 3)}"
-
-    if [[ "$(m_get "$model" sync_aux 1)" == "1" ]]; then
-        local _host _port _ctx _file _provider _base
-        _host="$(m_get "$model" host 127.0.0.1)"
-        _port="$(m_get "$model" port 8081)"
-        _ctx="$(m_get "$model" ctx 65536)"
-        _file="$(m_get "$model" file)"
-        _provider="${_HC_KEYS[$model:provider]:-custom}"
-        _base="${_HC_KEYS[$model:base_url]:-http://${_host}:${_port}/v1}"
-        _sync_hermes_auxiliary_models "$model" "$_base" "$_ctx" "$_file" "$_provider"
-    fi
-
-    changed="$_HERMES_CHANGED"
-    total="$_HERMES_TOTAL"
-    _HERMES_APPLY_HOME=""
-
-    echo "  Applied ${changed}/${total} Hermes settings to ${hermes_home}/config.yaml"
-
-    if [[ "$SKIP_GATEWAY_RESTART" != "1" ]]; then
-        restart_hermes_gateway "$profile"
-    else
-        echo "  Gateway restart skipped (--no-gateway-restart)"
-    fi
-    echo
-}
-
-# ── Parse flags ───────────────────────────────────────────────────────────────
-SKIP_HERMES="${SKIP_HERMES:-0}"
-SKIP_GATEWAY_RESTART="${SKIP_GATEWAY_RESTART:-0}"
+# ── Parse flags ─────────────────────────────────────────────────────────────
+SKIP_GATEWAY_RESTART=0
 LIVE="${LIVE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 REMOTE="${REMOTE:-0}"
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
-        --no-hermes) SKIP_HERMES=1 ;;
-        --no-gateway-restart) SKIP_GATEWAY_RESTART=1 ;;
         --live) LIVE=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --remote) REMOTE=1 ;;
@@ -695,24 +251,21 @@ for arg in "$@"; do
     esac
 done
 
-# ── Handle subcommands ────────────────────────────────────────────────────────
+# ── Handle subcommands ──────────────────────────────────────────────────────
 
-# Status (reads PID file, no model launching needed)
 [[ "${ARGS[0]:-}" == "status" ]] && { do_status; exit 0; }
 
-# Stop (needs resolve_alias from models.conf, which is already sourced)
 if [[ "${ARGS[0]:-}" == "stop" ]]; then
     do_stop "${ARGS[@]:1}"
     exit 0
 fi
 
-# List / no args
 if [[ ${#ARGS[@]} -eq 0 ]] || [[ "${ARGS[0]:-}" == "list" ]]; then
     list_models
     exit 0
 fi
 
-# ── Launch a model ────────────────────────────────────────────────────────────
+# ── Launch a model ──────────────────────────────────────────────────────────
 REQUESTED="${ARGS[0]}"
 
 # Resolve aliases
@@ -720,10 +273,9 @@ MODEL="$(resolve_alias "${REQUESTED}")"
 [[ "$MODEL" != "$REQUESTED" ]] && echo "Alias: ${REQUESTED} -> ${MODEL}"
 
 # Validate
-[[ -n "${_M["${MODEL}:file"]:-}" ]] \
-    || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
+model_exists "$MODEL" || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
 
-# Best-effort version check — log only, never block launch.
+# Best-effort version check
 llama_warn_if_outdated
 
 # Check if model is already running
@@ -737,14 +289,10 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# ── Remote mode (--remote): bind all interfaces + skip Hermes base_url sync ──
+# ── Remote mode (--remote): bind all interfaces ──
 if [[ "$REMOTE" == "1" ]]; then
     HOST="${HOST:-0.0.0.0}"
-    SKIP_HERMES=1
 fi
-
-# Apply Hermes config (skip with --no-hermes or --remote)
-[[ "$SKIP_HERMES" != "1" ]] && apply_hermes_config "$MODEL"
 
 # Resolve config with env overrides
 MODEL_FILE="$(m_get "${MODEL}" file)"
@@ -764,7 +312,6 @@ UBATCH="${UBATCH:-$(m_get "${MODEL}" ubatch "")}"
 N_PREDICT="${N_PREDICT:-$(m_get "${MODEL}" n_predict "")}"
 DEFRAG_THOLD="${DEFRAG_THOLD:-$(m_get "${MODEL}" defrag "")}"
 
-# Server runtime (previously hardcoded or missing)
 FLASH_ATTN="${FLASH_ATTN:-$(m_get "${MODEL}" flash_attn on)}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-$(m_get "${MODEL}" checkpoint_every -1)}"
 JINJA="${JINJA:-$(m_get "${MODEL}" jinja on)}"
@@ -775,7 +322,6 @@ CACHE_REUSE="${CACHE_REUSE:-$(m_get "${MODEL}" cache_reuse 0)}"
 CONT_BATCHING="${CONT_BATCHING:-$(m_get "${MODEL}" cont_batching on)}"
 CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-$(m_get "${MODEL}" ctx_checkpoints "")}"
 
-# Sampling defaults (used when Hermes omits temperature/top_p on custom provider)
 TEMP="${TEMP:-$(m_get "${MODEL}" temp 0.8)}"
 TOP_P="${TOP_P:-$(m_get "${MODEL}" top_p 0.95)}"
 TOP_K="${TOP_K:-$(m_get "${MODEL}" top_k 40)}"
@@ -786,26 +332,20 @@ REPEAT_LAST_N="${REPEAT_LAST_N:-$(m_get "${MODEL}" repeat_last_n 64)}"
 PRESENCE_PENALTY="${PRESENCE_PENALTY:-$(m_get "${MODEL}" presence_penalty 0.0)}"
 FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-$(m_get "${MODEL}" frequency_penalty 0.0)}"
 
-# Reasoning / thinking extras
 REASONING_FORMAT="${REASONING_FORMAT:-$(m_get "${MODEL}" reasoning_format "")}"
 REASONING_BUDGET="${REASONING_BUDGET:-$(m_get "${MODEL}" reasoning_budget "")}"
 
-# Speculative decoding (MTP) — enabled when mtp=1 in models.conf; ENABLE_MTP=0/1 overrides.
 ENABLE_MTP="${ENABLE_MTP:-$(m_get "${MODEL}" mtp 0)}"
 SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-$(m_get "${MODEL}" spec_draft_n_max 2)}"
 SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-$(m_get "${MODEL}" spec_draft_n_min 0)}"
 
-# MoE expert offload — keep attention/shared tensors on GPU, push expert (FFN) tensors
-# to CPU RAM. Only meaningful for Mixture-of-Experts models (e.g. Qwen3-*-A3B). Because
-# only a few experts are active per token, decode stays usable with most weights in RAM.
-# Empty/unset = disabled (dense models). Override: N_CPU_MOE=24 llm-serve <model>
 N_CPU_MOE="${N_CPU_MOE:-$(m_get "${MODEL}" n_cpu_moe "")}"
 
 TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
 THINKING="$(m_get "${MODEL}" thinking "")"
 PER_SLOT_MIN="$(m_get "${MODEL}" per_slot_min 0)"
 
-# CUDA / ROCm paths (detect common locations; override with env vars if needed)
+# CUDA / ROCm paths
 [[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"
 [[ -d /usr/local/cuda/lib64 ]] && export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 [[ -d /opt/cuda/bin ]] && export PATH="/opt/cuda/bin:${PATH}"
@@ -847,6 +387,23 @@ SERVER_ARGS=(
     --cache-type-v "${CACHE_TYPE_V}"
 )
 
+_append_server_arg() {
+    local -n _args=$1
+    local flag="$2" val="${3:-}"
+    if [[ -n "$val" ]]; then
+        _args+=("$flag" "$val")
+    fi
+}
+
+_append_server_bool() {
+    local -n _args=$1
+    local on_flag="$2" off_flag="$3" val="${4:-}"
+    case "$val" in
+        on|true|1|yes)  _args+=("$on_flag") ;;
+        off|false|0|no) _args+=("$off_flag") ;;
+    esac
+}
+
 _append_server_arg SERVER_ARGS --n-cpu-moe "${N_CPU_MOE}"
 _append_server_arg SERVER_ARGS -b "${BATCH_SIZE}"
 _append_server_arg SERVER_ARGS --ubatch-size "${UBATCH}"
@@ -855,7 +412,7 @@ _append_server_arg SERVER_ARGS --n-predict "${N_PREDICT}"
 _append_server_arg SERVER_ARGS -tb "${THREADS_BATCH}"
 _append_server_arg SERVER_ARGS --timeout "${SERVER_TIMEOUT}"
 _append_server_arg SERVER_ARGS --cache-reuse "${CACHE_REUSE}"
-# llama.cpp removed --checkpoint-every-n-tokens; use --checkpoint-min-step (0 = no minimum).
+
 if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
     _append_server_arg SERVER_ARGS --checkpoint-min-step "${CHECKPOINT_EVERY}"
 fi
@@ -865,7 +422,6 @@ _append_server_bool SERVER_ARGS --jinja --no-jinja "${JINJA}"
 _append_server_bool SERVER_ARGS --cache-prompt --no-cache-prompt "${CACHE_PROMPT}"
 _append_server_bool SERVER_ARGS --cont-batching --no-cont-batching "${CONT_BATCHING}"
 
-# Sampling defaults (server-side; Hermes custom provider usually omits these)
 _append_server_arg SERVER_ARGS --temp "${TEMP}"
 _append_server_arg SERVER_ARGS --top-p "${TOP_P}"
 _append_server_arg SERVER_ARGS --top-k "${TOP_K}"
@@ -879,7 +435,7 @@ _append_server_arg SERVER_ARGS --frequency-penalty "${FREQUENCY_PENALTY}"
 _append_server_arg SERVER_ARGS --reasoning-format "${REASONING_FORMAT}"
 _append_server_arg SERVER_ARGS --reasoning-budget "${REASONING_BUDGET}"
 
-# Prometheus metrics endpoint (GET /metrics). On by default for TUI monitoring.
+# Metrics endpoint
 METRICS="${METRICS:-$(m_get "${MODEL}" metrics on)}"
 _append_server_bool SERVER_ARGS --metrics --no-metrics "${METRICS}"
 
@@ -917,13 +473,11 @@ else
 fi
 [[ "${THINKING}" == "off" ]] && echo "  Thinking:     disabled (--reasoning off)"
 [[ "${THINKING}" == "on"  ]] && echo "  Thinking:     enabled (--reasoning on)"
-[[ -z "${THINKING}"       ]] && echo "  Thinking:     auto (llama-server default — Qwen3 may show thinking=1 in logs)"
+[[ -z "${THINKING}"       ]] && echo "  Thinking:     auto (llama-server default)"
 if [[ "${ENABLE_MTP}" == "1" ]]; then
     echo "  MTP:          enabled (draft-mtp, n-max ${SPEC_DRAFT_N_MAX})"
 fi
-echo "  Hermes agent: tool_use=$(m_get "${MODEL}" tool_use_enforcement false) compression=$(m_get "${MODEL}" compression_threshold 0.85) sync_aux=$(m_get "${MODEL}" sync_aux 1)"
 echo "  Notes:        $(m_get "${MODEL}" notes)"
-[[ "$SKIP_HERMES" == "1" ]] && echo "  Hermes config: skipped (--no-hermes)"
 if [[ "$REMOTE" == "1" ]]; then
     echo "  Remote mode:  bound to 0.0.0.0 — reachable from other devices at:"
     if command -v ip >/dev/null 2>&1; then
@@ -939,18 +493,17 @@ if [[ "$REMOTE" == "1" ]]; then
 fi
 echo
 
-# ── Dry-run mode: show command without launching ─────────────────────────────
+# ── Dry-run mode ────────────────────────────────────────────────────────────
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "Dry-run command:"
     echo "  ${LLAMA_SERVER} ${SERVER_ARGS[*]}"
     exit 0
 fi
 
-# ── Launch: foreground (--live) or background (default) ───────────────────────
+# ── Launch: foreground (--live) or background (default) ─────────────────────
 if [[ "$LIVE" == "1" ]]; then
     exec "${LLAMA_SERVER}" "${SERVER_ARGS[@]}"
 else
-    # Background mode: daemonize with nohup
     mkdir -p "$LOG_DIR"
     rotate_log
 
@@ -961,7 +514,7 @@ else
 
     write_pid "$bg_pid" "$MODEL" "$PORT"
 
-    # Fail fast if llama-server dies during model load (bad flags, OOM, missing CUDA, etc.)
+    # Fail fast if llama-server dies during model load
     sleep 1
     if ! check_pid "$bg_pid"; then
         echo "Error: llama-server exited immediately (PID: $bg_pid)." >&2

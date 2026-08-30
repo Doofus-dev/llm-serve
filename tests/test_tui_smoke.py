@@ -25,10 +25,10 @@ async def main():
         print("status OK:", "RUNNING" if "RUNNING" in rendered.replace("NOT RUNNING", "") else "not running")
 
         cfg = app.query_one(ConfigPanel)
-        cfg.selected = "qwen36"
+        cfg.selected = "qwen25"
         cfg.registry = app.registry
         text = cfg.render()
-        assert "gpu_layers" in text and "65536" in text
+        assert "gpu_layers" in text and "32768" in text
         print("config panel OK")
 
         # trigger refresh + gpu poll actions
@@ -45,3 +45,4 @@ async def main():
         print("smoke test PASSED")
 
 asyncio.run(main())
+

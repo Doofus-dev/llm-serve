@@ -1,4 +1,4 @@
-"""llm-serve TUI — Phase 1: read-only live monitor."""
+"""llm-serve TUI — Phase 1.5: config editor + JSON backend."""
 
 from __future__ import annotations
 
@@ -10,24 +10,43 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
-from textual.widgets import DataTable, Footer, Header, RichLog, Static, Tree
+from textual.widgets import (
+    Button, DataTable, Footer, Header, Input, Label, RichLog, Static, Tree,
+    Collapsible, Select
+)
 from textual.widgets.tree import TreeNode
+from textual.screen import ModalScreen
+from textual.message import Message
 
-from tui.data.config_parser import Registry, parse_models_conf
+from tui.data.models_json import Registry, ModelConfig, load_registry, save_registry, delete_model, create_model, update_model
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODELS_CONF = REPO_ROOT / "models.conf"
+MODELS_JSON = REPO_ROOT / "models.json"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
 
-# Parameters to skip in the config table (not llama-server config / internal)
-_SKIP_KEYS = {"notes", "tool_use_enforcement", "compression_enabled",
-              "compression_threshold", "api_max_retries", "sync_aux"}
+# Parameter groups for the editor
+PARAM_GROUPS = {
+    "Model": ["file", "port", "host", "notes"],
+    "Architecture": ["total_layers", "gpu_layers", "n_cpu_moe"],
+    "Context": ["ctx", "per_slot_min", "cache_k", "cache_v"],
+    "Batching": ["batch", "ubatch", "threads", "threads_batch", "parallel"],
+    "Generation": ["n_predict", "defrag", "thinking", "reasoning_format", "reasoning_budget"],
+    "Server": ["flash_attn", "checkpoint_every", "jinja", "timeout", "cache_prompt", "cache_reuse", "cont_batching", "ctx_checkpoints"],
+    "Sampling": ["temp", "top_p", "top_k", "min_p", "seed", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty"],
+    "Speculative": ["mtp", "spec_draft_n_max", "spec_draft_n_min"],
+    "Metrics": ["metrics"],
+}
+
+# All known params in order
+ALL_PARAMS = []
+for group_params in PARAM_GROUPS.values():
+    ALL_PARAMS.extend(group_params)
 
 
 def fmt_uptime(seconds: float) -> str:
@@ -43,6 +62,11 @@ class ModelTree(Tree):
         self.show_root = False
 
     def on_mount(self) -> None:
+        self.refresh_tree()
+
+    def refresh_tree(self) -> None:
+        """Rebuild the tree from registry."""
+        self.root.remove_children()
         aliases = self.registry.aliases
         for name, model in self.registry.models.items():
             node = self.root.add(name, data=("model", name))
@@ -120,9 +144,7 @@ class ConfigPanel(Static):
         if self.selected and self.registry and self.selected in self.registry.models:
             params = self.registry.models[self.selected].params
             for k, v in params.items():
-                if k in _SKIP_KEYS:
-                    continue
-                val = v if v != "" else "[dim]—[/]"
+                val = str(v) if v != "" else "[dim]—[/]"
                 lines.append(f"[cyan]{k:<18}[/] {val}")
         else:
             lines.append("[dim]select a model in the tree[/]")
@@ -141,8 +163,115 @@ class LogPanel(RichLog):
                                  capture_output=True, text=True, timeout=5).stdout
             self.clear()
             self.write(out.rstrip())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.write(f"[red]log read error: {e}[/]")
+
+
+class ConfirmDialog(ModalScreen[bool]):
+    """Yes/No confirmation dialog."""
+
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label(self.message)
+            with Horizontal():
+                yield Button("Yes", variant="error", id="yes")
+                yield Button("No", variant="primary", id="no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+
+class ModelEditor(ModalScreen[dict | None]):
+    """Modal form for editing a model's parameters."""
+
+    def __init__(self, name: str, params: dict, registry: Registry):
+        super().__init__()
+        self.model_name = name
+        self.params = dict(params)
+        self.registry = registry
+        self.inputs: dict[str, Input] = {}
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="editor"):
+            yield Label(f"[bold]Edit Model: {self.model_name}[/bold]")
+            yield Label("")
+            
+            for group_name, param_names in PARAM_GROUPS.items():
+                with Collapsible(title=group_name, collapsed=False):
+                    for param in param_names:
+                        value = self.params.get(param, "")
+                        yield Label(f"[cyan]{param}[/cyan]")
+                        inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
+                        self.inputs[param] = inp
+                        yield inp
+            
+            yield Label("")
+            with Horizontal():
+                yield Button("Save", variant="success", id="save")
+                yield Button("Cancel", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            # Collect values
+            new_params = {}
+            for param, inp in self.inputs.items():
+                val = inp.value.strip()
+                # Try to convert to number
+                if val and val.lstrip('-').replace('.', '').isdigit():
+                    try:
+                        if '.' in val:
+                            new_params[param] = float(val)
+                        else:
+                            new_params[param] = int(val)
+                    except ValueError:
+                        new_params[param] = val
+                else:
+                    new_params[param] = val
+            
+            self.dismiss(new_params)
+
+
+class CreateModelDialog(ModalScreen[tuple[str, str] | None]):
+    """Dialog to create a new model (name + clone from)."""
+
+    def __init__(self, registry: Registry):
+        super().__init__()
+        self.registry = registry
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="create-dialog"):
+            yield Label("[bold]Create New Model[/bold]")
+            yield Label("")
+            yield Label("Name:")
+            yield Input(placeholder="my-model", id="name")
+            yield Label("")
+            yield Label("Clone from:")
+            options = [(name, name) for name in self.registry.models.keys()]
+            yield Select(options, id="clone_from", value=options[0][1] if options else None)
+            yield Label("")
+            with Horizontal():
+                yield Button("Create", variant="success", id="create")
+                yield Button("Cancel", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "create":
+            name = self.query_one("#name", Input).value.strip()
+            clone_from = self.query_one("#clone_from", Select).value
+            if not name:
+                self.app.notify("Name cannot be empty", severity="error")
+                return
+            if name in self.registry.models:
+                self.app.notify(f"Model '{name}' already exists", severity="error")
+                return
+            self.dismiss((name, clone_from))
 
 
 class LLMServeApp(App):
@@ -154,35 +283,50 @@ class LLMServeApp(App):
     #status { height: auto; max-height: 22; border-bottom: solid $secondary; padding: 0 1; }
     #config { height: 1fr; padding: 0 1; }
     #logs { height: 12; border-top: solid $secondary; }
+    
+    #editor { 
+        width: 80; 
+        height: 90%; 
+        background: $surface; 
+        border: thick $primary;
+        padding: 1 2;
+    }
+    
+    #confirm-dialog {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $error;
+        padding: 1 2;
+        align: center middle;
+    }
+    
+    #create-dialog {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+        align: center middle;
+    }
+    
+    Button { margin: 0 1; }
+    Input { margin: 0 0 1 0; }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("l", "launch", "Launch"),
         Binding("s", "stop", "Stop"),
         Binding("r", "refresh", "Refresh"),
+        Binding("e", "edit", "Edit"),
+        Binding("n", "new", "New"),
+        Binding("d", "delete", "Delete"),
         Binding("f1", "help", "Help"),
     ]
 
-    def action_help(self) -> None:
-        self.notify(
-            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | R: refresh | Q: quit",
-            title="Help", timeout=10,
-        )
-
-    def notify(self, message: str, *, title: str = "", severity: str = "information",
-               timeout: float | None = None, **kwargs):
-        # Older Textual: no timeout kwarg — drop it.
-        if timeout is not None:
-            try:
-                return super().notify(message, title=title, severity=severity,
-                                      timeout=timeout, **kwargs)
-            except TypeError:
-                pass
-        return super().notify(message, title=title, severity=severity, **kwargs)
-
     def __init__(self):
         super().__init__()
-        self.registry = parse_models_conf(MODELS_CONF)
+        self.registry = load_registry(MODELS_JSON)
         self.client: ServerClient | None = None
         self._launch_time: float | None = None
         self._log_size: int = 0
@@ -246,6 +390,15 @@ class LLMServeApp(App):
             self._log_size = size
             self.query_one(LogPanel).tail_file(LOG_FILE)
 
+    def _reload_registry(self) -> None:
+        """Reload models.json and refresh UI."""
+        self.registry = load_registry(MODELS_JSON)
+        tree = self.query_one(ModelTree)
+        tree.registry = self.registry
+        tree.refresh_tree()
+        cfg = self.query_one(ConfigPanel)
+        cfg.registry = self.registry
+
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         node: TreeNode = event.node
         cfg = self.query_one(ConfigPanel)
@@ -276,14 +429,14 @@ class LLMServeApp(App):
             return
         try:
             r = subprocess.run(
-                [str(REPO_ROOT / "llm-serve"), model, "--no-hermes"],
+                [str(REPO_ROOT / "llm-serve"), model],
                 capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
             )
             if r.returncode == 0:
                 self.notify(f"Launched {model}")
             else:
                 self.notify(f"Launch failed: {r.stderr.strip()[:200]}", severity="error")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.notify(f"Launch error: {e}", severity="error")
         self._refresh_pid()
 
@@ -292,14 +445,82 @@ class LLMServeApp(App):
             r = subprocess.run([str(REPO_ROOT / "llm-serve"), "stop"],
                                capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
             self.notify("Stopped" if r.returncode == 0 else f"Stop: {r.stdout.strip()[:100]}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             self.notify(f"Stop error: {e}", severity="error")
         self._refresh_pid()
 
     def action_refresh(self) -> None:
+        self._reload_registry()
         self._refresh_pid()
         self._poll_gpu()
         self._poll_log()
+        self.notify("Refreshed")
+
+    def action_edit(self) -> None:
+        model = self._selected_model()
+        if not model:
+            self.notify("Select a model first", severity="warning")
+            return
+        if model not in self.registry.models:
+            self.notify(f"Model '{model}' not found", severity="error")
+            return
+        
+        cfg = self.registry.models[model]
+        
+        def handle_result(result: dict | None) -> None:
+            if result is not None:
+                update_model(MODELS_JSON, model, result)
+                self._reload_registry()
+                self.notify(f"Saved {model}")
+        
+        self.push_screen(ModelEditor(model, cfg.params, self.registry), handle_result)
+
+    def action_new(self) -> None:
+        def handle_result(result: tuple[str, str] | None) -> None:
+            if result is not None:
+                name, clone_from = result
+                base_params = dict(self.registry.models[clone_from].params)
+                create_model(MODELS_JSON, name, base_params)
+                self._reload_registry()
+                self.notify(f"Created {name} (cloned from {clone_from})")
+        
+        self.push_screen(CreateModelDialog(self.registry), handle_result)
+
+    def action_delete(self) -> None:
+        model = self._selected_model()
+        if not model:
+            self.notify("Select a model first", severity="warning")
+            return
+        
+        # Check for aliases pointing to this model
+        aliases_using = [a for a, t in self.registry.aliases.items() if t == model]
+        msg = f"Delete model '{model}'?"
+        if aliases_using:
+            msg += f"\n\nWarning: aliases using this model: {', '.join(aliases_using)}"
+        
+        def handle_result(confirmed: bool) -> None:
+            if confirmed:
+                delete_model(MODELS_JSON, model)
+                self._reload_registry()
+                self.notify(f"Deleted {model}")
+        
+        self.push_screen(ConfirmDialog(msg), handle_result)
+
+    def action_help(self) -> None:
+        self.notify(
+            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | R: refresh | Q: quit",
+            title="Help", timeout=10,
+        )
+
+    def notify(self, message: str, *, title: str = "", severity: str = "information",
+               timeout: float | None = None, **kwargs):
+        if timeout is not None:
+            try:
+                return super().notify(message, title=title, severity=severity,
+                                      timeout=timeout, **kwargs)
+            except TypeError:
+                pass
+        return super().notify(message, title=title, severity=severity, **kwargs)
 
 
 def main() -> None:
