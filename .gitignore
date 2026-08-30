@@ -26,3 +26,6 @@ Thumbs.db
 *.swp
 *~
 .vscode/
+.venv/
+llama.cpp/
+presets.json

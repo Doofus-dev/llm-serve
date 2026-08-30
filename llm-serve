@@ -164,6 +164,20 @@ do_stop() {
         # ── Stop ALL running servers ──
         local pids
         pids=$(pgrep -x llama-server 2>/dev/null || true)
+        # Fallback: PID file (handles wrappers/renamed binaries pgrep can't see)
+        if [[ -z "$pids" && -f "$PID_FILE" ]]; then
+            local fpid
+            read -r fpid _ < "$PID_FILE"
+            if check_pid "$fpid"; then
+                echo "Stopping PID $fpid (from PID file)..."
+                kill -TERM "$fpid" 2>/dev/null || true
+                sleep 2
+                check_pid "$fpid" && kill -9 "$fpid" 2>/dev/null || true
+                echo "Server stopped"
+            fi
+            rm -f "$PID_FILE"
+            return 0
+        fi
         if [[ -z "$pids" ]]; then
             echo "No llama-server processes running"
             rm -f "$PID_FILE"
@@ -865,6 +879,10 @@ _append_server_arg SERVER_ARGS --frequency-penalty "${FREQUENCY_PENALTY}"
 _append_server_arg SERVER_ARGS --reasoning-format "${REASONING_FORMAT}"
 _append_server_arg SERVER_ARGS --reasoning-budget "${REASONING_BUDGET}"
 
+# Prometheus metrics endpoint (GET /metrics). On by default for TUI monitoring.
+METRICS="${METRICS:-$(m_get "${MODEL}" metrics on)}"
+_append_server_bool SERVER_ARGS --metrics --no-metrics "${METRICS}"
+
 case "${THINKING}" in
     off) SERVER_ARGS+=(--reasoning off) ;;
     on)  SERVER_ARGS+=(--reasoning on) ;;
@@ -938,6 +956,8 @@ else
 
     nohup "${LLAMA_SERVER}" "${SERVER_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
     bg_pid=$!
+
+    echo "── $(date '+%Y-%m-%d %H:%M:%S') launch: ${MODEL} (PID ${bg_pid}) ──" >> "$LOG_FILE"
 
     write_pid "$bg_pid" "$MODEL" "$PORT"
 

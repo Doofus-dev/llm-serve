@@ -316,6 +316,9 @@ if [[ -d "${LLAMA_DIR}/.git" ]]; then
 else
     if [[ -d "${LLAMA_DIR}" ]]; then
         warn "Directory ${LLAMA_DIR} exists but is not a git repo. Skipping clone."
+        echo "    llama-server needs the llama.cpp source tree to build."
+        echo "    Remove it and re-run setup:  rm -rf ${LLAMA_DIR} && ./setup.sh"
+        exit 1
     else
         info "Cloning llama.cpp..."
         git clone https://github.com/ggml-org/llama.cpp.git "${LLAMA_DIR}"
