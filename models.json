@@ -133,6 +133,6 @@
   },
   "aliases": {
     "default": "qwen25",
-    "coding": "qwen36-deep"
+    "coding": "qwen36"
   }
 }

@@ -245,6 +245,12 @@ class ModelEditor(VerticalScroll):
         
         self.on_save_callback(new_params)
 
+    def on_mount(self) -> None:
+        """Focus the first input when the editor mounts."""
+        first_input = next(iter(self.inputs.values()), None)
+        if first_input:
+            first_input.focus()
+
     def on_key(self, event) -> None:
         """Handle Ctrl+S and Esc."""
         if event.key == "ctrl+s":
@@ -325,6 +331,10 @@ class AliasEditor(VerticalScroll):
     def save(self) -> None:
         target = self.query_one("#target_model", Select).value
         self.on_save_callback(target)
+
+    def on_mount(self) -> None:
+        """Focus the dropdown when the editor mounts."""
+        self.query_one("#target_model", Select).focus()
 
     def on_key(self, event) -> None:
         if event.key == "ctrl+s":
@@ -661,7 +671,6 @@ class LLMServeApp(App):
         self._editor_widget = editor
         self._editor_mode = True
         self._update_footer()
-        editor.focus()
 
     def _edit_alias(self, alias_name: str, current_target: str) -> None:
         """Edit an alias."""
@@ -687,7 +696,6 @@ class LLMServeApp(App):
         self._alias_editor_widget = editor
         self._alias_editor_mode = True
         self._update_footer()
-        editor.focus()
 
     def _exit_editor(self) -> None:
         """Exit editor mode and restore normal view."""
