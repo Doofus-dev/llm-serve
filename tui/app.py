@@ -292,6 +292,86 @@ class CreateModelDialog(ModalScreen[tuple[str, str] | None]):
             self.dismiss((name, clone_from))
 
 
+class AliasEditor(VerticalScroll):
+    """Editor panel for an alias (takes over right side)."""
+
+    def __init__(self, alias_name: str, current_target: str, registry: Registry, on_save, on_cancel):
+        super().__init__()
+        self.alias_name = alias_name
+        self.current_target = current_target
+        self.registry = registry
+        self.on_save_callback = on_save
+        self.on_cancel_callback = on_cancel
+
+    def compose(self) -> ComposeResult:
+        yield Label(f"[bold]Edit Alias: {self.alias_name}[/bold]  (Ctrl+S: save, Esc: cancel)")
+        yield Label("")
+        yield Label("[cyan]Points to model:[/cyan]")
+        
+        options = [(name, name) for name in self.registry.models.keys()]
+        yield Select(options, id="target_model", value=self.current_target)
+        
+        yield Label("")
+        with Horizontal():
+            yield Button("Save", variant="success", id="save")
+            yield Button("Cancel", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.on_cancel_callback()
+        elif event.button.id == "save":
+            self.save()
+
+    def save(self) -> None:
+        target = self.query_one("#target_model", Select).value
+        self.on_save_callback(target)
+
+    def on_key(self, event) -> None:
+        if event.key == "ctrl+s":
+            event.prevent_default()
+            self.save()
+        elif event.key == "escape":
+            event.prevent_default()
+            self.on_cancel_callback()
+
+
+class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
+    """Dialog to create a new alias."""
+
+    def __init__(self, registry: Registry):
+        super().__init__()
+        self.registry = registry
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="create-dialog"):
+            yield Label("[bold]Create New Alias[/bold]")
+            yield Label("")
+            yield Label("Alias name:")
+            yield Input(placeholder="fast", id="name")
+            yield Label("")
+            yield Label("Points to model:")
+            options = [(name, name) for name in self.registry.models.keys()]
+            yield Select(options, id="target", value=options[0][1] if options else None)
+            yield Label("")
+            with Horizontal():
+                yield Button("Create", variant="success", id="create")
+                yield Button("Cancel", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "create":
+            name = self.query_one("#name", Input).value.strip()
+            target = self.query_one("#target", Select).value
+            if not name:
+                self.app.notify("Name cannot be empty", severity="error")
+                return
+            if name in self.registry.aliases:
+                self.app.notify(f"Alias '{name}' already exists", severity="error")
+                return
+            self.dismiss((name, target))
+
+
 class LLMServeApp(App):
     TITLE = "llm-serve TUI"
     CSS = """
@@ -381,6 +461,8 @@ class LLMServeApp(App):
         self._log_size: int = 0
         self._editor_mode: bool = False
         self._editor_widget: ModelEditor | None = None
+        self._alias_editor_mode: bool = False
+        self._alias_editor_widget: AliasEditor | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -392,6 +474,26 @@ class LLMServeApp(App):
                 yield ConfigPanel(id="config")
                 yield LogPanel(id="logs")
         yield Footer()
+
+    def _update_footer(self) -> None:
+        """Update footer bindings based on mode."""
+        if self._editor_mode or self._alias_editor_mode:
+            self.bindings = [
+                Binding("ctrl+s", "save_edit", "Save"),
+                Binding("escape", "cancel_edit", "Cancel"),
+            ]
+        else:
+            self.bindings = [
+                Binding("q", "quit", "Quit"),
+                Binding("l", "launch", "Launch"),
+                Binding("s", "stop", "Stop"),
+                Binding("r", "refresh", "Refresh"),
+                Binding("e", "edit", "Edit"),
+                Binding("n", "new", "New"),
+                Binding("d", "delete", "Delete"),
+                Binding("f1", "help", "Help"),
+            ]
+        self.query_one(Footer).refresh()
 
     def on_mount(self) -> None:
         tree = self.query_one(ModelTree)
@@ -405,6 +507,7 @@ class LLMServeApp(App):
         self.set_interval(5.0, self._poll_gpu)
         self.set_interval(3.0, self._poll_log)
         self.query_one(LogPanel).tail_file(LOG_FILE)
+        self._update_footer()
 
     def _refresh_pid(self) -> None:
         info = read_pid_file(PID_FILE)
@@ -508,10 +611,25 @@ class LLMServeApp(App):
         self.notify("Refreshed")
 
     def action_edit(self) -> None:
-        if self._editor_mode:
+        if self._editor_mode or self._alias_editor_mode:
             self.notify("Already in edit mode", severity="warning")
             return
         
+        tree = self.query_one(ModelTree)
+        node = tree.cursor_node
+        if node is None:
+            self.notify("Select a model or alias first", severity="warning")
+            return
+        
+        # Check if it's an alias
+        if node.data and node.data[0] == "alias":
+            alias_name = node.data[1]
+            target = self.registry.aliases.get(alias_name)
+            if target:
+                self._edit_alias(alias_name, target)
+            return
+        
+        # Otherwise it's a model
         model = self._selected_model()
         if not model:
             self.notify("Select a model first", severity="warning")
@@ -542,6 +660,33 @@ class LLMServeApp(App):
         right.mount(editor)
         self._editor_widget = editor
         self._editor_mode = True
+        self._update_footer()
+        editor.focus()
+
+    def _edit_alias(self, alias_name: str, current_target: str) -> None:
+        """Edit an alias."""
+        def on_save(new_target: str) -> None:
+            self.registry.aliases[alias_name] = new_target
+            save_registry(MODELS_JSON, self.registry)
+            self._reload_registry()
+            self._exit_alias_editor()
+            self.notify(f"Saved alias {alias_name} → {new_target}")
+        
+        def on_cancel() -> None:
+            self._exit_alias_editor()
+            self.notify("Edit cancelled")
+        
+        # Hide status/config/logs, show editor
+        self.query_one("#status").display = False
+        self.query_one("#config").display = False
+        self.query_one("#logs").display = False
+        
+        editor = AliasEditor(alias_name, current_target, self.registry, on_save, on_cancel)
+        right = self.query_one("#right")
+        right.mount(editor)
+        self._alias_editor_widget = editor
+        self._alias_editor_mode = True
+        self._update_footer()
         editor.focus()
 
     def _exit_editor(self) -> None:
@@ -553,20 +698,87 @@ class LLMServeApp(App):
         self.query_one("#config").display = True
         self.query_one("#logs").display = True
         self._editor_mode = False
+        self._update_footer()
         self.query_one(ModelTree).focus()
 
+    def _exit_alias_editor(self) -> None:
+        """Exit alias editor mode and restore normal view."""
+        if self._alias_editor_widget:
+            self._alias_editor_widget.remove()
+            self._alias_editor_widget = None
+        self.query_one("#status").display = True
+        self.query_one("#config").display = True
+        self.query_one("#logs").display = True
+        self._alias_editor_mode = False
+        self._update_footer()
+        self.query_one(ModelTree).focus()
+
+    def action_save_edit(self) -> None:
+        """Save current editor (called by Ctrl+S binding)."""
+        if self._editor_widget:
+            self._editor_widget.save()
+        elif self._alias_editor_widget:
+            self._alias_editor_widget.save()
+
+    def action_cancel_edit(self) -> None:
+        """Cancel current editor (called by Esc binding)."""
+        if self._editor_widget:
+            self._exit_editor()
+            self.notify("Edit cancelled")
+        elif self._alias_editor_widget:
+            self._exit_alias_editor()
+            self.notify("Edit cancelled")
+
     def action_new(self) -> None:
-        def handle_result(result: tuple[str, str] | None) -> None:
-            if result is not None:
-                name, clone_from = result
-                base_params = dict(self.registry.models[clone_from].params)
-                create_model(MODELS_JSON, name, base_params)
-                self._reload_registry()
-                self.notify(f"Created {name} (cloned from {clone_from})")
-        
-        self.push_screen(CreateModelDialog(self.registry), handle_result)
+        # Check if an alias is selected
+        tree = self.query_one(ModelTree)
+        node = tree.cursor_node
+        if node and node.data and node.data[0] == "alias":
+            # Create new alias
+            def handle_alias_result(result: tuple[str, str] | None) -> None:
+                if result is not None:
+                    name, target = result
+                    self.registry.aliases[name] = target
+                    save_registry(MODELS_JSON, self.registry)
+                    self._reload_registry()
+                    self.notify(f"Created alias {name} → {target}")
+            
+            self.push_screen(CreateAliasDialog(self.registry), handle_alias_result)
+        else:
+            # Create new model
+            def handle_model_result(result: tuple[str, str] | None) -> None:
+                if result is not None:
+                    name, clone_from = result
+                    base_params = dict(self.registry.models[clone_from].params)
+                    create_model(MODELS_JSON, name, base_params)
+                    self._reload_registry()
+                    self.notify(f"Created {name} (cloned from {clone_from})")
+            
+            self.push_screen(CreateModelDialog(self.registry), handle_model_result)
 
     def action_delete(self) -> None:
+        tree = self.query_one(ModelTree)
+        node = tree.cursor_node
+        if node is None:
+            self.notify("Select a model or alias first", severity="warning")
+            return
+        
+        # Check if it's an alias
+        if node.data and node.data[0] == "alias":
+            alias_name = node.data[1]
+            msg = f"Delete alias '{alias_name}'?"
+            
+            def handle_alias_confirm(confirmed: bool) -> None:
+                if confirmed:
+                    del self.registry.aliases[alias_name]
+                    save_registry(MODELS_JSON, self.registry)
+                    self._reload_registry()
+                    self.notify(f"Deleted alias {alias_name}")
+            
+            self.push_screen(ConfirmDialog(msg), handle_alias_confirm)
+            return
+        
+        # Otherwise it's a model
         model = self._selected_model()
         if not model:
             self.notify("Select a model first", severity="warning")
@@ -578,13 +790,13 @@ class LLMServeApp(App):
         if aliases_using:
             msg += f"\n\nWarning: aliases using this model: {', '.join(aliases_using)}"
         
-        def handle_result(confirmed: bool) -> None:
+        def handle_model_confirm(confirmed: bool) -> None:
             if confirmed:
                 delete_model(MODELS_JSON, model)
                 self._reload_registry()
                 self.notify(f"Deleted {model}")
         
-        self.push_screen(ConfirmDialog(msg), handle_result)
+        self.push_screen(ConfirmDialog(msg), handle_model_confirm)
 
     def action_help(self) -> None:
         self.notify(
