@@ -203,12 +203,17 @@ class ModelEditor(VerticalScroll):
         
         for group_name, param_names in PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
-                for param in param_names:
-                    value = self.params.get(param, "")
-                    yield Label(f"[cyan]{param}[/cyan]")
-                    inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
-                    self.inputs[param] = inp
-                    yield inp
+                # Group params into rows of 3
+                for i in range(0, len(param_names), 3):
+                    row_params = param_names[i:i+3]
+                    with Horizontal():
+                        for param in row_params:
+                            value = self.params.get(param, "")
+                            with Vertical(classes="param-field"):
+                                yield Label(f"[cyan]{param}[/cyan]")
+                                inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
+                                self.inputs[param] = inp
+                                yield inp
         
         yield Label("")
         with Horizontal():
@@ -297,12 +302,9 @@ class LLMServeApp(App):
     #config { height: 1fr; padding: 0 1; }
     #logs { height: 12; border-top: solid $secondary; }
     
-    #editor { 
-        width: 80; 
-        height: 90%; 
-        background: $surface; 
-        border: thick $primary;
-        padding: 1 2;
+    .param-field {
+        width: 1fr;
+        margin: 0 1;
     }
     
     #confirm-dialog {
@@ -496,13 +498,14 @@ class LLMServeApp(App):
             self._exit_editor()
             self.notify("Edit cancelled")
         
-        # Hide status/config, show editor
+        # Hide status/config/logs, show editor
         self.query_one("#status").display = False
         self.query_one("#config").display = False
+        self.query_one("#logs").display = False
         
         editor = ModelEditor(model, cfg.params, self.registry, on_save, on_cancel)
         right = self.query_one("#right")
-        right.mount(editor, before="#logs")
+        right.mount(editor)
         self._editor_widget = editor
         self._editor_mode = True
         editor.focus()
@@ -514,6 +517,7 @@ class LLMServeApp(App):
             self._editor_widget = None
         self.query_one("#status").display = True
         self.query_one("#config").display = True
+        self.query_one("#logs").display = True
         self._editor_mode = False
         self.query_one(ModelTree).focus()
 
