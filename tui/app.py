@@ -305,6 +305,40 @@ class LLMServeApp(App):
     .param-field {
         width: 1fr;
         margin: 0 1;
+        height: 4;
+    }
+    
+    .param-field Label {
+        height: 1;
+        padding: 0;
+        margin: 0;
+    }
+    
+    .param-field Input {
+        height: 3;
+        margin: 0;
+        padding: 0 1;
+    }
+    
+    Collapsible {
+        padding: 0;
+        margin: 0;
+        height: auto;
+    }
+    
+    Collapsible > .collapsible--title {
+        padding: 0;
+        margin: 0;
+        height: 1;
+    }
+    
+    Collapsible > .collapsible--content {
+        padding: 0;
+        margin: 0;
+    }
+    
+    Horizontal {
+        height: auto;
     }
     
     #confirm-dialog {
