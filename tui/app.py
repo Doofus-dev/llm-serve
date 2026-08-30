@@ -185,56 +185,69 @@ class ConfirmDialog(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-class ModelEditor(ModalScreen[dict | None]):
-    """Modal form for editing a model's parameters."""
+class ModelEditor(VerticalScroll):
+    """Editor panel for a model's parameters (takes over right side)."""
 
-    def __init__(self, name: str, params: dict, registry: Registry):
+    def __init__(self, name: str, params: dict, registry: Registry, on_save, on_cancel):
         super().__init__()
         self.model_name = name
         self.params = dict(params)
         self.registry = registry
         self.inputs: dict[str, Input] = {}
+        self.on_save_callback = on_save
+        self.on_cancel_callback = on_cancel
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="editor"):
-            yield Label(f"[bold]Edit Model: {self.model_name}[/bold]")
-            yield Label("")
-            
-            for group_name, param_names in PARAM_GROUPS.items():
-                with Collapsible(title=group_name, collapsed=False):
-                    for param in param_names:
-                        value = self.params.get(param, "")
-                        yield Label(f"[cyan]{param}[/cyan]")
-                        inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
-                        self.inputs[param] = inp
-                        yield inp
-            
-            yield Label("")
-            with Horizontal():
-                yield Button("Save", variant="success", id="save")
-                yield Button("Cancel", variant="default", id="cancel")
+        yield Label(f"[bold]Edit Model: {self.model_name}[/bold]  (Ctrl+S: save, Esc: cancel)")
+        yield Label("")
+        
+        for group_name, param_names in PARAM_GROUPS.items():
+            with Collapsible(title=group_name, collapsed=False):
+                for param in param_names:
+                    value = self.params.get(param, "")
+                    yield Label(f"[cyan]{param}[/cyan]")
+                    inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
+                    self.inputs[param] = inp
+                    yield inp
+        
+        yield Label("")
+        with Horizontal():
+            yield Button("Save", variant="success", id="save")
+            yield Button("Cancel", variant="default", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
-            self.dismiss(None)
+            self.on_cancel_callback()
         elif event.button.id == "save":
-            # Collect values
-            new_params = {}
-            for param, inp in self.inputs.items():
-                val = inp.value.strip()
-                # Try to convert to number
-                if val and val.lstrip('-').replace('.', '').isdigit():
-                    try:
-                        if '.' in val:
-                            new_params[param] = float(val)
-                        else:
-                            new_params[param] = int(val)
-                    except ValueError:
-                        new_params[param] = val
-                else:
+            self.save()
+
+    def save(self) -> None:
+        """Collect values and call save callback."""
+        new_params = {}
+        for param, inp in self.inputs.items():
+            val = inp.value.strip()
+            # Try to convert to number
+            if val and val.lstrip('-').replace('.', '').isdigit():
+                try:
+                    if '.' in val:
+                        new_params[param] = float(val)
+                    else:
+                        new_params[param] = int(val)
+                except ValueError:
                     new_params[param] = val
-            
-            self.dismiss(new_params)
+            else:
+                new_params[param] = val
+        
+        self.on_save_callback(new_params)
+
+    def on_key(self, event) -> None:
+        """Handle Ctrl+S and Esc."""
+        if event.key == "ctrl+s":
+            event.prevent_default()
+            self.save()
+        elif event.key == "escape":
+            event.prevent_default()
+            self.on_cancel_callback()
 
 
 class CreateModelDialog(ModalScreen[tuple[str, str] | None]):
@@ -330,6 +343,8 @@ class LLMServeApp(App):
         self.client: ServerClient | None = None
         self._launch_time: float | None = None
         self._log_size: int = 0
+        self._editor_mode: bool = False
+        self._editor_widget: ModelEditor | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -457,6 +472,10 @@ class LLMServeApp(App):
         self.notify("Refreshed")
 
     def action_edit(self) -> None:
+        if self._editor_mode:
+            self.notify("Already in edit mode", severity="warning")
+            return
+        
         model = self._selected_model()
         if not model:
             self.notify("Select a model first", severity="warning")
@@ -467,13 +486,36 @@ class LLMServeApp(App):
         
         cfg = self.registry.models[model]
         
-        def handle_result(result: dict | None) -> None:
-            if result is not None:
-                update_model(MODELS_JSON, model, result)
-                self._reload_registry()
-                self.notify(f"Saved {model}")
+        def on_save(new_params: dict) -> None:
+            update_model(MODELS_JSON, model, new_params)
+            self._reload_registry()
+            self._exit_editor()
+            self.notify(f"Saved {model}")
         
-        self.push_screen(ModelEditor(model, cfg.params, self.registry), handle_result)
+        def on_cancel() -> None:
+            self._exit_editor()
+            self.notify("Edit cancelled")
+        
+        # Hide status/config, show editor
+        self.query_one("#status").display = False
+        self.query_one("#config").display = False
+        
+        editor = ModelEditor(model, cfg.params, self.registry, on_save, on_cancel)
+        right = self.query_one("#right")
+        right.mount(editor, before="#logs")
+        self._editor_widget = editor
+        self._editor_mode = True
+        editor.focus()
+
+    def _exit_editor(self) -> None:
+        """Exit editor mode and restore normal view."""
+        if self._editor_widget:
+            self._editor_widget.remove()
+            self._editor_widget = None
+        self.query_one("#status").display = True
+        self.query_one("#config").display = True
+        self._editor_mode = False
+        self.query_one(ModelTree).focus()
 
     def action_new(self) -> None:
         def handle_result(result: tuple[str, str] | None) -> None:
