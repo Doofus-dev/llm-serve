@@ -419,6 +419,20 @@ else
     ok "models.conf already exists (skipping)"
 fi
 
+MODELS_JSON="${SCRIPT_DIR}/models.json"
+MODELS_JSON_EXAMPLE="${SCRIPT_DIR}/models.json.example"
+
+if [[ ! -f "${MODELS_JSON}" ]]; then
+    if [[ -f "${MODELS_JSON_EXAMPLE}" ]]; then
+        cp "${MODELS_JSON_EXAMPLE}" "${MODELS_JSON}"
+        ok "Created models.json from example template"
+    else
+        warn "No models.json.example found. Create models.json manually or run migrate-to-json.py."
+    fi
+else
+    ok "models.json already exists (skipping)"
+fi
+
 # Make llm-serve executable
 chmod +x "${SCRIPT_DIR}/llm-serve"
 
