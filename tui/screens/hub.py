@@ -244,6 +244,7 @@ class HubScreen(Screen):
             yield Static(
                 "[dim]Leave filters blank for trending. Focus the list and press Enter "
                 "on a repo, then Enter on a GGUF file to download it. "
+                "Press B to go back to repos, or Esc to close the Hub. "
                 "[green]●[/] comfortable  [yellow]●[/] tight  "
                 "[yellow]⚠[/] marginal  [red]●[/] too large[/]",
                 id="hub-help",
@@ -358,8 +359,12 @@ class HubScreen(Screen):
         table.add_column("Quant / file", width=34, key="file")
         table.add_column("File size", width=11, key="size")
         table.add_column("Est. VRAM", width=22, key="vram")
-        for item in self.files:
-            estimate = classify_vram(estimate_vram_mb(item.size, self.context_tokens), self.gpu)
+        estimates = [
+            (item, classify_vram(estimate_vram_mb(item.size, self.context_tokens), self.gpu))
+            for item in self.files
+        ]
+        estimates.sort(key=lambda pair: pair[1].total_mb, reverse=True)
+        for item, estimate in estimates:
             if estimate.percent_available is None:
                 fit = "?"
             else:
