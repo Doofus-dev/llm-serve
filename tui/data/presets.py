@@ -63,7 +63,25 @@ class Preset:
 class PresetStore:
     """model_name -> {slot: Preset}"""
     presets: dict[str, dict[int, Preset]] = field(default_factory=dict)
-    active: tuple[str, int] | None = None  # (model_name, slot)
+    active: dict[str, int] = field(default_factory=dict)  # model_name -> slot
+
+
+def _parse_active(data: dict[str, Any]) -> dict[str, int]:
+    """Parse _active from presets.json (supports legacy global format)."""
+    active_raw = data.get("_active")
+    if not isinstance(active_raw, dict):
+        return {}
+
+    # Legacy: {"model": "qwen25", "slot": 1}
+    if "model" in active_raw and "slot" in active_raw:
+        model = active_raw.get("model")
+        slot = active_raw.get("slot")
+        if model and slot is not None:
+            return {model: int(slot)}
+        return {}
+
+    # Per-model: {"qwen25": 1, "qwen36": 2}
+    return {model: int(slot) for model, slot in active_raw.items()}
 
 
 def load_presets(path: Path) -> PresetStore:
@@ -73,13 +91,7 @@ def load_presets(path: Path) -> PresetStore:
 
     data = json.loads(path.read_text())
     store = PresetStore()
-
-    active = data.get("_active")
-    if isinstance(active, dict):
-        model = active.get("model")
-        slot = active.get("slot")
-        if model and slot is not None:
-            store.active = (model, int(slot))
+    store.active = _parse_active(data)
 
     for model_name, slots in data.items():
         if model_name.startswith("_"):
@@ -93,11 +105,12 @@ def load_presets(path: Path) -> PresetStore:
                 overrides=preset_data.get("overrides", {})
             )
 
-    # Drop active if the preset was deleted or model removed
-    if store.active:
-        model, slot = store.active
-        if get_preset(store, model, slot) is None:
-            store.active = None
+    # Drop stale active entries
+    store.active = {
+        model: slot
+        for model, slot in store.active.items()
+        if get_preset(store, model, slot) is not None
+    }
 
     return store
 
@@ -106,8 +119,7 @@ def save_presets(path: Path, store: PresetStore) -> None:
     """Save presets to presets.json."""
     data: dict[str, Any] = {}
     if store.active:
-        model, slot = store.active
-        data["_active"] = {"model": model, "slot": slot}
+        data["_active"] = {model: slot for model, slot in sorted(store.active.items())}
     for model_name, slots in store.presets.items():
         data[model_name] = {}
         for slot, preset in slots.items():
@@ -119,14 +131,19 @@ def save_presets(path: Path, store: PresetStore) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def get_active_slot(store: PresetStore, model: str) -> int | None:
+    """Get the active preset slot for a model, if any."""
+    return store.active.get(model)
+
+
 def set_active_preset(store: PresetStore, model: str, slot: int) -> None:
     """Mark a preset as active for its model."""
-    store.active = (model, slot)
+    store.active[model] = slot
 
 
-def clear_active_preset(store: PresetStore) -> None:
-    """Clear the active preset selection."""
-    store.active = None
+def clear_active_preset(store: PresetStore, model: str) -> None:
+    """Clear the active preset for a model."""
+    store.active.pop(model, None)
 
 
 def get_preset(store: PresetStore, model: str, slot: int) -> Preset | None:

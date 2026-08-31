@@ -24,7 +24,7 @@ from textual.message import Message
 
 from tui.data.models_json import Registry, ModelConfig, load_registry, save_registry, delete_model, create_model, update_model
 from tui.data.param_help import get_param_help, load_param_help
-from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
+from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, get_active_slot, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
@@ -175,11 +175,10 @@ def fmt_model_runtime_line(params: dict) -> str:
 class ModelTree(Tree):
     """Left panel: models, presets, and aliases."""
 
-    def __init__(self, registry: Registry, preset_store: PresetStore, active_preset: tuple[str, int] | None = None):
+    def __init__(self, registry: Registry, preset_store: PresetStore):
         super().__init__("Models")
         self.registry = registry
         self.preset_store = preset_store
-        self.active_preset = active_preset
         self.show_root = False
 
     def on_mount(self) -> None:
@@ -199,7 +198,7 @@ class ModelTree(Tree):
                 for slot in sorted(self.preset_store.presets[name].keys()):
                     preset = self.preset_store.presets[name][slot]
                     label = f"[{slot}] {preset.name}"
-                    if self.active_preset == (name, slot):
+                    if self.preset_store.active.get(name) == slot:
                         label += " [ACTIVE]"
                     node.add_leaf(label, data=("preset", name, slot))
         
@@ -762,7 +761,7 @@ class LLMServeApp(App):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield ModelTree(self.registry, self.preset_store, self.preset_store.active)
+                yield ModelTree(self.registry, self.preset_store)
             with Vertical(id="right"):
                 yield StatusPanel(id="status")
                 yield ConfigPanel(id="config")
@@ -846,7 +845,6 @@ class LLMServeApp(App):
         tree = self.query_one(ModelTree)
         tree.registry = self.registry
         tree.preset_store = self.preset_store
-        tree.active_preset = self.preset_store.active
         tree.refresh_tree()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
@@ -882,8 +880,8 @@ class LLMServeApp(App):
         
         # Check if we have an active preset for this model
         env_overrides = {}
-        if self.preset_store.active and self.preset_store.active[0] == model:
-            _, slot = self.preset_store.active
+        slot = get_active_slot(self.preset_store, model)
+        if slot is not None:
             preset = get_preset(self.preset_store, model, slot)
             if preset:
                 env_overrides = overrides_to_env(preset.overrides)
@@ -1156,7 +1154,7 @@ class LLMServeApp(App):
             pid_info = read_pid_file(PID_FILE)
             if pid_info and pid_info.alive and pid_info.model == model_name:
                 # Check if this preset is active
-                if self.preset_store.active == (model_name, slot):
+                if self.preset_store.active.get(model_name) == slot:
                     self.notify(f"Cannot delete preset while server is running with it", severity="error")
                     return
             
@@ -1165,8 +1163,8 @@ class LLMServeApp(App):
             def handle_preset_confirm(confirmed: bool) -> None:
                 if confirmed:
                     delete_preset(self.preset_store, model_name, slot)
-                    if self.preset_store.active == (model_name, slot):
-                        clear_active_preset(self.preset_store)
+                    if self.preset_store.active.get(model_name) == slot:
+                        clear_active_preset(self.preset_store, model_name)
                     save_presets(PRESETS_JSON, self.preset_store)
                     self._reload_registry()
                     self.notify(f"Deleted preset {model_name} [{slot}]")
@@ -1207,8 +1205,7 @@ class LLMServeApp(App):
                 # Also delete all presets for this model
                 if model in self.preset_store.presets:
                     del self.preset_store.presets[model]
-                if self.preset_store.active and self.preset_store.active[0] == model:
-                    clear_active_preset(self.preset_store)
+                clear_active_preset(self.preset_store, model)
                 save_presets(PRESETS_JSON, self.preset_store)
                 self._reload_registry()
                 self.notify(f"Deleted {model}")
