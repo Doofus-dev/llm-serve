@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,24 +53,38 @@ def _try_rocm() -> GPUStats | None:
         if r.returncode != 0:
             return None
         stats = GPUStats(name="AMD GPU", available=True)
-        for line in r.stdout.splitlines():
-            cols = [c.strip() for c in line.split(",")]
-            if len(cols) < 2 or "GPU use" in line:
-                continue
-            low = line.lower()
-            if "gpu use (%)" in low:
-                stats.utilization_pct = float(cols[-1])
-            elif "vram total memory (b)" in low:
-                stats.vram_total_mb = float(cols[-1]) / 1e6
-            elif "vram total used memory (b)" in low:
-                stats.vram_used_mb = float(cols[-1]) / 1e6
-            elif "edge" in low or "junction" in low:
-                try:
-                    stats.temp_c = float(cols[-1])
-                except ValueError:
-                    pass
+        rows = list(csv.reader(line for line in r.stdout.splitlines() if line.strip()))
+        header_index = next(
+            (
+                index for index, row in enumerate(rows)
+                if any("vram total memory (b)" in cell.lower() for cell in row)
+            ),
+            None,
+        )
+        if header_index is not None and header_index + 1 < len(rows):
+            header = [cell.strip().lower() for cell in rows[header_index]]
+            values = [cell.strip() for cell in rows[header_index + 1]]
+            try:
+                total_index = header.index("vram total memory (b)")
+                used_index = header.index("vram total used memory (b)")
+                stats.vram_total_mb = float(values[total_index]) / 1e6
+                stats.vram_used_mb = float(values[used_index]) / 1e6
+            except (ValueError, IndexError):
+                pass
+            try:
+                utilization_index = header.index("gpu use (%)")
+                stats.utilization_pct = float(values[utilization_index])
+            except (ValueError, IndexError):
+                pass
+            for index, cell in enumerate(header):
+                if ("temperature" in cell or "edge" in cell or "junction" in cell):
+                    try:
+                        stats.temp_c = float(values[index])
+                    except (ValueError, IndexError):
+                        pass
+                    break
         return stats
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, csv.Error):
         pass
 
     # sysfs fallback for AMD

@@ -24,6 +24,7 @@ class HubRepo:
     likes: int
     trending_score: int | None = None
     size: int = 0
+    context_length: int | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> HubRepo:
@@ -40,6 +41,11 @@ class HubRepo:
                 or 0
             ),
             trending_score=int(data["trending_score"]) if data.get("trending_score") is not None else None,
+            context_length=(
+                int((data.get("gguf") or {}).get("context_length"))
+                if (data.get("gguf") or {}).get("context_length") is not None
+                else None
+            ),
         )
 
 

@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, RichLog, Select, Static
 from textual.worker import Worker, WorkerState
+from rich.text import Text
 
 from tui.data.hf import (
     HF_INSTALL_HINT,
@@ -31,6 +32,8 @@ from tui.data.hf import (
 )
 from tui.data.models_json import Registry, create_downloaded_model, load_registry
 from tui.data.settings import TUISettings, remember_hf_author, save_settings
+from tui.data.gpu import GPUStats, query_gpu
+from tui.data.vram import classify_vram, estimate_vram_mb, fmt_memory_mb, status_symbol
 
 
 class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
@@ -97,8 +100,11 @@ class HubScreen(Screen):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
+        Binding("b", "back", "Back"),
         Binding("r", "refresh", "Refresh"),
         Binding("f", "focus_filters", "Focus filters"),
+        Binding("left", "context_prev", "Previous context"),
+        Binding("right", "context_next", "Next context"),
     ]
 
     CSS = """
@@ -107,7 +113,8 @@ class HubScreen(Screen):
     }
 
     #hub-panel {
-        width: 95%;
+        width: 85%;
+        max-width: 100;
         height: 100%;
         border: thick $primary;
         background: $surface;
@@ -123,6 +130,28 @@ class HubScreen(Screen):
         height: 1fr;
         min-height: 5;
         border: solid $accent;
+    }
+
+    #context-controls {
+        height: 3;
+        align: left middle;
+    }
+
+    #context-label {
+        width: auto;
+        content-align: left middle;
+        margin: 0 1 0 0;
+    }
+
+    #context-value {
+        width: 8;
+        content-align: center middle;
+    }
+
+    #hardware-summary {
+        width: 1fr;
+        content-align: left middle;
+        margin: 0 1;
     }
 
     #hub-log {
@@ -181,6 +210,9 @@ class HubScreen(Screen):
         self.selected_repo: HubRepo | None = None
         self.mode = "repos"
         self._busy = False
+        self.gpu = GPUStats()
+        self.context_tokens = 65_536
+        self.context_options: list[int] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
@@ -201,19 +233,28 @@ class HubScreen(Screen):
                     yield Button("Back", id="back")
                     yield Button("Open / download", variant="success", id="select")
                     yield Button("Close", id="close")
+            with Horizontal(id="context-controls"):
+                yield Label("Context:", id="context-label")
+                yield Button("◀", id="context-prev")
+                yield Static("64K", id="context-value")
+                yield Button("▶", id="context-next")
+                yield Static("", id="hardware-summary")
             yield DataTable(id="hub-table", cursor_type="row")
             yield RichLog(id="hub-log", highlight=True, markup=True)
             yield Static(
                 "[dim]Leave filters blank for trending. Focus the list and press Enter "
-                "on a repo, then Enter on a GGUF file to download it.[/]",
+                "on a repo, then Enter on a GGUF file to download it. "
+                "[green]●[/] comfortable  [yellow]●[/] tight  "
+                "[yellow]⚠[/] marginal  [red]●[/] too large[/]",
                 id="hub-help",
             )
 
     def on_mount(self) -> None:
         table = self.query_one("#hub-table", DataTable)
-        table.add_columns("Repo / File", "Downloads", "Size", "Extra")
         self._refresh_author_preset_options()
         self._update_auth_status()
+        self.gpu = query_gpu()
+        self._update_context_options()
         self.query_one("#hub-table", DataTable).focus()
         self._load_repos("", "")
 
@@ -253,20 +294,84 @@ class HubScreen(Screen):
         self.selected_repo = repo
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
+        self._update_context_options(repo.context_length)
         self._load_files(repo)
+
+    def _update_context_options(self, model_max: int | None = None) -> None:
+        """Set doubling context stops, capped at the model's limit."""
+        maximum = model_max or 65_536
+        stops = [32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576]
+        self.context_options = [value for value in stops if value <= maximum]
+        if maximum >= 32_768 and maximum not in self.context_options:
+            self.context_options.append(maximum)
+        if not self.context_options:
+            self.context_options = [maximum]
+        self.context_tokens = min(65_536, self.context_options[-1])
+        self._render_context_controls()
+        if self.mode == "files":
+            self._render_file_table()
+
+    def _render_context_controls(self) -> None:
+        index = self.context_options.index(self.context_tokens)
+        self.query_one("#context-value", Static).update(self._fmt_context(self.context_tokens))
+        self.query_one("#context-prev", Button).disabled = index == 0
+        self.query_one("#context-next", Button).disabled = index == len(self.context_options) - 1
+        if self.gpu.vram_total_mb:
+            available = self.gpu.vram_total_mb - self.gpu.vram_used_mb
+            summary = (
+                f"{self.gpu.name}: {fmt_memory_mb(available)} available "
+                f"(first GPU)"
+            )
+        else:
+            summary = "GPU VRAM unavailable"
+        self.query_one("#hardware-summary", Static).update(summary)
+
+    @staticmethod
+    def _fmt_context(tokens: int) -> str:
+        return f"{tokens // 1024}K" if tokens < 1_048_576 else f"{tokens // 1_048_576}M"
+
+    def _change_context(self, delta: int) -> None:
+        index = self.context_options.index(self.context_tokens)
+        new_index = max(0, min(len(self.context_options) - 1, index + delta))
+        self.context_tokens = self.context_options[new_index]
+        self._render_context_controls()
+        if self.mode == "files":
+            self._render_file_table()
 
     def _render_repo_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
-        table.clear(columns=False)
+        table.clear(columns=True)
+        table.add_column("Repo / author", width=34, key="repo")
+        table.add_column("Size", width=11, key="size")
+        table.add_column("Downloads", width=12, key="downloads")
         for repo in self.repos:
-            extra = f"trend {repo.trending_score}" if repo.trending_score is not None else ""
-            table.add_row(repo.id, str(repo.downloads), fmt_size(repo.size), extra, key=repo.id)
+            table.add_row(
+                repo.id,
+                fmt_size(repo.size),
+                str(repo.downloads),
+                key=repo.id,
+            )
 
     def _render_file_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
-        table.clear(columns=False)
+        table.clear(columns=True)
+        table.add_column("Quant / file", width=34, key="file")
+        table.add_column("File size", width=11, key="size")
+        table.add_column("Est. VRAM", width=22, key="vram")
         for item in self.files:
-            table.add_row(item.path, "", fmt_size(item.size), "", key=item.path)
+            estimate = classify_vram(estimate_vram_mb(item.size, self.context_tokens), self.gpu)
+            if estimate.percent_available is None:
+                fit = "?"
+            else:
+                fit = f"{estimate.percent_available:.0f}%"
+            vram_cell = Text(f"{fmt_memory_mb(estimate.total_mb)} · {fit} ")
+            vram_cell.append_text(status_symbol(estimate.status))
+            table.add_row(
+                item.path,
+                fmt_size(item.size),
+                vram_cell,
+                key=item.path,
+            )
 
     def _log(self, message: str) -> None:
         self.query_one("#hub-log", RichLog).write(message)
@@ -320,6 +425,10 @@ class HubScreen(Screen):
             self._set_mode_repos()
         elif event.button.id == "select":
             self._handle_select()
+        elif event.button.id == "context-prev":
+            self._change_context(-1)
+        elif event.button.id == "context-next":
+            self._change_context(1)
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "author_preset":
@@ -462,8 +571,21 @@ class HubScreen(Screen):
         elif self.selected_repo:
             self._load_files(self.selected_repo)
 
+    def action_back(self) -> None:
+        """Return from the quant list to the repo list."""
+        if self.mode == "files":
+            self._set_mode_repos()
+        else:
+            self.notify("Already at the main Hub page")
+
     def action_focus_filters(self) -> None:
         self.query_one("#author_filter", Input).focus()
+
+    def action_context_prev(self) -> None:
+        self._change_context(-1)
+
+    def action_context_next(self) -> None:
+        self._change_context(1)
 
     def action_close(self) -> None:
         self.dismiss(None)

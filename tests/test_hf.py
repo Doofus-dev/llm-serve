@@ -18,6 +18,9 @@ from tui.data.hf import (
 )
 from tui.data.models_json import create_downloaded_model, load_registry, merge_editor_params, update_model
 from tui.data.settings import TUISettings, load_settings, remember_hf_author, save_settings
+from tui.data.gpu import GPUStats
+from tui.data.gpu import _try_rocm
+from tui.data.vram import classify_vram, estimate_vram_mb
 
 
 class HFPathTests(unittest.TestCase):
@@ -125,6 +128,39 @@ class HFCliTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(len(repos), 1)
         self.assertEqual(repos[0].author, "bartowski")
+
+
+class VRAMEstimateTests(unittest.TestCase):
+    @patch("tui.data.gpu.subprocess.run")
+    def test_rocm_csv_parses_vram_columns(self, mock_run) -> None:
+        import subprocess
+
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "device,Temperature (Sensor edge) (C),GPU use (%),"
+                "VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
+                "card0,63.0,19,536870912,501817344\n"
+            ),
+            stderr="",
+        )
+        stats = _try_rocm()
+        assert stats is not None
+        self.assertAlmostEqual(stats.vram_total_mb, 536.870912)
+        self.assertAlmostEqual(stats.vram_used_mb, 501.817344)
+        self.assertAlmostEqual(stats.utilization_pct, 19.0)
+
+    def test_estimate_increases_with_context(self) -> None:
+        at_64k = estimate_vram_mb(10_000_000_000, 65_536)
+        at_128k = estimate_vram_mb(10_000_000_000, 131_072)
+        self.assertGreater(at_128k, at_64k)
+
+    def test_classification_uses_available_first_gpu_memory(self) -> None:
+        gpu = GPUStats(vram_total_mb=24_000, vram_used_mb=4_000, available=True)
+        estimate = classify_vram(10_000, gpu)
+        self.assertAlmostEqual(estimate.percent_available, 50.0)
+        self.assertEqual(estimate.status, "comfortable")
 
 
 if __name__ == "__main__":
