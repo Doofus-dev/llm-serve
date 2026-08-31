@@ -22,16 +22,27 @@ from textual.widgets.tree import TreeNode
 from textual.screen import ModalScreen
 from textual.message import Message
 
-from tui.data.models_json import Registry, ModelConfig, load_registry, save_registry, delete_model, create_model, update_model
+from tui.data.models_json import (
+    Registry,
+    ModelConfig,
+    load_registry,
+    save_registry,
+    delete_model,
+    create_model,
+    update_model,
+    merge_editor_params,
+)
 from tui.data.param_help import get_param_help, load_param_help
 from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, get_active_slot, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
 from tui.data.settings import TUISettings, load_settings, save_settings
+from tui.screens.hub import HubScreen
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_JSON = REPO_ROOT / "models.json"
+MODELS_DIR = REPO_ROOT / "models"
 PRESETS_JSON = REPO_ROOT / "presets.json"
 TUI_SETTINGS_JSON = REPO_ROOT / "tui-settings.json"
 MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
@@ -154,10 +165,30 @@ def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | No
     return params, variant, quant
 
 
-def fmt_model_file_line(file: str) -> str:
-    """Line 1: params · variant · quant from the GGUF filename."""
-    model_params, variant, quant = parse_gguf_filename(file)
+def model_author(params: dict, file: str) -> str | None:
+    source = params.get("source")
+    if isinstance(source, dict):
+        author = source.get("author")
+        if author:
+            return str(author)
+    if "/" in file:
+        return file.split("/", 1)[0]
+    return None
+
+
+def model_file_exists(file: str) -> bool:
+    if not file:
+        return False
+    return (MODELS_DIR / file).is_file()
+
+
+def fmt_model_file_line(file: str, params: dict | None = None) -> str:
+    """Line 1: author · params · variant · quant from filename/path."""
     parts: list[str] = []
+    author = model_author(params or {}, file) if params is not None else None
+    if author:
+        parts.append(author)
+    model_params, variant, quant = parse_gguf_filename(Path(file).name)
     if model_params:
         parts.append(model_params)
     if variant:
@@ -165,6 +196,17 @@ def fmt_model_file_line(file: str) -> str:
     if quant:
         parts.append(quant)
     return " · ".join(parts) if parts else "?"
+
+
+def fmt_model_source_line(params: dict, file: str) -> str:
+    """Line for Hub source or on-disk status."""
+    source = params.get("source")
+    if isinstance(source, dict) and source.get("repo"):
+        repo = source.get("repo")
+        return f"HF: {repo}"
+    if model_file_exists(file):
+        return "on disk"
+    return "missing file"
 
 
 def fmt_model_runtime_line(params: dict) -> str:
@@ -192,7 +234,8 @@ class ModelTree(Tree):
         aliases = self.registry.aliases
         for name, model in self.registry.models.items():
             node = self.root.add(name, data=("model", name))
-            node.add_leaf(fmt_model_file_line(model.file))
+            node.add_leaf(fmt_model_file_line(model.file, model.params))
+            node.add_leaf(fmt_model_source_line(model.params, model.file))
             node.add_leaf(fmt_model_runtime_line(model.params))
             
             # Add presets
@@ -274,8 +317,22 @@ class ConfigPanel(Static):
     def render(self) -> str:
         lines = ["[bold]── ACTIVE CONFIG ──[/]"]
         if self.selected and self.registry and self.selected in self.registry.models:
-            params = self.registry.models[self.selected].params
+            model = self.registry.models[self.selected]
+            params = model.params
+            author = model_author(params, model.file)
+            if author:
+                lines.append(f"[$accent]{'author':<18}[/] {author}")
+            source = params.get("source")
+            if isinstance(source, dict):
+                for key in ("repo", "filename", "revision"):
+                    if source.get(key):
+                        lines.append(f"[$accent]{key:<18}[/] {source[key]}")
+            file_status = "present" if model_file_exists(model.file) else "missing"
+            lines.append(f"[$accent]{'file_status':<18}[/] {file_status}")
+            lines.append("")
             for k, v in params.items():
+                if k == "source":
+                    continue
                 val = str(v) if v != "" else "[dim]—[/]"
                 lines.append(f"[$accent]{k:<18}[/] {val}")
         else:
@@ -402,6 +459,7 @@ class ModelEditor(VerticalScroll):
                     new_params[param] = val
             else:
                 new_params[param] = val
+        new_params = merge_editor_params(self.params, new_params, set(ALL_PARAMS))
         
         self.on_save_callback(new_params)
 
@@ -758,6 +816,7 @@ class LLMServeApp(App):
         Binding("d", "delete", "Delete"),
         Binding("a", "apply", "Apply"),
         Binding("t", "change_theme", "Theme"),
+        Binding("h", "open_hub", "Hub"),
         Binding("f1", "help", "Help"),
     ]
 
@@ -804,6 +863,7 @@ class LLMServeApp(App):
                 Binding("d", "delete", "Delete"),
                 Binding("a", "apply", "Apply"),
                 Binding("t", "change_theme", "Theme"),
+                Binding("h", "open_hub", "Hub"),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
@@ -1267,9 +1327,29 @@ class LLMServeApp(App):
         else:
             self.notify("Select a preset first", severity="warning")
 
+    def action_open_hub(self) -> None:
+        if self._editor_mode or self._alias_editor_mode:
+            self.notify("Close the editor first", severity="warning")
+            return
+
+        def on_complete() -> None:
+            self.registry = load_registry(MODELS_JSON)
+            self._reload_registry()
+
+        self.push_screen(
+            HubScreen(
+                registry=self.registry,
+                settings=self.settings,
+                settings_path=TUI_SETTINGS_JSON,
+                models_json_path=MODELS_JSON,
+                models_dir=MODELS_DIR,
+                on_complete=on_complete,
+            )
+        )
+
     def action_help(self) -> None:
         self.notify(
-            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | T: theme | Q: quit",
+            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | H: Hub download | T: theme | Q: quit",
             title="Help", timeout=10,
         )
 

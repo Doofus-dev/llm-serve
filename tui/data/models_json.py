@@ -81,3 +81,27 @@ def update_model(path: Path, name: str, params: dict[str, Any]) -> None:
     if name in reg.models:
         reg.models[name].params = params
         save_registry(path, reg)
+
+
+def merge_editor_params(existing: dict[str, Any], edited: dict[str, Any], known_keys: set[str]) -> dict[str, Any]:
+    """Merge edited launcher params with preserved metadata keys (e.g. source)."""
+    merged = dict(edited)
+    for key, value in existing.items():
+        if key not in known_keys:
+            merged[key] = value
+    return merged
+
+
+def create_downloaded_model(
+    path: Path,
+    name: str,
+    base_params: dict[str, Any],
+    *,
+    file_rel: str,
+    source: dict[str, str],
+) -> None:
+    """Create a model profile after a successful Hub download."""
+    params = dict(base_params)
+    params["file"] = file_rel
+    params["source"] = source
+    create_model(path, name, params)
