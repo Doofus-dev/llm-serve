@@ -25,6 +25,7 @@ from textual.message import Message
 from tui.data.models_json import Registry, ModelConfig, load_registry, save_registry, delete_model, create_model, update_model
 from tui.data.param_help import get_param_help, load_param_help
 from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, get_active_slot, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
+from tui.data.settings import TUISettings, load_settings, save_settings
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
@@ -32,6 +33,7 @@ from tui.data.stats import Metrics, ServerClient
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_JSON = REPO_ROOT / "models.json"
 PRESETS_JSON = REPO_ROOT / "presets.json"
+TUI_SETTINGS_JSON = REPO_ROOT / "tui-settings.json"
 MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
@@ -222,10 +224,10 @@ class StatusPanel(Static):
         lines: list[str] = []
         info = self.pid_info
         if info and info.alive:
-            lines.append(f"[bold green]● RUNNING[/]  [cyan]{info.model}[/]  (PID {info.pid}, port {info.port})")
+            lines.append(f"[bold $success]● RUNNING[/]  [$accent]{info.model}[/]  (PID {info.pid}, port {info.port})")
             lines.append(f"Uptime: {fmt_uptime(self.uptime)}")
         else:
-            lines.append("[bold red]○ NOT RUNNING[/] — press [bold]L[/] to launch selected model")
+            lines.append("[bold $error]○ NOT RUNNING[/] — press [bold]L[/] to launch selected model")
 
         if self.props:
             alias = self.props.get("model_alias", "?")
@@ -275,7 +277,7 @@ class ConfigPanel(Static):
             params = self.registry.models[self.selected].params
             for k, v in params.items():
                 val = str(v) if v != "" else "[dim]—[/]"
-                lines.append(f"[cyan]{k:<18}[/] {val}")
+                lines.append(f"[$accent]{k:<18}[/] {val}")
         else:
             lines.append("[dim]select a model in the tree[/]")
         return "\n".join(lines)
@@ -294,7 +296,7 @@ class LogPanel(RichLog):
             self.clear()
             self.write(out.rstrip())
         except Exception as e:
-            self.write(f"[red]log read error: {e}[/]")
+            self.write(f"[$error]log read error: {e}[/]")
 
 
 class ConfirmDialog(ModalScreen[bool]):
@@ -336,9 +338,9 @@ class ParamHelpPanel(VerticalScroll):
             return
         help_text = get_param_help(param, MODELS_CONF_EXAMPLE)
         if help_text:
-            text.update(f"[bold cyan]{param}[/]\n\n{help_text}")
+            text.update(f"[bold $accent]{param}[/]\n\n{help_text}")
         else:
-            text.update(f"[bold cyan]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
+            text.update(f"[bold $accent]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
 
 
 class ModelEditor(VerticalScroll):
@@ -368,7 +370,7 @@ class ModelEditor(VerticalScroll):
                         for param in row_params:
                             value = self.params.get(param, "")
                             with Vertical(classes="param-field"):
-                                yield Label(f"[cyan]{param}[/cyan]")
+                                yield Label(param, classes="param-label")
                                 inp = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
                                 self.inputs[param] = inp
                                 yield inp
@@ -479,7 +481,7 @@ class AliasEditor(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Label(f"[bold]Edit Alias: {self.alias_name}[/bold]  (Ctrl+S: save, Esc: cancel)")
         yield Label("")
-        yield Label("[cyan]Points to model:[/cyan]")
+        yield Label("Points to model:", classes="field-label")
         
         options = [(name, name) for name in self.registry.models.keys()]
         yield Select(options, id="target_model", value=self.current_target)
@@ -531,7 +533,7 @@ class PresetEditor(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Label(f"[bold]Edit Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
         yield Label("")
-        yield Label("[cyan]Preset name:[/cyan]")
+        yield Label("Preset name:", classes="field-label")
         self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
         yield self.name_input
         yield Label("")
@@ -551,9 +553,9 @@ class PresetEditor(VerticalScroll):
                             
                             with Vertical(classes="param-field"):
                                 if is_override:
-                                    yield Label(f"[yellow]{param}*[/yellow]")
+                                    yield Label(f"{param}*", classes="param-label-override")
                                 else:
-                                    yield Label(f"[cyan]{param}[/cyan]")
+                                    yield Label(param, classes="param-label")
                                 inp = ParamInput(param, value=str(override_value), placeholder=param, id=f"input_{param}")
                                 self.inputs[param] = inp
                                 yield inp
@@ -660,6 +662,10 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
 class LLMServeApp(App):
     TITLE = "llm-serve TUI"
     CSS = """
+    Screen {
+        background: $surface;
+    }
+
     #main { height: 1fr; }
     #left { width: 32; border-right: solid $primary; }
     #right { layout: vertical; }
@@ -730,6 +736,18 @@ class LLMServeApp(App):
     
     Button { margin: 0 1; }
     Input { margin: 0 0 1 0; }
+
+    .param-label {
+        color: $accent;
+    }
+
+    .param-label-override {
+        color: $warning;
+    }
+
+    .field-label {
+        color: $accent;
+    }
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
@@ -739,6 +757,7 @@ class LLMServeApp(App):
         Binding("n", "new", "New"),
         Binding("d", "delete", "Delete"),
         Binding("a", "apply", "Apply"),
+        Binding("t", "change_theme", "Theme"),
         Binding("f1", "help", "Help"),
     ]
 
@@ -746,6 +765,7 @@ class LLMServeApp(App):
         super().__init__()
         self.registry = load_registry(MODELS_JSON)
         self.preset_store = load_presets(PRESETS_JSON)
+        self.settings = load_settings(TUI_SETTINGS_JSON)
         self.client: ServerClient | None = None
         self._launch_time: float | None = None
         self._log_size: int = 0
@@ -783,11 +803,15 @@ class LLMServeApp(App):
                 Binding("n", "new", "New"),
                 Binding("d", "delete", "Delete"),
                 Binding("a", "apply", "Apply"),
+                Binding("t", "change_theme", "Theme"),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
 
     def on_mount(self) -> None:
+        saved_theme = self.settings.theme
+        if saved_theme and saved_theme in self.available_themes:
+            self.theme = saved_theme
         tree = self.query_one(ModelTree)
         tree.focus()
         first = next(iter(self.registry.models), None)
@@ -800,6 +824,23 @@ class LLMServeApp(App):
         self.set_interval(3.0, self._poll_log)
         self.query_one(LogPanel).tail_file(LOG_FILE)
         self._update_footer()
+
+    def watch_theme(self, theme_name: str) -> None:
+        """Persist theme choice and refresh panels that use theme colors."""
+        if theme_name and theme_name in self.available_themes:
+            self.settings.theme = theme_name
+            save_settings(TUI_SETTINGS_JSON, self.settings)
+        self.call_after_refresh(self._refresh_themed_widgets)
+
+    def _refresh_themed_widgets(self) -> None:
+        """Re-render custom panels so theme markup/CSS picks up the new palette."""
+        if self._editor_mode or self._alias_editor_mode:
+            return
+        for selector in (StatusPanel, ConfigPanel):
+            try:
+                self.query_one(selector).refresh()
+            except Exception:
+                pass
 
     def _refresh_pid(self) -> None:
         info = read_pid_file(PID_FILE)
@@ -1228,7 +1269,7 @@ class LLMServeApp(App):
 
     def action_help(self) -> None:
         self.notify(
-            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | Q: quit",
+            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | T: theme | Q: quit",
             title="Help", timeout=10,
         )
 

@@ -31,3 +31,4 @@ __pycache__/
 .venv/
 llama.cpp/
 presets.json
+tui-settings.json
