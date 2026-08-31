@@ -342,8 +342,8 @@ SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-$(m_get "${MODEL}" spec_draft_n_min 0)}"
 N_CPU_MOE="${N_CPU_MOE:-$(m_get "${MODEL}" n_cpu_moe "")}"
 
 TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
-THINKING="$(m_get "${MODEL}" thinking "")"
-PER_SLOT_MIN="$(m_get "${MODEL}" per_slot_min 0)"
+THINKING="${THINKING:-$(m_get "${MODEL}" thinking "")}"
+PER_SLOT_MIN="${PER_SLOT_MIN:-$(m_get "${MODEL}" per_slot_min 0)}"
 
 # CUDA / ROCm paths
 [[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import time
 from datetime import timedelta
@@ -11,6 +12,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Focus
 from textual.reactive import reactive
 from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, RichLog, Static, Tree,
@@ -21,12 +23,16 @@ from textual.screen import ModalScreen
 from textual.message import Message
 
 from tui.data.models_json import Registry, ModelConfig, load_registry, save_registry, delete_model, create_model, update_model
+from tui.data.param_help import get_param_help, load_param_help
+from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_JSON = REPO_ROOT / "models.json"
+PRESETS_JSON = REPO_ROOT / "presets.json"
+MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
 
@@ -49,16 +55,131 @@ for group_params in PARAM_GROUPS.values():
     ALL_PARAMS.extend(group_params)
 
 
+class ParamFocused(Message):
+    """Posted when an editor input field receives focus."""
+
+    def __init__(self, param: str) -> None:
+        self.param = param
+        super().__init__()
+
+
+EDITOR_BINDINGS = [
+    Binding("f2", "toggle_param_help", "Param Help"),
+    Binding("ctrl+s", "save_editor", "Save"),
+    Binding("escape", "cancel_editor", "Cancel"),
+]
+
+
+class EditorInput(Input):
+    """Input in model/preset editor — keeps editor hotkeys visible in the footer."""
+
+    BINDINGS = EDITOR_BINDINGS
+
+    def _param_editor(self) -> ModelEditor | PresetEditor | None:
+        node = self.parent
+        while node is not None:
+            if isinstance(node, (ModelEditor, PresetEditor)):
+                return node
+            node = node.parent
+        return None
+
+    def action_toggle_param_help(self) -> None:
+        self.app.action_toggle_param_help()
+
+    def action_save_editor(self) -> None:
+        editor = self._param_editor()
+        if editor:
+            editor.save()
+
+    def action_cancel_editor(self) -> None:
+        editor = self._param_editor()
+        if editor:
+            editor.on_cancel_callback()
+
+
+class ParamInput(EditorInput):
+    """Input that notifies the app when focused (for F2 param help)."""
+
+    def __init__(self, param_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.param_name = param_name
+
+    def on_focus(self, event: Focus) -> None:
+        self.post_message(ParamFocused(self.param_name))
+
+
 def fmt_uptime(seconds: float) -> str:
     return str(timedelta(seconds=int(seconds)))
 
 
-class ModelTree(Tree):
-    """Left panel: models and their aliases."""
+def fmt_ctx(n) -> str:
+    """Compact context size: 32768 → 32k."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if n >= 1024 and n % 1024 == 0:
+        return f"{n // 1024}k"
+    return str(n)
 
-    def __init__(self, registry: Registry):
+
+def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | None]:
+    """Extract (params, variant, quant) from a GGUF filename.
+
+    Examples:
+      Qwen2.5-7B-Instruct-Q8_0.gguf        → 7B, Instruct, Q8_0
+      Qwen3.6-27B-Q3_K_S.gguf              → 27B, None, Q3_K_S
+      Qwen3.6-27B-UD-Q3_K_XL.gguf          → 27B, UD, Q3_K_XL
+    """
+    stem = Path(filename).stem
+
+    params = None
+    if m := re.search(r"(\d+(?:\.\d+)?[BMbm])", stem):
+        params = m.group(1).upper()
+
+    variant = None
+    if re.search(r"[-_]UD[-_]", stem, re.I):
+        variant = "UD"  # Unsloth Dynamic — mixed-layer quant
+    elif re.search(r"Instruct", stem, re.I):
+        variant = "Instruct"
+    elif re.search(r"Chat", stem, re.I):
+        variant = "Chat"
+
+    quant = None
+    if m := re.search(r"(Q\d+_K_[A-Z0-9]+|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)", stem, re.I):
+        quant = m.group(1).upper()
+
+    return params, variant, quant
+
+
+def fmt_model_file_line(file: str) -> str:
+    """Line 1: params · variant · quant from the GGUF filename."""
+    model_params, variant, quant = parse_gguf_filename(file)
+    parts: list[str] = []
+    if model_params:
+        parts.append(model_params)
+    if variant:
+        parts.append(variant)
+    if quant:
+        parts.append(quant)
+    return " · ".join(parts) if parts else "?"
+
+
+def fmt_model_runtime_line(params: dict) -> str:
+    """Line 2: context and GPU layers from config."""
+    ctx = fmt_ctx(params.get("ctx", "?"))
+    ngl = params.get("gpu_layers", "?")
+    return f"ctx: {ctx}  ngl: {ngl}"
+
+
+class ModelTree(Tree):
+    """Left panel: models, presets, and aliases."""
+
+    def __init__(self, registry: Registry, preset_store: PresetStore, active_preset: tuple[str, int] | None = None):
         super().__init__("Models")
         self.registry = registry
+        self.preset_store = preset_store
+        self.active_preset = active_preset
         self.show_root = False
 
     def on_mount(self) -> None:
@@ -70,8 +191,18 @@ class ModelTree(Tree):
         aliases = self.registry.aliases
         for name, model in self.registry.models.items():
             node = self.root.add(name, data=("model", name))
-            node.add_leaf(f"file: {model.file}")
-            node.add_leaf(f"ctx: {model.params.get('ctx', '?')}  ngl: {model.params.get('gpu_layers', '?')}")
+            node.add_leaf(fmt_model_file_line(model.file))
+            node.add_leaf(fmt_model_runtime_line(model.params))
+            
+            # Add presets
+            if name in self.preset_store.presets:
+                for slot in sorted(self.preset_store.presets[name].keys()):
+                    preset = self.preset_store.presets[name][slot]
+                    label = f"[{slot}] {preset.name}"
+                    if self.active_preset == (name, slot):
+                        label += " [ACTIVE]"
+                    node.add_leaf(label, data=("preset", name, slot))
+        
         if aliases:
             an = self.root.add("Aliases")
             for alias, target in aliases.items():
@@ -185,20 +316,48 @@ class ConfirmDialog(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
+class ParamHelpPanel(VerticalScroll):
+    """Bottom-half help panel showing docs for the focused parameter."""
+
+    DEFAULT_TEXT = (
+        "[bold]Parameter Help[/]  [dim](F2 to close · Tab to a field)[/]\n\n"
+        "Focus an input to see what it does and how changing it affects the server."
+    )
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.DEFAULT_TEXT, id="param-help-text")
+
+    def on_mount(self) -> None:
+        load_param_help(MODELS_CONF_EXAMPLE)
+
+    def show_param(self, param: str | None) -> None:
+        text = self.query_one("#param-help-text", Static)
+        if not param:
+            text.update(self.DEFAULT_TEXT)
+            return
+        help_text = get_param_help(param, MODELS_CONF_EXAMPLE)
+        if help_text:
+            text.update(f"[bold cyan]{param}[/]\n\n{help_text}")
+        else:
+            text.update(f"[bold cyan]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
+
+
 class ModelEditor(VerticalScroll):
     """Editor panel for a model's parameters (takes over right side)."""
+
+    BINDINGS = EDITOR_BINDINGS
 
     def __init__(self, name: str, params: dict, registry: Registry, on_save, on_cancel):
         super().__init__()
         self.model_name = name
         self.params = dict(params)
         self.registry = registry
-        self.inputs: dict[str, Input] = {}
+        self.inputs: dict[str, ParamInput] = {}
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold]Edit Model: {self.model_name}[/bold]  (Ctrl+S: save, Esc: cancel)")
+        yield Label(f"[bold]Edit Model: {self.model_name}[/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
         yield Label("")
         
         for group_name, param_names in PARAM_GROUPS.items():
@@ -211,7 +370,7 @@ class ModelEditor(VerticalScroll):
                             value = self.params.get(param, "")
                             with Vertical(classes="param-field"):
                                 yield Label(f"[cyan]{param}[/cyan]")
-                                inp = Input(value=str(value), placeholder=param, id=f"input_{param}")
+                                inp = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
                                 self.inputs[param] = inp
                                 yield inp
         
@@ -250,6 +409,15 @@ class ModelEditor(VerticalScroll):
         first_input = next(iter(self.inputs.values()), None)
         if first_input:
             first_input.focus()
+
+    def action_toggle_param_help(self) -> None:
+        self.app.action_toggle_param_help()
+
+    def action_save_editor(self) -> None:
+        self.save()
+
+    def action_cancel_editor(self) -> None:
+        self.on_cancel_callback()
 
     def on_key(self, event) -> None:
         """Handle Ctrl+S and Esc."""
@@ -345,6 +513,114 @@ class AliasEditor(VerticalScroll):
             self.on_cancel_callback()
 
 
+class PresetEditor(VerticalScroll):
+    """Editor panel for a preset (takes over right side)."""
+
+    BINDINGS = EDITOR_BINDINGS
+
+    def __init__(self, model_name: str, slot: int, preset: Preset | None, base_params: dict, on_save, on_cancel):
+        super().__init__()
+        self.model_name = model_name
+        self.slot = slot
+        self.preset = preset or Preset(slot=slot, name=f"slot-{slot}", overrides={})
+        self.base_params = base_params
+        self.inputs: dict[str, ParamInput] = {}
+        self.name_input: EditorInput | None = None
+        self.on_save_callback = on_save
+        self.on_cancel_callback = on_cancel
+
+    def compose(self) -> ComposeResult:
+        yield Label(f"[bold]Edit Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
+        yield Label("")
+        yield Label("[cyan]Preset name:[/cyan]")
+        self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
+        yield self.name_input
+        yield Label("")
+        yield Label("[dim]Params that differ from base model are highlighted[/dim]")
+        yield Label("")
+        
+        for group_name, param_names in PARAM_GROUPS.items():
+            with Collapsible(title=group_name, collapsed=False):
+                # Group params into rows of 3
+                for i in range(0, len(param_names), 3):
+                    row_params = param_names[i:i+3]
+                    with Horizontal():
+                        for param in row_params:
+                            base_value = self.base_params.get(param, "")
+                            override_value = self.preset.overrides.get(param, base_value)
+                            is_override = param in self.preset.overrides
+                            
+                            with Vertical(classes="param-field"):
+                                if is_override:
+                                    yield Label(f"[yellow]{param}*[/yellow]")
+                                else:
+                                    yield Label(f"[cyan]{param}[/cyan]")
+                                inp = ParamInput(param, value=str(override_value), placeholder=param, id=f"input_{param}")
+                                self.inputs[param] = inp
+                                yield inp
+        
+        yield Label("")
+        with Horizontal():
+            yield Button("Save", variant="success", id="save")
+            yield Button("Cancel", variant="default", id="cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.on_cancel_callback()
+        elif event.button.id == "save":
+            self.save()
+
+    def save(self) -> None:
+        """Collect values and call save callback."""
+        name = self.name_input.value.strip() if self.name_input else self.preset.name
+        if not name:
+            name = f"slot-{self.slot}"
+        
+        overrides = {}
+        for param, inp in self.inputs.items():
+            val = inp.value.strip()
+            base_val = str(self.base_params.get(param, ""))
+            
+            # Only save if different from base
+            if val != base_val:
+                # Try to convert to number
+                if val and val.lstrip('-').replace('.', '').isdigit():
+                    try:
+                        if '.' in val:
+                            overrides[param] = float(val)
+                        else:
+                            overrides[param] = int(val)
+                    except ValueError:
+                        overrides[param] = val
+                else:
+                    overrides[param] = val
+        
+        self.on_save_callback(name, overrides)
+
+    def on_mount(self) -> None:
+        """Focus the name input when the editor mounts."""
+        if self.name_input:
+            self.name_input.focus()
+
+    def action_toggle_param_help(self) -> None:
+        self.app.action_toggle_param_help()
+
+    def action_save_editor(self) -> None:
+        self.save()
+
+    def action_cancel_editor(self) -> None:
+        self.on_cancel_callback()
+
+    def on_key(self, event) -> None:
+        """Handle Ctrl+S and Esc."""
+        if event.key == "ctrl+s":
+            event.prevent_default()
+            self.save()
+        elif event.key == "escape":
+            event.prevent_default()
+            self.on_cancel_callback()
+
+
 class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
     """Dialog to create a new alias."""
 
@@ -391,6 +667,10 @@ class LLMServeApp(App):
     #status { height: auto; max-height: 22; border-bottom: solid $secondary; padding: 0 1; }
     #config { height: 1fr; padding: 0 1; }
     #logs { height: 12; border-top: solid $secondary; }
+    #editor-scroll { height: 1fr; }
+    #param-help { height: 50%; border-top: solid $secondary; padding: 0 1; display: none; }
+    #right.help-open #editor-scroll { height: 50%; }
+    #right.help-open #param-help { display: block; }
     
     .param-field {
         width: 1fr;
@@ -456,21 +736,25 @@ class LLMServeApp(App):
         Binding("q", "quit", "Quit"),
         Binding("l", "launch", "Launch"),
         Binding("s", "stop", "Stop"),
-        Binding("r", "refresh", "Refresh"),
         Binding("e", "edit", "Edit"),
         Binding("n", "new", "New"),
         Binding("d", "delete", "Delete"),
+        Binding("a", "apply", "Apply"),
         Binding("f1", "help", "Help"),
     ]
 
     def __init__(self):
         super().__init__()
         self.registry = load_registry(MODELS_JSON)
+        self.preset_store = load_presets(PRESETS_JSON)
         self.client: ServerClient | None = None
         self._launch_time: float | None = None
         self._log_size: int = 0
         self._editor_mode: bool = False
-        self._editor_widget: ModelEditor | None = None
+        self._editor_widget: ModelEditor | PresetEditor | None = None
+        self._help_panel: ParamHelpPanel | None = None
+        self._help_visible: bool = False
+        self._focused_param: str | None = None
         self._alias_editor_mode: bool = False
         self._alias_editor_widget: AliasEditor | None = None
 
@@ -478,7 +762,7 @@ class LLMServeApp(App):
         yield Header()
         with Horizontal(id="main"):
             with Vertical(id="left"):
-                yield ModelTree(self.registry)
+                yield ModelTree(self.registry, self.preset_store, self.preset_store.active)
             with Vertical(id="right"):
                 yield StatusPanel(id="status")
                 yield ConfigPanel(id="config")
@@ -488,19 +772,18 @@ class LLMServeApp(App):
     def _update_footer(self) -> None:
         """Update footer bindings based on mode."""
         if self._editor_mode or self._alias_editor_mode:
-            self.bindings = [
-                Binding("ctrl+s", "save_edit", "Save"),
-                Binding("escape", "cancel_edit", "Cancel"),
-            ]
+            bindings = [Binding("ctrl+s", "save_edit", "Save")]
+            bindings.append(Binding("escape", "cancel_edit", "Cancel"))
+            self.bindings = bindings
         else:
             self.bindings = [
                 Binding("q", "quit", "Quit"),
                 Binding("l", "launch", "Launch"),
                 Binding("s", "stop", "Stop"),
-                Binding("r", "refresh", "Refresh"),
                 Binding("e", "edit", "Edit"),
                 Binding("n", "new", "New"),
                 Binding("d", "delete", "Delete"),
+                Binding("a", "apply", "Apply"),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
@@ -521,6 +804,8 @@ class LLMServeApp(App):
 
     def _refresh_pid(self) -> None:
         info = read_pid_file(PID_FILE)
+        if self._editor_mode or self._alias_editor_mode:
+            return
         panel = self.query_one(StatusPanel)
         was_alive = panel.pid_info.alive if panel.pid_info else False
         alive = info.alive if info else False
@@ -555,10 +840,13 @@ class LLMServeApp(App):
             self.query_one(LogPanel).tail_file(LOG_FILE)
 
     def _reload_registry(self) -> None:
-        """Reload models.json and refresh UI."""
+        """Reload models.json and presets.json, refresh UI."""
         self.registry = load_registry(MODELS_JSON)
+        self.preset_store = load_presets(PRESETS_JSON)
         tree = self.query_one(ModelTree)
         tree.registry = self.registry
+        tree.preset_store = self.preset_store
+        tree.active_preset = self.preset_store.active
         tree.refresh_tree()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
@@ -591,13 +879,28 @@ class LLMServeApp(App):
         if not model:
             self.notify("Select a model first", severity="warning")
             return
+        
+        # Check if we have an active preset for this model
+        env_overrides = {}
+        if self.preset_store.active and self.preset_store.active[0] == model:
+            _, slot = self.preset_store.active
+            preset = get_preset(self.preset_store, model, slot)
+            if preset:
+                env_overrides = overrides_to_env(preset.overrides)
+                self.notify(f"Launching {model} with preset [{slot}] {preset.name}")
+        
         try:
+            import os
+            env = os.environ.copy()
+            env.update(env_overrides)
+            
             r = subprocess.run(
                 [str(REPO_ROOT / "llm-serve"), model],
-                capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
+                capture_output=True, text=True, timeout=60, cwd=REPO_ROOT, env=env,
             )
             if r.returncode == 0:
                 self.notify(f"Launched {model}")
+                self._reload_registry()
             else:
                 self.notify(f"Launch failed: {r.stderr.strip()[:200]}", severity="error")
         except Exception as e:
@@ -620,6 +923,53 @@ class LLMServeApp(App):
         self._poll_log()
         self.notify("Refreshed")
 
+    def on_param_focused(self, event: ParamFocused) -> None:
+        self._focused_param = event.param
+        if self._help_panel and self._help_visible:
+            self._help_panel.show_param(event.param)
+
+    def _enter_param_editor(self, editor: ModelEditor | PresetEditor) -> None:
+        """Show model/preset editor with optional F2 help panel."""
+        self.query_one("#status").display = False
+        self.query_one("#config").display = False
+        self.query_one("#logs").display = False
+
+        editor.id = "editor-scroll"
+        help_panel = ParamHelpPanel(id="param-help")
+
+        right = self.query_one("#right")
+        right.mount(editor)
+        right.mount(help_panel)
+
+        self._editor_widget = editor
+        self._help_panel = help_panel
+        self._help_visible = False
+        self._focused_param = None
+        self._editor_mode = True
+        self._update_footer()
+
+    def _current_focused_param(self) -> str | None:
+        """Read the param name from whichever input is focused in the editor."""
+        focused = self.focused
+        if isinstance(focused, ParamInput):
+            return focused.param_name
+        return self._focused_param
+
+    def action_toggle_param_help(self) -> None:
+        if not self._editor_mode or not self._help_panel:
+            return
+        self._help_visible = not self._help_visible
+        right = self.query_one("#right")
+        if self._help_visible:
+            right.add_class("help-open")
+            param = self._current_focused_param()
+            if param:
+                self._focused_param = param
+            self._help_panel.show_param(self._focused_param)
+        else:
+            right.remove_class("help-open")
+        self._update_footer()
+
     def action_edit(self) -> None:
         if self._editor_mode or self._alias_editor_mode:
             self.notify("Already in edit mode", severity="warning")
@@ -628,7 +978,13 @@ class LLMServeApp(App):
         tree = self.query_one(ModelTree)
         node = tree.cursor_node
         if node is None:
-            self.notify("Select a model or alias first", severity="warning")
+            self.notify("Select a model, preset, or alias first", severity="warning")
+            return
+        
+        # Check if it's a preset
+        if node.data and node.data[0] == "preset":
+            _, model_name, slot = node.data
+            self._edit_preset(model_name, slot)
             return
         
         # Check if it's an alias
@@ -659,18 +1015,28 @@ class LLMServeApp(App):
         def on_cancel() -> None:
             self._exit_editor()
             self.notify("Edit cancelled")
-        
-        # Hide status/config/logs, show editor
-        self.query_one("#status").display = False
-        self.query_one("#config").display = False
-        self.query_one("#logs").display = False
-        
+
         editor = ModelEditor(model, cfg.params, self.registry, on_save, on_cancel)
-        right = self.query_one("#right")
-        right.mount(editor)
-        self._editor_widget = editor
-        self._editor_mode = True
-        self._update_footer()
+        self._enter_param_editor(editor)
+
+    def _edit_preset(self, model_name: str, slot: int) -> None:
+        """Edit a preset."""
+        base_params = self.registry.models[model_name].params
+        preset = get_preset(self.preset_store, model_name, slot)
+        
+        def on_save(name: str, overrides: dict) -> None:
+            set_preset(self.preset_store, model_name, slot, name, overrides)
+            save_presets(PRESETS_JSON, self.preset_store)
+            self._reload_registry()
+            self._exit_editor()
+            self.notify(f"Saved preset {model_name} [{slot}] {name}")
+        
+        def on_cancel() -> None:
+            self._exit_editor()
+            self.notify("Edit cancelled")
+
+        editor = PresetEditor(model_name, slot, preset, base_params, on_save, on_cancel)
+        self._enter_param_editor(editor)
 
     def _edit_alias(self, alias_name: str, current_target: str) -> None:
         """Edit an alias."""
@@ -699,9 +1065,16 @@ class LLMServeApp(App):
 
     def _exit_editor(self) -> None:
         """Exit editor mode and restore normal view."""
+        if self._help_panel:
+            self._help_panel.remove()
+            self._help_panel = None
         if self._editor_widget:
             self._editor_widget.remove()
             self._editor_widget = None
+        right = self.query_one("#right")
+        right.remove_class("help-open")
+        self._help_visible = False
+        self._focused_param = None
         self.query_one("#status").display = True
         self.query_one("#config").display = True
         self.query_one("#logs").display = True
@@ -768,7 +1141,37 @@ class LLMServeApp(App):
         tree = self.query_one(ModelTree)
         node = tree.cursor_node
         if node is None:
-            self.notify("Select a model or alias first", severity="warning")
+            self.notify("Select a model, preset, or alias first", severity="warning")
+            return
+        
+        # Check if it's a preset
+        if node.data and node.data[0] == "preset":
+            _, model_name, slot = node.data
+            preset = get_preset(self.preset_store, model_name, slot)
+            if not preset:
+                self.notify("Preset not found", severity="error")
+                return
+            
+            # Check if server is running with this preset
+            pid_info = read_pid_file(PID_FILE)
+            if pid_info and pid_info.alive and pid_info.model == model_name:
+                # Check if this preset is active
+                if self.preset_store.active == (model_name, slot):
+                    self.notify(f"Cannot delete preset while server is running with it", severity="error")
+                    return
+            
+            msg = f"Delete preset '{preset.name}' (slot {slot}) for {model_name}?"
+            
+            def handle_preset_confirm(confirmed: bool) -> None:
+                if confirmed:
+                    delete_preset(self.preset_store, model_name, slot)
+                    if self.preset_store.active == (model_name, slot):
+                        clear_active_preset(self.preset_store)
+                    save_presets(PRESETS_JSON, self.preset_store)
+                    self._reload_registry()
+                    self.notify(f"Deleted preset {model_name} [{slot}]")
+            
+            self.push_screen(ConfirmDialog(msg), handle_preset_confirm)
             return
         
         # Check if it's an alias
@@ -801,14 +1204,34 @@ class LLMServeApp(App):
         def handle_model_confirm(confirmed: bool) -> None:
             if confirmed:
                 delete_model(MODELS_JSON, model)
+                # Also delete all presets for this model
+                if model in self.preset_store.presets:
+                    del self.preset_store.presets[model]
+                if self.preset_store.active and self.preset_store.active[0] == model:
+                    clear_active_preset(self.preset_store)
+                save_presets(PRESETS_JSON, self.preset_store)
                 self._reload_registry()
                 self.notify(f"Deleted {model}")
         
         self.push_screen(ConfirmDialog(msg), handle_model_confirm)
 
+    def action_apply(self) -> None:
+        """Apply the selected preset (mark as active)."""
+        tree = self.query_one(ModelTree)
+        node = tree.cursor_node
+        if node and node.data and node.data[0] == "preset":
+            _, model_name, slot = node.data
+            set_active_preset(self.preset_store, model_name, slot)
+            save_presets(PRESETS_JSON, self.preset_store)
+            self._reload_registry()
+            preset = get_preset(self.preset_store, model_name, slot)
+            self.notify(f"Applied preset {model_name} [{slot}] {preset.name if preset else ''}")
+        else:
+            self.notify("Select a preset first", severity="warning")
+
     def action_help(self) -> None:
         self.notify(
-            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | R: refresh | Q: quit",
+            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | Q: quit",
             title="Help", timeout=10,
         )
 
