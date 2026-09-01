@@ -36,6 +36,7 @@ from tui.data.param_help import get_param_help, load_param_help
 from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, get_active_slot, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
 from tui.data.settings import TUISettings, load_settings, save_settings
 from tui.screens.hub import HubScreen
+from tui.data.baselines import RunBaseline, record_baseline
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
@@ -45,6 +46,7 @@ MODELS_JSON = REPO_ROOT / "models.json"
 MODELS_DIR = REPO_ROOT / "models"
 PRESETS_JSON = REPO_ROOT / "presets.json"
 TUI_SETTINGS_JSON = REPO_ROOT / "tui-settings.json"
+TUI_BASELINES_JSON = REPO_ROOT / "tui-baselines.json"
 MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
@@ -300,7 +302,14 @@ class StatusPanel(Static):
         g = self.gpu
         if g and g.available:
             lines.append(g.name)
-            lines.append(f"VRAM: {g.vram_used_mb/1024:.1f} / {g.vram_total_mb/1024:.1f} GB ({g.vram_pct:.0f}%)")
+            lines.append(
+                f"{g.memory_label}: {g.vram_used_mb/1024:.1f} / {g.vram_total_mb/1024:.1f} GB ({g.vram_pct:.0f}%)"
+            )
+            if g.unified and g.dedicated_total_mb:
+                lines.append(
+                    f"[dim]rocm-smi VRAM BAR {g.dedicated_used_mb/1024:.1f} / "
+                    f"{g.dedicated_total_mb/1024:.1f} GB — not the model[/]"
+                )
             lines.append(f"Util: {g.utilization_pct:.0f}%   Temp: {g.temp_c:.0f}°C")
         else:
             lines.append("[dim]GPU stats unavailable[/]")
@@ -926,9 +935,11 @@ class LLMServeApp(App):
             panel.metrics = await self.client.metrics()
             if panel.props is None:
                 panel.props = await self.client.props()
+            self._record_baseline(panel)
 
     def _poll_gpu(self) -> None:
         self.query_one(StatusPanel).gpu = query_gpu()
+        self._record_baseline(self.query_one(StatusPanel))
 
     def _poll_log(self) -> None:
         try:
@@ -938,6 +949,80 @@ class LLMServeApp(App):
         if size != self._log_size:
             self._log_size = size
             self.query_one(LogPanel).tail_file(LOG_FILE)
+
+    def _effective_model_params(self, model_name: str) -> dict | None:
+        if model_name not in self.registry.models:
+            return None
+        params = dict(self.registry.models[model_name].params)
+        slot = get_active_slot(self.preset_store, model_name)
+        if slot is not None:
+            preset = get_preset(self.preset_store, model_name, slot)
+            if preset:
+                params.update(preset.overrides)
+        return params
+
+    def _record_baseline(self, panel: StatusPanel) -> None:
+        """Persist observed VRAM / tok/s for the running model on this GPU."""
+        info = panel.pid_info
+        gpu = panel.gpu
+        if not info or not info.alive or not gpu or not gpu.available:
+            return
+        if gpu.vram_used_mb <= 0:
+            return
+        params = self._effective_model_params(info.model)
+        if not params:
+            return
+
+        file_rel = str(params.get("file", ""))
+        path = MODELS_DIR / file_rel
+        try:
+            file_size = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            file_size = 0
+
+        gen_tps = None
+        prompt_tps = None
+        tokens = 0.0
+        metrics = panel.metrics
+        if metrics:
+            tokens = metrics.tokens_predicted_total
+            if metrics.avg_gen_tps > 0 and tokens >= 16:
+                gen_tps = metrics.avg_gen_tps
+            elif metrics.predicted_tokens_seconds > 0:
+                gen_tps = metrics.predicted_tokens_seconds
+            if metrics.avg_prompt_tps > 0:
+                prompt_tps = metrics.avg_prompt_tps
+
+        def as_int(value: object, default: int = 0) -> int:
+            try:
+                return int(float(str(value)))
+            except (TypeError, ValueError):
+                return default
+
+        ctx = as_int(params.get("ctx"), 0)
+        if ctx <= 0:
+            return
+        try:
+            record_baseline(
+                TUI_BASELINES_JSON,
+                RunBaseline(
+                    model=info.model,
+                    file=file_rel,
+                    file_size=file_size,
+                    gpu_name=gpu.name,
+                    ctx=ctx,
+                    gpu_layers=as_int(params.get("gpu_layers"), 99),
+                    total_layers=as_int(params.get("total_layers"), 0),
+                    cache_k=str(params.get("cache_k") or "q4_0"),
+                    cache_v=str(params.get("cache_v") or "q4_0"),
+                    vram_used_mb=gpu.vram_used_mb,
+                    gen_tps=gen_tps,
+                    prompt_tps=prompt_tps,
+                    tokens_predicted=tokens,
+                ),
+            )
+        except OSError:
+            return
 
     def _reload_registry(self) -> None:
         """Reload models.json and presets.json, refresh UI."""
@@ -1343,6 +1428,7 @@ class LLMServeApp(App):
                 settings_path=TUI_SETTINGS_JSON,
                 models_json_path=MODELS_JSON,
                 models_dir=MODELS_DIR,
+                baselines_path=TUI_BASELINES_JSON,
                 on_complete=on_complete,
             )
         )

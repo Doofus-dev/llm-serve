@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Callable
 
@@ -27,13 +28,22 @@ from tui.data.hf import (
     download_files,
     fmt_size,
     hf_available,
+    local_download_bytes,
     list_gguf_repos,
     list_repo_ggufs,
 )
 from tui.data.models_json import Registry, create_downloaded_model, load_registry
 from tui.data.settings import TUISettings, remember_hf_author, save_settings
 from tui.data.gpu import GPUStats, query_gpu
-from tui.data.vram import classify_vram, estimate_vram_mb, fmt_memory_mb, status_symbol
+from tui.data.baselines import lookup_baseline, load_baselines
+from tui.data.vram import (
+    classify_vram,
+    estimate_gen_tps,
+    estimate_vram_mb,
+    fmt_memory_mb,
+    fmt_tps,
+    status_symbol,
+)
 
 
 class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
@@ -95,6 +105,24 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
         self.dismiss((name, str(clone_from)))
 
 
+class HubTable(DataTable):
+    """Row list that yields left/right to the Hub context/offload steppers."""
+
+    def action_cursor_left(self) -> None:
+        screen = self.screen
+        if getattr(screen, "mode", None) == "files":
+            screen.action_context_prev()
+            return
+        super().action_cursor_left()
+
+    def action_cursor_right(self) -> None:
+        screen = self.screen
+        if getattr(screen, "mode", None) == "files":
+            screen.action_context_next()
+            return
+        super().action_cursor_right()
+
+
 class HubScreen(Screen):
     """Browse trending GGUF repos, pick a file, and download into models/<author>/."""
 
@@ -105,6 +133,8 @@ class HubScreen(Screen):
         Binding("f", "focus_filters", "Focus filters"),
         Binding("left", "context_prev", "Previous context"),
         Binding("right", "context_next", "Next context"),
+        Binding("[", "offload_prev", "Fewer GPU layers"),
+        Binding("]", "offload_next", "More GPU layers"),
     ]
 
     CSS = """
@@ -128,7 +158,7 @@ class HubScreen(Screen):
     }
 
     #hub-status {
-        height: 1;
+        height: 2;
         content-align: left middle;
     }
 
@@ -179,38 +209,34 @@ class HubScreen(Screen):
     }
 
     #context-controls {
-        height: 1;
+        height: 3;
         align: left middle;
     }
 
-    #context-label {
+    #context-label,
+    #offload-label {
         width: auto;
-        height: 1;
+        height: 3;
         content-align: left middle;
         margin: 0 1 0 0;
     }
 
-    #context-value {
-        width: 8;
-        height: 1;
-        content-align: center middle;
+    #offload-label {
+        margin: 0 1 0 2;
     }
 
-    #context-controls Button {
-        width: 3;
-        min-width: 3;
-        height: 1;
-        min-height: 1;
-        padding: 0;
-        margin: 0;
+    #context-select,
+    #offload-select {
+        height: 3;
+        width: 14;
         border: none;
         background: transparent;
-        color: $primary;
+        color: $accent;
     }
 
     #hardware-summary {
         width: 1fr;
-        height: 1;
+        height: 3;
         content-align: left middle;
         margin: 0 1;
     }
@@ -260,6 +286,7 @@ class HubScreen(Screen):
         settings_path: Path,
         models_json_path: Path,
         models_dir: Path,
+        baselines_path: Path | None = None,
         on_complete: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
@@ -268,23 +295,29 @@ class HubScreen(Screen):
         self.settings_path = settings_path
         self.models_json_path = models_json_path
         self.models_dir = models_dir
+        self.baselines_path = baselines_path
         self.on_complete = on_complete
         self.auth_status = AuthStatus(logged_in=False)
         self.repos: list[HubRepo] = []
         self.files: list[HubFile] = []
         self.selected_repo: HubRepo | None = None
         self.mode = "repos"
-        self._busy = False
+        self._downloading = False
+        self._repo_load_id = 0
+        self._file_load_id = 0
         self.gpu = GPUStats()
         self.context_tokens = 65_536
         self.context_options: list[int] = []
+        self.offload_ratio = 1.0
+        self.offload_options = [0.0, 0.25, 0.5, 0.75, 1.0]
+        self._syncing_controls = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
             yield Static("", id="hub-status")
             yield Label(
                 "[bold]Browse Hugging Face GGUF models[/]  "
-                "[dim]Tab: controls · ↑↓: list · Enter: open/download · "
+                "[dim]Tab: fields · ↑↓: list · Enter: open/download · "
                 "B: back · Esc: close[/]",
                 id="hub-title",
             )
@@ -301,46 +334,59 @@ class HubScreen(Screen):
                     yield Button("Close", id="close")
             with Horizontal(id="context-controls"):
                 yield Label("Context:", id="context-label")
-                yield Button("◀", id="context-prev")
-                yield Static("64K", id="context-value")
-                yield Button("▶", id="context-next")
+                yield Select(
+                    [(self._fmt_context(value), value) for value in (32_768, 65_536)],
+                    value=65_536,
+                    prompt="Context",
+                    id="context-select",
+                    allow_blank=False,
+                )
+                yield Label("Offload:", id="offload-label")
+                yield Select(
+                    [(self._fmt_offload(ratio), ratio) for ratio in self.offload_options],
+                    value=self.offload_ratio,
+                    prompt="Offload",
+                    id="offload-select",
+                    allow_blank=False,
+                )
                 yield Static("", id="hardware-summary")
-            yield DataTable(id="hub-table", cursor_type="row")
+            yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
-                "[dim]Enter open · F filters · "
+                "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
+                "Act. after a local run · "
                 "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="hub-help",
             )
 
     def on_mount(self) -> None:
-        table = self.query_one("#hub-table", DataTable)
         self._refresh_author_preset_options()
         self._update_auth_status()
         self.gpu = query_gpu()
         self._update_context_options()
         self.query_one("#context-controls").display = False
         self.query_one("#hub-table", DataTable).focus()
-        self._load_repos("", "")
+        self._request_repos("", "")
 
     def _refresh_author_preset_options(self) -> None:
         select = self.query_one("#author_preset", Select)
         options = [(author, author) for author in self.settings.hf_authors]
         select.set_options(options)
 
+    def _set_status(self, message: str) -> None:
+        self.query_one("#hub-status", Static).update(message)
+
     def _update_auth_status(self) -> None:
+        if self._downloading:
+            return
         if not hf_available():
             self.auth_status = AuthStatus(logged_in=False)
-            self.query_one("#hub-status", Static).update(
-                f"[bold $error]hf CLI not installed[/] — {HF_INSTALL_HINT}"
-            )
+            self._set_status(f"[bold $error]hf CLI not installed[/] — {HF_INSTALL_HINT}")
             return
         self.auth_status = auth_whoami()
         if self.auth_status.logged_in:
-            self.query_one("#hub-status", Static).update(
-                f"[bold $success]Logged in[/] as {self.auth_status.name}"
-            )
+            self._set_status(f"[bold $success]Logged in[/] as {self.auth_status.name}")
         else:
-            self.query_one("#hub-status", Static).update(
+            self._set_status(
                 "[bold $warning]Not logged in[/] — public repos only; press Login for gated models"
             )
 
@@ -355,13 +401,15 @@ class HubScreen(Screen):
         self.query_one("#hub-table", DataTable).focus()
 
     def _set_mode_files(self, repo: HubRepo) -> None:
+        self._repo_load_id += 1
         self.mode = "files"
         self.selected_repo = repo
         self.query_one("#context-controls").display = True
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
         self._update_context_options(repo.context_length)
-        self._load_files(repo)
+        self._file_load_id += 1
+        self._load_files(repo, self._file_load_id)
 
     def _update_context_options(self, model_max: int | None = None) -> None:
         """Set doubling context stops, capped at the model's limit."""
@@ -373,20 +421,32 @@ class HubScreen(Screen):
         if not self.context_options:
             self.context_options = [maximum]
         self.context_tokens = min(65_536, self.context_options[-1])
-        self._render_context_controls()
+        self._render_estimate_controls()
         if self.mode == "files":
             self._render_file_table()
 
-    def _render_context_controls(self) -> None:
-        index = self.context_options.index(self.context_tokens)
-        self.query_one("#context-value", Static).update(self._fmt_context(self.context_tokens))
-        self.query_one("#context-prev", Button).disabled = index == 0
-        self.query_one("#context-next", Button).disabled = index == len(self.context_options) - 1
+    def _render_estimate_controls(self) -> None:
+        self._syncing_controls = True
+        try:
+            context_select = self.query_one("#context-select", Select)
+            context_select.set_options(
+                [(self._fmt_context(value), value) for value in self.context_options]
+            )
+            if self.context_tokens in self.context_options:
+                context_select.value = self.context_tokens
+            offload_select = self.query_one("#offload-select", Select)
+            offload_select.set_options(
+                [(self._fmt_offload(ratio), ratio) for ratio in self.offload_options]
+            )
+            offload_select.value = self.offload_ratio
+        finally:
+            self._syncing_controls = False
         if self.gpu.vram_total_mb:
-            available = self.gpu.vram_total_mb - self.gpu.vram_used_mb
+            free = max(0.0, self.gpu.vram_total_mb - self.gpu.vram_used_mb)
+            pool = "unified pool" if self.gpu.unified else "VRAM"
             summary = (
-                f"{self.gpu.name}: {fmt_memory_mb(available)} available "
-                f"(first GPU)"
+                f"{self.gpu.name}: {fmt_memory_mb(self.gpu.vram_total_mb)} {pool} · "
+                f"{fmt_memory_mb(free)} free"
             )
         else:
             summary = "GPU VRAM unavailable"
@@ -396,11 +456,26 @@ class HubScreen(Screen):
     def _fmt_context(tokens: int) -> str:
         return f"{tokens // 1024}K" if tokens < 1_048_576 else f"{tokens // 1_048_576}M"
 
+    @staticmethod
+    def _fmt_offload(ratio: float) -> str:
+        if ratio <= 0:
+            return "CPU"
+        return f"{int(ratio * 100)}%"
+
     def _change_context(self, delta: int) -> None:
         index = self.context_options.index(self.context_tokens)
         new_index = max(0, min(len(self.context_options) - 1, index + delta))
         self.context_tokens = self.context_options[new_index]
-        self._render_context_controls()
+        self._refresh_estimates()
+
+    def _change_offload(self, delta: int) -> None:
+        index = self.offload_options.index(self.offload_ratio)
+        new_index = max(0, min(len(self.offload_options) - 1, index + delta))
+        self.offload_ratio = self.offload_options[new_index]
+        self._refresh_estimates()
+
+    def _refresh_estimates(self) -> None:
+        self._render_estimate_controls()
         if self.mode == "files":
             self._render_file_table()
 
@@ -421,43 +496,81 @@ class HubScreen(Screen):
     def _render_file_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
-        table.add_column("Quant / file", width=34, key="file")
-        table.add_column("File size", width=11, key="size")
-        table.add_column("Est. VRAM", width=22, key="vram")
+        table.add_column("Quant / file", width=24, key="file")
+        table.add_column("File size", width=9, key="size")
+        table.add_column("Est. VRAM", width=16, key="vram")
+        table.add_column("Act. VRAM", width=9, key="act_vram")
+        table.add_column("Est. t/s", width=9, key="speed")
+        table.add_column("Act. t/s", width=8, key="act_speed")
+        runs = load_baselines(self.baselines_path) if self.baselines_path else []
         estimates = [
-            (item, classify_vram(estimate_vram_mb(item.size, self.context_tokens), self.gpu))
+            (
+                item,
+                classify_vram(
+                    estimate_vram_mb(item.size, self.context_tokens, self.offload_ratio),
+                    self.gpu,
+                ),
+                estimate_gen_tps(
+                    item.size, self.context_tokens, self.gpu, self.offload_ratio
+                ),
+                lookup_baseline(
+                    runs,
+                    filename=item.path,
+                    file_size=item.size,
+                    ctx=self.context_tokens,
+                    offload_ratio=self.offload_ratio,
+                    gpu_name=self.gpu.name,
+                ),
+            )
             for item in self.files
         ]
-        estimates.sort(key=lambda pair: pair[1].total_mb, reverse=True)
-        for item, estimate in estimates:
+        estimates.sort(key=lambda row: row[1].total_mb, reverse=True)
+        for item, estimate, tps, actual in estimates:
             if estimate.percent_available is None:
                 fit = "?"
             else:
                 fit = f"{estimate.percent_available:.0f}%"
             vram_cell = Text(f"{fmt_memory_mb(estimate.total_mb)} · {fit} ")
             vram_cell.append_text(status_symbol(estimate.status))
+            act_vram = (
+                fmt_memory_mb(actual.vram_used_mb)
+                if actual and actual.vram_used_mb > 0
+                else "—"
+            )
+            act_tps = fmt_tps(actual.gen_tps if actual else None, estimated=False)
             table.add_row(
                 item.path,
                 fmt_size(item.size),
                 vram_cell,
+                act_vram,
+                fmt_tps(tps),
+                act_tps,
                 key=item.path,
             )
 
     def _log(self, message: str) -> None:
-        # Retained as a worker callback hook; the Hub no longer has a log panel.
-        return
+        if self._downloading:
+            return
+        self._set_status(message)
+
+    def _request_repos(self, author: str, search: str) -> None:
+        if self._downloading:
+            self.notify("Wait for the download to finish", severity="warning")
+            return
+        self._repo_load_id += 1
+        self._set_status("[dim]Loading GGUF repos…[/]")
+        self._load_repos(author, search, self._repo_load_id)
 
     @work(thread=True)
-    def _load_repos(self, author: str, search: str) -> None:
-        if self._busy:
-            return
-        self._busy = True
-        self.app.call_from_thread(self._log, "[dim]Loading GGUF repos...[/]")
+    def _load_repos(self, author: str, search: str, load_id: int) -> None:
         repos, error = list_gguf_repos(author=author, search=search)
-        self.app.call_from_thread(self._finish_load_repos, repos, error)
+        self.app.call_from_thread(self._finish_load_repos, load_id, repos, error)
 
-    def _finish_load_repos(self, repos: list[HubRepo], error: str | None) -> None:
-        self._busy = False
+    def _finish_load_repos(
+        self, load_id: int, repos: list[HubRepo], error: str | None
+    ) -> None:
+        if load_id != self._repo_load_id or self._downloading:
+            return
         if error:
             self._log(f"[bold $error]{error}[/]")
             return
@@ -466,14 +579,16 @@ class HubScreen(Screen):
         self._log(f"Loaded {len(repos)} GGUF repos")
 
     @work(thread=True)
-    def _load_files(self, repo: HubRepo) -> None:
-        self._busy = True
-        self.app.call_from_thread(self._log, f"[dim]Listing files in {repo.id}...[/]")
+    def _load_files(self, repo: HubRepo, load_id: int) -> None:
+        self.app.call_from_thread(self._log, f"[dim]Listing GGUF files in {repo.id}…[/]")
         files, error = list_repo_ggufs(repo.id)
-        self.app.call_from_thread(self._finish_load_files, files, error)
+        self.app.call_from_thread(self._finish_load_files, load_id, files, error)
 
-    def _finish_load_files(self, files: list[HubFile], error: str | None) -> None:
-        self._busy = False
+    def _finish_load_files(
+        self, load_id: int, files: list[HubFile], error: str | None
+    ) -> None:
+        if load_id != self._file_load_id or self._downloading:
+            return
         if error:
             self._log(f"[bold $error]{error}[/]")
             return
@@ -486,35 +601,45 @@ class HubScreen(Screen):
         if event.button.id == "close":
             self.action_close()
         elif event.button.id == "search":
-            self._load_repos(
+            self._request_repos(
                 self.query_one("#author_filter", Input).value.strip(),
                 self.query_one("#search_filter", Input).value.strip(),
             )
         elif event.button.id == "login":
             self._prompt_login()
         elif event.button.id == "back":
-            self._set_mode_repos()
+            self.action_back()
         elif event.button.id == "select":
             self._handle_select()
-        elif event.button.id == "context-prev":
-            self._change_context(-1)
-        elif event.button.id == "context-next":
-            self._change_context(1)
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if self._syncing_controls:
+            return
+        if event.select.id == "context-select":
+            if event.value not in (None, Select.BLANK):
+                self.context_tokens = int(event.value)
+                if self.mode == "files":
+                    self._render_file_table()
+            return
+        if event.select.id == "offload-select":
+            if event.value not in (None, Select.BLANK):
+                self.offload_ratio = float(event.value)
+                if self.mode == "files":
+                    self._render_file_table()
+            return
         if event.select.id != "author_preset":
             return
         value = event.value
         if value not in (None, Select.BLANK):
             self.query_one("#author_filter", Input).value = str(value)
-            self._load_repos(
+            self._request_repos(
                 str(value),
                 self.query_one("#search_filter", Input).value.strip(),
             )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id in {"author_filter", "search_filter"}:
-            self._load_repos(
+            self._request_repos(
                 self.query_one("#author_filter", Input).value.strip(),
                 self.query_one("#search_filter", Input).value.strip(),
             )
@@ -538,6 +663,9 @@ class HubScreen(Screen):
         self.app.push_screen(HFLoginDialog(), handle_result)
 
     def _handle_select(self) -> None:
+        if self._downloading:
+            self.notify("A download is already running — leave Hub open", severity="warning")
+            return
         table = self.query_one("#hub-table", DataTable)
         if table.cursor_row is None:
             self.notify("Select a row first", severity="warning")
@@ -570,6 +698,9 @@ class HubScreen(Screen):
     def _start_download(self, profile: tuple[str, str] | None, filename: str) -> None:
         if profile is None or not self.selected_repo:
             return
+        if self._downloading:
+            self.notify("A download is already running — leave Hub open", severity="warning")
+            return
         profile_name, clone_from = profile
         all_names = [f.path for f in self.files]
         plan = build_download_plan(
@@ -578,7 +709,38 @@ class HubScreen(Screen):
             self.models_dir,
             all_ggufs=all_names,
         )
-        self._download_worker(plan, profile_name, clone_from, filename)
+        expected = sum(item.size for item in self.files if item.path in plan.filenames)
+        self._downloading = True
+        self._set_status(
+            f"[bold $warning]DOWNLOADING[/] {filename}  starting…  — leave Hub open"
+        )
+        self.notify(
+            f"Downloading {filename} — stay on this Hub screen until it finishes",
+            timeout=8,
+        )
+        self._download_worker(plan, profile_name, clone_from, filename, expected)
+
+    def _format_download_status(
+        self,
+        filename: str,
+        plan: DownloadPlan,
+        expected: int,
+        cli_line: str,
+        elapsed_s: int,
+    ) -> str:
+        used = local_download_bytes(plan)
+        if expected > 0:
+            pct = min(99.9, 100.0 * used / expected) if used else 0.0
+            size = f"{fmt_size(used)} / {fmt_size(expected)} ({pct:.0f}%)"
+        elif used:
+            size = fmt_size(used)
+        else:
+            size = "starting…"
+        extra = f"  {cli_line[:70]}" if cli_line else ""
+        return (
+            f"[bold $warning]DOWNLOADING[/] {filename}  {size}  {elapsed_s}s"
+            f"{extra}  — leave Hub open"
+        )
 
     @work(exclusive=True)
     async def _download_worker(
@@ -587,41 +749,68 @@ class HubScreen(Screen):
         profile_name: str,
         clone_from: str,
         filename: str,
+        expected: int,
     ) -> None:
-        files_label = ", ".join(plan.filenames)
-        self._log(f"[bold]Downloading[/] {plan.repo_id} → {plan.local_dir}/")
-        self._log(f"Files: {files_label}")
+        self._downloading = True
+        cli_line = ""
+        started = asyncio.get_running_loop().time()
 
         def on_line(line: str) -> None:
-            self.app.call_from_thread(self._log, line)
+            nonlocal cli_line
+            text = line.strip()
+            if text:
+                cli_line = text
 
-        ok, message = await download_files(plan, on_line=on_line)
-        if not ok:
-            self.notify(message[:200], severity="error")
-            self._log(f"[bold $error]{message}[/]")
-            return
+        try:
+            ok, message = False, "Download cancelled"
+            download_task = asyncio.create_task(download_files(plan, on_line=on_line))
+            try:
+                while not download_task.done():
+                    elapsed = int(asyncio.get_running_loop().time() - started)
+                    self._set_status(
+                        self._format_download_status(
+                            filename, plan, expected, cli_line, elapsed
+                        )
+                    )
+                    await asyncio.sleep(0.4)
+                ok, message = download_task.result()
+            finally:
+                if not download_task.done():
+                    download_task.cancel()
+                    try:
+                        await download_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            if not ok:
+                self.notify(message[:200], severity="error")
+                self._set_status(f"[bold $error]Download failed[/] {message[:140]}")
+                return
 
-        base_params = dict(self.registry.models[clone_from].params)
-        source = build_source_metadata(plan, filename)
-        create_downloaded_model(
-            self.models_json_path,
-            profile_name,
-            base_params,
-            file_rel=plan.relative_file,
-            source=source,
-        )
-        self.registry = load_registry(self.models_json_path)
-        if remember_hf_author(self.settings, plan.author):
-            save_settings(self.settings_path, self.settings)
-            self.app.call_from_thread(self._refresh_author_preset_options)
+            base_params = dict(self.registry.models[clone_from].params)
+            source = build_source_metadata(plan, filename)
+            create_downloaded_model(
+                self.models_json_path,
+                profile_name,
+                base_params,
+                file_rel=plan.relative_file,
+                source=source,
+            )
+            self.registry = load_registry(self.models_json_path)
+            if remember_hf_author(self.settings, plan.author):
+                save_settings(self.settings_path, self.settings)
+                self._refresh_author_preset_options()
 
-        self.app.call_from_thread(
-            self.notify,
-            f"Downloaded and registered {profile_name}",
-        )
-        self._log(f"[bold $success]Registered profile {profile_name}[/]  file={plan.relative_file}")
-        if self.on_complete:
-            self.app.call_from_thread(self.on_complete)
+            self.notify(f"Downloaded and registered {profile_name}")
+            self._set_status(
+                f"[bold $success]Registered {profile_name}[/]  file={plan.relative_file}"
+            )
+            if self.on_complete:
+                self.on_complete()
+        except Exception as exc:
+            self.notify(str(exc)[:200], severity="error")
+            self._set_status(f"[bold $error]Download failed[/] {exc}")
+        finally:
+            self._downloading = False
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "_download_worker":
@@ -634,16 +823,23 @@ class HubScreen(Screen):
                 pass
 
     def action_refresh(self) -> None:
+        if self._downloading:
+            self.notify("Wait for the download to finish", severity="warning")
+            return
         if self.mode == "repos":
-            self._load_repos(
+            self._request_repos(
                 self.query_one("#author_filter", Input).value.strip(),
                 self.query_one("#search_filter", Input).value.strip(),
             )
         elif self.selected_repo:
-            self._load_files(self.selected_repo)
+            self._file_load_id += 1
+            self._load_files(self.selected_repo, self._file_load_id)
 
     def action_back(self) -> None:
         """Return from the quant list to the repo list."""
+        if self._downloading:
+            self.notify("Wait for the download to finish — leave Hub open", severity="warning")
+            return
         if self.mode == "files":
             self._set_mode_repos()
         else:
@@ -658,5 +854,14 @@ class HubScreen(Screen):
     def action_context_next(self) -> None:
         self._change_context(1)
 
+    def action_offload_prev(self) -> None:
+        self._change_offload(-1)
+
+    def action_offload_next(self) -> None:
+        self._change_offload(1)
+
     def action_close(self) -> None:
+        if self._downloading:
+            self.notify("Wait for the download to finish — leave Hub open", severity="warning")
+            return
         self.dismiss(None)

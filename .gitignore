@@ -32,3 +32,4 @@ __pycache__/
 llama.cpp/
 presets.json
 tui-settings.json
+tui-baselines.json

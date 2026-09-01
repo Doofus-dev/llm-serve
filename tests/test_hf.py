@@ -12,15 +12,32 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.hf import (
+    HF_INSTALL_HINT,
+    AuthStatus,
+    DownloadPlan,
+    HubFile,
+    HubRepo,
+    take_hf_progress_lines,
+    local_download_bytes,
     build_download_plan,
     build_source_metadata,
+    download_files,
+    fmt_size,
+    hf_available,
+    list_gguf_repos,
+    list_repo_ggufs,
     shard_filenames,
 )
 from tui.data.models_json import create_downloaded_model, load_registry, merge_editor_params, update_model
 from tui.data.settings import TUISettings, load_settings, remember_hf_author, save_settings
-from tui.data.gpu import GPUStats
-from tui.data.gpu import _try_rocm
-from tui.data.vram import classify_vram, estimate_vram_mb
+from tui.data.gpu import GPUStats, effective_gpu_memory, parse_rocm_csv
+from tui.data.vram import (
+    classify_vram,
+    estimate_gen_tps,
+    estimate_vram_mb,
+    fmt_tps,
+    gpu_bandwidth_gb_s,
+)
 
 
 class HFPathTests(unittest.TestCase):
@@ -52,6 +69,37 @@ class HFPathTests(unittest.TestCase):
         source = build_source_metadata(plan, "Qwen3.6-27B-UD-Q3_K_XL.gguf")
         self.assertEqual(source["author"], "unsloth")
         self.assertEqual(source["repo"], "unsloth/Qwen3.6-27B-GGUF")
+
+    def test_take_hf_progress_lines_splits_on_cr_and_lf(self) -> None:
+        lines, leftover = take_hf_progress_lines(b"12%|xxx\r45%|yyy\nDone")
+        self.assertEqual(lines, ["12%|xxx", "45%|yyy"])
+        self.assertEqual(leftover, b"Done")
+
+    def test_take_hf_progress_lines_skips_empty_crlf(self) -> None:
+        lines, leftover = take_hf_progress_lines(b"ok\r\n")
+        self.assertEqual(lines, ["ok"])
+        self.assertEqual(leftover, b"")
+
+    def test_local_download_bytes_counts_file_and_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            plan = build_download_plan("bartowski/Demo-GGUF", "Demo-Q4.gguf", models_dir)
+            plan.local_dir.mkdir(parents=True)
+            self.assertEqual(local_download_bytes(plan), 0)
+            (plan.local_dir / "Demo-Q4.gguf.incomplete").write_bytes(b"x" * 50)
+            self.assertEqual(local_download_bytes(plan), 50)
+            (plan.local_dir / "Demo-Q4.gguf").write_bytes(b"y" * 80)
+            self.assertEqual(local_download_bytes(plan), 80)
+
+    def test_local_download_bytes_counts_hf_cache_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            plan = build_download_plan("bartowski/Demo-GGUF", "Demo-Q4.gguf", models_dir)
+            cache = plan.local_dir / ".cache" / "huggingface" / "download"
+            cache.mkdir(parents=True)
+            (cache / "Demo-Q4.gguf.lock").write_bytes(b"")
+            (cache / "abc.etag.incomplete").write_bytes(b"z" * 120)
+            self.assertEqual(local_download_bytes(plan), 120)
 
 
 class SettingsTests(unittest.TestCase):
@@ -131,36 +179,96 @@ class HFCliTests(unittest.TestCase):
 
 
 class VRAMEstimateTests(unittest.TestCase):
-    @patch("tui.data.gpu.subprocess.run")
-    def test_rocm_csv_parses_vram_columns(self, mock_run) -> None:
-        import subprocess
-
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=(
-                "device,Temperature (Sensor edge) (C),GPU use (%),"
-                "VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
-                "card0,63.0,19,536870912,501817344\n"
-            ),
-            stderr="",
+    def test_rocm_csv_parses_vram_columns(self) -> None:
+        stats = parse_rocm_csv(
+            "device,Temperature (Sensor edge) (C),GPU use (%),"
+            "VRAM Total Memory (B),VRAM Total Used Memory (B)\n"
+            "card0,63.0,19,536870912,501817344\n"
         )
-        stats = _try_rocm()
         assert stats is not None
         self.assertAlmostEqual(stats.vram_total_mb, 536.870912)
         self.assertAlmostEqual(stats.vram_used_mb, 501.817344)
         self.assertAlmostEqual(stats.utilization_pct, 19.0)
+
+    def test_apu_uses_gtt_not_tiny_vram_bar(self) -> None:
+        used, total, unified = effective_gpu_memory(
+            vram_used_mb=505.0,
+            vram_total_mb=536.0,
+            gtt_used_mb=9_200.0,
+            gtt_total_mb=16_456.0,
+        )
+        self.assertTrue(unified)
+        self.assertAlmostEqual(used, 9_200.0)
+        self.assertAlmostEqual(total, 16_456.0)
+
+    def test_discrete_gpu_keeps_dedicated_vram(self) -> None:
+        used, total, unified = effective_gpu_memory(
+            vram_used_mb=18_000.0,
+            vram_total_mb=24_576.0,
+            gtt_used_mb=1_200.0,
+            gtt_total_mb=16_000.0,
+        )
+        self.assertFalse(unified)
+        self.assertAlmostEqual(used, 18_000.0)
+        self.assertAlmostEqual(total, 24_576.0)
 
     def test_estimate_increases_with_context(self) -> None:
         at_64k = estimate_vram_mb(10_000_000_000, 65_536)
         at_128k = estimate_vram_mb(10_000_000_000, 131_072)
         self.assertGreater(at_128k, at_64k)
 
-    def test_classification_uses_available_first_gpu_memory(self) -> None:
+    def test_classification_uses_gpu_pool_total(self) -> None:
         gpu = GPUStats(vram_total_mb=24_000, vram_used_mb=4_000, available=True)
         estimate = classify_vram(10_000, gpu)
-        self.assertAlmostEqual(estimate.percent_available, 50.0)
+        self.assertAlmostEqual(estimate.percent_available, 10_000 / 24_000 * 100)
         self.assertEqual(estimate.status, "comfortable")
+
+    def test_classification_ignores_current_occupancy_on_unified(self) -> None:
+        gpu = GPUStats(
+            vram_total_mb=16_456,
+            vram_used_mb=10_380,
+            available=True,
+            unified=True,
+        )
+        estimate = classify_vram(10_700, gpu)
+        self.assertLess(estimate.percent_available, 80)
+        self.assertEqual(estimate.status, "comfortable")
+
+    def test_vram_scales_down_with_partial_offload(self) -> None:
+        full = estimate_vram_mb(10_000_000_000, 65_536, 1.0)
+        half = estimate_vram_mb(10_000_000_000, 65_536, 0.5)
+        none = estimate_vram_mb(10_000_000_000, 65_536, 0.0)
+        self.assertGreater(full, half)
+        self.assertEqual(none, 0.0)
+
+    def test_bandwidth_matches_known_gpu_name(self) -> None:
+        gpu = GPUStats(name="AMD Radeon RX 7900 XTX", vram_total_mb=24_000, available=True)
+        self.assertEqual(gpu_bandwidth_gb_s(gpu), 960.0)
+
+    def test_full_offload_faster_than_cpu(self) -> None:
+        gpu = GPUStats(
+            name="NVIDIA GeForce RTX 4090",
+            vram_total_mb=24_000,
+            available=True,
+        )
+        full = estimate_gen_tps(10_000_000_000, 65_536, gpu, 1.0)
+        half = estimate_gen_tps(10_000_000_000, 65_536, gpu, 0.5)
+        cpu = estimate_gen_tps(10_000_000_000, 65_536, gpu, 0.0)
+        self.assertIsNotNone(full)
+        self.assertIsNotNone(half)
+        self.assertIsNotNone(cpu)
+        self.assertGreater(full, half)
+        self.assertGreater(half, cpu)
+
+    def test_longer_context_is_slower(self) -> None:
+        gpu = GPUStats(name="NVIDIA GeForce RTX 4090", vram_total_mb=24_000, available=True)
+        at_64k = estimate_gen_tps(10_000_000_000, 65_536, gpu, 1.0)
+        at_256k = estimate_gen_tps(10_000_000_000, 262_144, gpu, 1.0)
+        self.assertGreater(at_64k, at_256k)
+
+    def test_fmt_tps_uses_tilde(self) -> None:
+        self.assertEqual(fmt_tps(42.2), "~42 t/s")
+        self.assertEqual(fmt_tps(None), "?")
 
 
 if __name__ == "__main__":

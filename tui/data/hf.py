@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -143,28 +144,58 @@ def _run_hf(args: list[str], *, timeout: float | None = 120.0) -> subprocess.Com
     )
 
 
+def take_hf_progress_lines(buffer: bytes) -> tuple[list[str], bytes]:
+    """Split hf CLI output on newline or carriage return.
+
+    Download progress (tqdm) rewrites the same line with ``\\r``, so
+    ``readline()`` stays silent until the whole file finishes.
+    """
+    lines: list[str] = []
+    start = 0
+    for index, byte in enumerate(buffer):
+        if byte not in (10, 13):
+            continue
+        piece = buffer[start:index]
+        start = index + 1
+        if piece:
+            lines.append(piece.decode("utf-8", errors="replace"))
+    return lines, buffer[start:]
+
+
 async def _run_hf_async(
     args: list[str],
     *,
     timeout: float | None = None,
     on_line: Callable[[str], None] | None = None,
 ) -> tuple[int, str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
     proc = await asyncio.create_subprocess_exec(
         "hf",
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=env,
     )
     chunks: list[str] = []
+    leftover = b""
     assert proc.stdout is not None
     while True:
-        line = await proc.stdout.readline()
-        if not line:
+        block = await proc.stdout.read(512)
+        if not block:
             break
-        text = line.decode("utf-8", errors="replace").rstrip("\n")
-        chunks.append(text)
-        if on_line:
-            on_line(text)
+        leftover += block
+        lines, leftover = take_hf_progress_lines(leftover)
+        for text in lines:
+            chunks.append(text)
+            if on_line:
+                on_line(text)
+    if leftover:
+        text = leftover.decode("utf-8", errors="replace").strip()
+        if text:
+            chunks.append(text)
+            if on_line:
+                on_line(text)
     try:
         rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -303,6 +334,31 @@ async def download_files(
     if rc == 0:
         return True, output or "Download complete"
     return False, output or "Download failed"
+
+
+def local_download_bytes(plan: DownloadPlan) -> int:
+    """Bytes already on disk for this plan (finished or still arriving)."""
+    total = 0
+    cache_dir = plan.local_dir / ".cache" / "huggingface" / "download"
+    for name in plan.filenames:
+        direct = plan.local_dir / name
+        if direct.is_file():
+            total += direct.stat().st_size
+            continue
+        incomplete = plan.local_dir / f"{name}.incomplete"
+        if incomplete.is_file():
+            total += incomplete.stat().st_size
+            continue
+        lock = cache_dir / f"{name}.lock"
+        if not lock.is_file():
+            continue
+        locks = list(cache_dir.glob("*.lock")) if cache_dir.is_dir() else []
+        if len(locks) != 1:
+            continue
+        incompletes = list(cache_dir.glob("*.incomplete"))
+        if incompletes:
+            total += max(path.stat().st_size for path in incompletes)
+    return total
 
 
 def fmt_size(size: int) -> str:
