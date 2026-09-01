@@ -12,7 +12,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 - **Remote access** — `llm-serve my-model --remote` binds to all interfaces so other devices on your LAN or VPN mesh can reach it
 - **Background/foreground modes** — Run servers in the background or attached to your terminal
 - **Status management** — `llm-serve status` and `llm-serve stop` for running servers
-- **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, creates directories
+- **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, installs Python and TUI dependencies, creates directories
 - **Clean uninstall** — `llm-serve uninstall` removes build artifacts while preserving models and config
 - **PATH integration** — Automatically symlinks `llm-serve` into `~/.local/bin/` for global access
 - **Hermes Agent integration** — (Optional) Automatically sync model settings to [Hermes Agent](https://hermes-agent.nousresearch.com/docs) configuration
@@ -21,6 +21,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 
 - **Linux** — setup.sh currently requires a Linux distro with pacman, apt, dnf, or zypper (for auto-installing missing packages)
 - **Bash 4.4+** — Required for associative arrays. Most modern Linux distributions include this.
+- **Python 3.9+** — Required for the TUI. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and TUI packages into a project `.venv`
 - **NVIDIA GPU** — Detected automatically via `nvidia-smi`; setup installs CUDA toolkit and builds with GPU support
 - **AMD GPU** — Detected automatically via `lspci`; setup installs ROCm HIP SDK and builds with `-DGGML_HIP=ON`
 - **Overrides** — `./setup.sh --cpu`, `--cuda`, or `--rocm` to force a build type
@@ -32,7 +33,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 git clone https://github.com/doofus-dev/llm-serve.git
 cd llm-serve
 
-# Run setup (handles everything: prereqs, llama.cpp clone + build, dirs, config)
+# Run setup (handles everything: prereqs, llama.cpp clone + build, Python TUI deps, dirs, config)
 ./setup.sh              # Auto-detects GPU (NVIDIA→CUDA, AMD→ROCm, else CPU)
 ./setup.sh --cpu        # Force CPU-only
 ./setup.sh --cuda       # Force CUDA (NVIDIA)
@@ -42,8 +43,9 @@ cd llm-serve
 
 # Edit models.conf to register your model (or use the example entries)
 
-# Launch
+# Launch the server, or the TUI
 ./llm-serve my-model
+./llm-serve-tui
 ```
 
 Verify it's working:
@@ -56,12 +58,14 @@ curl http://127.0.0.1:8081/v1/models
 ```
 llm-serve/ ← this repo
 ├── llm-serve              # Launcher script
+├── llm-serve-tui          # TUI launcher (uses .venv created by setup.sh)
 ├── setup.sh               # One-command environment setup
 ├── models.conf            # Your model registry (created from example on first setup)
 ├── models.conf.example    # Annotated template with all parameters documented
 ├── README.md              # This file
 ├── LICENSE                # MIT
 ├── .gitignore
+├── tui/                   # Textual TUI (requirements in tui/requirements.txt)
 ├── models/                # Your .gguf model files (created by setup.sh)
 ├── llama.cpp/             # llama.cpp clone + build (created by setup.sh)
 │   └── build/bin/llama-server
