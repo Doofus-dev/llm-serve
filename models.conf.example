@@ -55,7 +55,8 @@ HERMES_DEFAULT_SYNC_AUX=1
 #     HTTP port for the server. Default 8081. Override: PORT=9000
 #
 #   total_layers
-#     Total transformer layers in the model (fixed by architecture). Used for
+#     Total transformer layers in the GGUF (`{arch}.block_count`). The TUI
+#     copies this from the file on download and locks the field. Used for
 #     the startup banner sanity check.
 #     Examples: Llama 3 8B = 32, Qwen 14B = 40, Qwen 32B = 64.
 #

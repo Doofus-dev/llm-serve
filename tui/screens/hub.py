@@ -13,7 +13,6 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
-from rich.text import Text
 
 from tui.data.hf import (
     HF_INSTALL_HINT,
@@ -32,18 +31,18 @@ from tui.data.hf import (
     list_gguf_repos,
     list_repo_ggufs,
 )
-from tui.data.models_json import Registry, create_downloaded_model, load_registry
+from tui.data.gguf import read_gguf_architecture
+from tui.data.models_json import (
+    Registry,
+    create_downloaded_model,
+    find_model_by_repo,
+    load_registry,
+)
+from tui.data.quant import family_display
+from tui.data.quant_table import build_quant_file_rows
 from tui.data.settings import TUISettings, remember_hf_author, save_settings
 from tui.data.gpu import GPUStats, query_gpu
-from tui.data.baselines import lookup_baseline, load_baselines
-from tui.data.vram import (
-    classify_vram,
-    estimate_gen_tps,
-    estimate_vram_mb,
-    fmt_memory_mb,
-    fmt_tps,
-    status_symbol,
-)
+from tui.data.vram import fmt_memory_mb
 
 
 class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
@@ -79,8 +78,8 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
         options = [(name, name) for name in self.registry.models.keys()]
         with Vertical(id="hub-download-dialog"):
             yield Label("[bold]Register Downloaded Model[/bold]")
-            yield Label("Profile name:")
-            yield Input(value=self.default_name, placeholder="my-model", id="name")
+            yield Label("Display name:")
+            yield Input(value=self.default_name, placeholder="Qwen 3.8", id="name")
             yield Label("Clone server params from:")
             yield Select(options, id="clone_from", value=options[0][1] if options else Select.BLANK)
             with Horizontal():
@@ -95,9 +94,6 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
         clone_from = self.query_one("#clone_from", Select).value
         if not name:
             self.app.notify("Name cannot be empty", severity="error")
-            return
-        if name in self.registry.models:
-            self.app.notify(f"Model '{name}' already exists", severity="error")
             return
         if clone_from in (None, Select.BLANK):
             self.app.notify("Select a model to clone params from", severity="error")
@@ -502,50 +498,24 @@ class HubScreen(Screen):
         table.add_column("Act. VRAM", width=9, key="act_vram")
         table.add_column("Est. t/s", width=9, key="speed")
         table.add_column("Act. t/s", width=8, key="act_speed")
-        runs = load_baselines(self.baselines_path) if self.baselines_path else []
-        estimates = [
-            (
-                item,
-                classify_vram(
-                    estimate_vram_mb(item.size, self.context_tokens, self.offload_ratio),
-                    self.gpu,
-                ),
-                estimate_gen_tps(
-                    item.size, self.context_tokens, self.gpu, self.offload_ratio
-                ),
-                lookup_baseline(
-                    runs,
-                    filename=item.path,
-                    file_size=item.size,
-                    ctx=self.context_tokens,
-                    offload_ratio=self.offload_ratio,
-                    gpu_name=self.gpu.name,
-                ),
-            )
-            for item in self.files
-        ]
-        estimates.sort(key=lambda row: row[1].total_mb, reverse=True)
-        for item, estimate, tps, actual in estimates:
-            if estimate.percent_available is None:
-                fit = "?"
-            else:
-                fit = f"{estimate.percent_available:.0f}%"
-            vram_cell = Text(f"{fmt_memory_mb(estimate.total_mb)} · {fit} ")
-            vram_cell.append_text(status_symbol(estimate.status))
-            act_vram = (
-                fmt_memory_mb(actual.vram_used_mb)
-                if actual and actual.vram_used_mb > 0
-                else "—"
-            )
-            act_tps = fmt_tps(actual.gen_tps if actual else None, estimated=False)
+        rows = build_quant_file_rows(
+            self.files,
+            gpu=self.gpu,
+            context_tokens=self.context_tokens,
+            offload_ratio=self.offload_ratio,
+            baselines_path=self.baselines_path,
+            models_dir=self.models_dir,
+            author=self.selected_repo.author if self.selected_repo else "",
+        )
+        for row in rows:
             table.add_row(
-                item.path,
-                fmt_size(item.size),
-                vram_cell,
-                act_vram,
-                fmt_tps(tps),
-                act_tps,
-                key=item.path,
+                row.path,
+                fmt_size(row.size),
+                row.vram_cell,
+                row.act_vram,
+                row.est_tps,
+                row.act_tps,
+                key=row.path,
             )
 
     def _log(self, message: str) -> None:
@@ -664,7 +634,7 @@ class HubScreen(Screen):
 
     def _handle_select(self) -> None:
         if self._downloading:
-            self.notify("A download is already running — leave Hub open", severity="warning")
+            self.notify("A download is already running", severity="warning")
             return
         table = self.query_one("#hub-table", DataTable)
         if table.cursor_row is None:
@@ -683,6 +653,11 @@ class HubScreen(Screen):
             self.notify("No repo selected", severity="error")
             return
         filename = str(row_key)
+        existing = find_model_by_repo(self.registry, self.selected_repo.id)
+        if existing:
+            cfg = self.registry.models[existing]
+            self._start_download((cfg.display, existing), filename)
+            return
         default_name = self._default_profile_name(self.selected_repo, filename)
         self.app.push_screen(
             DownloadProfileDialog(self.registry, default_name),
@@ -691,17 +666,15 @@ class HubScreen(Screen):
 
     @staticmethod
     def _default_profile_name(repo: HubRepo, filename: str) -> str:
-        stem = Path(filename).stem.lower()
-        author = repo.author.lower()
-        return f"{author}-{stem}"[:48].strip("-")
+        return family_display(repo.id, filename)
 
     def _start_download(self, profile: tuple[str, str] | None, filename: str) -> None:
         if profile is None or not self.selected_repo:
             return
         if self._downloading:
-            self.notify("A download is already running — leave Hub open", severity="warning")
+            self.notify("A download is already running", severity="warning")
             return
-        profile_name, clone_from = profile
+        display_name, clone_from = profile
         all_names = [f.path for f in self.files]
         plan = build_download_plan(
             self.selected_repo.id,
@@ -710,6 +683,41 @@ class HubScreen(Screen):
             all_ggufs=all_names,
         )
         expected = sum(item.size for item in self.files if item.path in plan.filenames)
+
+        from tui.app import LLMServeApp
+
+        app = self.app
+        if isinstance(app, LLMServeApp):
+
+            def on_done() -> None:
+                self._downloading = False
+                self.registry = load_registry(self.models_json_path, models_dir=self.models_dir)
+                self._set_status(f"[bold $success]Registered[/] {filename}")
+                if self.on_complete:
+                    self.on_complete()
+
+            def on_fail(message: str) -> None:
+                self._downloading = False
+                self._set_status(f"[bold $error]Download failed[/] {message[:140]}")
+
+            started = app.start_model_download(
+                plan=plan,
+                filename=filename,
+                expected_bytes=expected,
+                clone_from=clone_from,
+                display=display_name,
+                on_complete=on_done,
+                on_error=on_fail,
+            )
+            if not started:
+                return
+            self._downloading = True
+            self._set_status(
+                f"[bold $warning]DOWNLOADING[/] {filename}  — runs in background (close Hub anytime)"
+            )
+            self.notify("Download started in background", timeout=6)
+            return
+
         self._downloading = True
         self._set_status(
             f"[bold $warning]DOWNLOADING[/] {filename}  starting…  — leave Hub open"
@@ -718,7 +726,7 @@ class HubScreen(Screen):
             f"Downloading {filename} — stay on this Hub screen until it finishes",
             timeout=8,
         )
-        self._download_worker(plan, profile_name, clone_from, filename, expected)
+        self._download_worker(plan, display_name, clone_from, filename, expected)
 
     def _format_download_status(
         self,
@@ -788,21 +796,28 @@ class HubScreen(Screen):
 
             base_params = dict(self.registry.models[clone_from].params)
             source = build_source_metadata(plan, filename)
+            gguf_path = plan.local_dir / filename
             create_downloaded_model(
                 self.models_json_path,
                 profile_name,
                 base_params,
                 file_rel=plan.relative_file,
                 source=source,
+                gguf_path=gguf_path,
+                models_dir=self.models_dir,
             )
-            self.registry = load_registry(self.models_json_path)
+            self.registry = load_registry(self.models_json_path, models_dir=self.models_dir)
             if remember_hf_author(self.settings, plan.author):
                 save_settings(self.settings_path, self.settings)
                 self._refresh_author_preset_options()
 
             self.notify(f"Downloaded and registered {profile_name}")
+            extra = ""
+            info = read_gguf_architecture(gguf_path)
+            if info.block_count is not None:
+                extra = f"  layers={info.block_count} ({info.architecture or 'gguf'})"
             self._set_status(
-                f"[bold $success]Registered {profile_name}[/]  file={plan.relative_file}"
+                f"[bold $success]Registered {profile_name}[/]  file={plan.relative_file}{extra}"
             )
             if self.on_complete:
                 self.on_complete()
@@ -861,7 +876,11 @@ class HubScreen(Screen):
         self._change_offload(1)
 
     def action_close(self) -> None:
-        if self._downloading:
+        from tui.app import LLMServeApp
+
+        if self._downloading and not (
+            isinstance(self.app, LLMServeApp) and self.app.download_manager.busy
+        ):
             self.notify("Wait for the download to finish — leave Hub open", severity="warning")
             return
         self.dismiss(None)

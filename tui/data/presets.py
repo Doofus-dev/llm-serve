@@ -1,4 +1,4 @@
-"""Presets — named override sets for models. TUI owns presets.json."""
+"""Presets — named override sets per model quant. TUI owns presets.json."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any
 
 MAX_PRESETS_PER_MODEL = 5
 
-# Map models.json param names to llm-serve env var names
 PARAM_TO_ENV: dict[str, str] = {
     "ctx": "CONTEXT_SIZE",
     "gpu_layers": "GPU_LAYERS",
@@ -54,127 +53,209 @@ PARAM_TO_ENV: dict[str, str] = {
 
 @dataclass
 class Preset:
-    slot: int  # 1-5
+    slot: int
     name: str
     overrides: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class PresetStore:
-    """model_name -> {slot: Preset}"""
-    presets: dict[str, dict[int, Preset]] = field(default_factory=dict)
-    active: dict[str, int] = field(default_factory=dict)  # model_name -> slot
+    """model -> quant -> slot -> Preset"""
+    presets: dict[str, dict[str, dict[int, Preset]]] = field(default_factory=dict)
+    active: dict[str, dict[str, int]] = field(default_factory=dict)  # model -> quant -> slot
 
 
-def _parse_active(data: dict[str, Any]) -> dict[str, int]:
-    """Parse _active from presets.json (supports legacy global format)."""
+def _is_slot_dict(value: dict[str, Any]) -> bool:
+    if not value:
+        return False
+    for k, v in value.items():
+        if not str(k).isdigit():
+            return False
+        if not isinstance(v, dict):
+            return False
+        if "overrides" not in v and "name" not in v:
+            return False
+    return True
+
+
+def _parse_active(data: dict[str, Any]) -> dict[str, dict[str, int]]:
     active_raw = data.get("_active")
     if not isinstance(active_raw, dict):
         return {}
 
-    # Legacy: {"model": "qwen25", "slot": 1}
     if "model" in active_raw and "slot" in active_raw:
-        model = active_raw.get("model")
+        model = str(active_raw.get("model", ""))
         slot = active_raw.get("slot")
         if model and slot is not None:
-            return {model: int(slot)}
+            return {model: {"": int(slot)}}
         return {}
 
-    # Per-model: {"qwen25": 1, "qwen36": 2}
-    return {model: int(slot) for model, slot in active_raw.items()}
+    result: dict[str, dict[str, int]] = {}
+    for model, quant_map in active_raw.items():
+        if isinstance(quant_map, dict):
+            parsed: dict[str, int] = {}
+            for quant, slot in quant_map.items():
+                parsed[str(quant)] = int(slot)
+            result[str(model)] = parsed
+        elif isinstance(quant_map, int):
+            result[str(model)] = {"": int(quant_map)}
+    return result
+
+
+def _migrate_flat_presets(data: dict[str, Any]) -> tuple[dict[str, dict[str, dict[int, Preset]]], dict[str, dict[str, int]], bool]:
+    """Convert model->slot presets to model->quant->slot."""
+    changed = False
+    presets: dict[str, dict[str, dict[int, Preset]]] = {}
+    active = _parse_active(data)
+
+    for model_name, body in data.items():
+        if model_name.startswith("_") or not isinstance(body, dict):
+            continue
+        if _is_slot_dict(body):
+            changed = True
+            quant = "LOCAL"
+            presets.setdefault(model_name, {})[quant] = {}
+            for slot_str, preset_data in body.items():
+                slot = int(slot_str)
+                presets[model_name][quant][slot] = Preset(
+                    slot=slot,
+                    name=preset_data.get("name", f"slot-{slot}"),
+                    overrides=preset_data.get("overrides", {}),
+                )
+            if model_name in active and "" in active[model_name]:
+                old_slot = active[model_name].pop("")
+                active[model_name][quant] = old_slot
+            continue
+
+        presets[model_name] = {}
+        for quant, slots in body.items():
+            if not isinstance(slots, dict):
+                continue
+            presets[model_name][str(quant)] = {}
+            for slot_str, preset_data in slots.items():
+                if not str(slot_str).isdigit() or not isinstance(preset_data, dict):
+                    continue
+                slot = int(slot_str)
+                presets[model_name][str(quant)][slot] = Preset(
+                    slot=slot,
+                    name=preset_data.get("name", f"slot-{slot}"),
+                    overrides=preset_data.get("overrides", {}),
+                )
+
+    return presets, active, changed
 
 
 def load_presets(path: Path) -> PresetStore:
-    """Load presets.json."""
     if not path.exists():
         return PresetStore()
 
     data = json.loads(path.read_text())
-    store = PresetStore()
-    store.active = _parse_active(data)
+    presets, active, changed = _migrate_flat_presets(data)
+    store = PresetStore(presets=presets, active=active)
 
-    for model_name, slots in data.items():
-        if model_name.startswith("_"):
-            continue
-        store.presets[model_name] = {}
-        for slot_str, preset_data in slots.items():
-            slot = int(slot_str)
-            store.presets[model_name][slot] = Preset(
-                slot=slot,
-                name=preset_data.get("name", f"slot-{slot}"),
-                overrides=preset_data.get("overrides", {})
-            )
+    if changed:
+        save_presets(path, store)
 
-    # Drop stale active entries
     store.active = {
-        model: slot
-        for model, slot in store.active.items()
-        if get_preset(store, model, slot) is not None
+        model: {q: s for q, s in quants.items() if get_preset(store, model, q, s) is not None}
+        for model, quants in store.active.items()
     }
-
+    store.active = {m: q for m, q in store.active.items() if q}
     return store
 
 
 def save_presets(path: Path, store: PresetStore) -> None:
-    """Save presets to presets.json."""
     data: dict[str, Any] = {}
     if store.active:
-        data["_active"] = {model: slot for model, slot in sorted(store.active.items())}
-    for model_name, slots in store.presets.items():
+        data["_active"] = {
+            model: {quant: slot for quant, slot in sorted(quants.items())}
+            for model, quants in sorted(store.active.items())
+        }
+    for model_name, quants in store.presets.items():
         data[model_name] = {}
-        for slot, preset in slots.items():
-            data[model_name][str(slot)] = {
-                "name": preset.name,
-                "overrides": preset.overrides
-            }
-
+        for quant, slots in quants.items():
+            data[model_name][quant] = {}
+            for slot, preset in slots.items():
+                data[model_name][quant][str(slot)] = {
+                    "name": preset.name,
+                    "overrides": preset.overrides,
+                }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
-def get_active_slot(store: PresetStore, model: str) -> int | None:
-    """Get the active preset slot for a model, if any."""
-    return store.active.get(model)
+def resolve_quant(model: str, quant: str | None, active_quant: str | None = None) -> str:
+    return quant or active_quant or "LOCAL"
 
 
-def set_active_preset(store: PresetStore, model: str, slot: int) -> None:
-    """Mark a preset as active for its model."""
-    store.active[model] = slot
+def get_active_slot(store: PresetStore, model: str, quant: str) -> int | None:
+    return store.active.get(model, {}).get(quant)
 
 
-def clear_active_preset(store: PresetStore, model: str) -> None:
-    """Clear the active preset for a model."""
-    store.active.pop(model, None)
+def set_active_preset(store: PresetStore, model: str, quant: str, slot: int) -> None:
+    store.active.setdefault(model, {})[quant] = slot
 
 
-def get_preset(store: PresetStore, model: str, slot: int) -> Preset | None:
-    """Get a preset by model and slot."""
-    return store.presets.get(model, {}).get(slot)
+def clear_active_preset(store: PresetStore, model: str, quant: str | None = None) -> None:
+    if quant is None:
+        store.active.pop(model, None)
+        return
+    if model in store.active:
+        store.active[model].pop(quant, None)
+        if not store.active[model]:
+            store.active.pop(model, None)
 
 
-def set_preset(store: PresetStore, model: str, slot: int, name: str, overrides: dict[str, Any]) -> None:
-    """Set a preset."""
-    if model not in store.presets:
-        store.presets[model] = {}
-    store.presets[model][slot] = Preset(slot=slot, name=name, overrides=overrides)
+def get_preset(store: PresetStore, model: str, quant: str, slot: int) -> Preset | None:
+    return store.presets.get(model, {}).get(quant, {}).get(slot)
 
 
-def delete_preset(store: PresetStore, model: str, slot: int) -> None:
-    """Delete a preset."""
-    if model in store.presets and slot in store.presets[model]:
-        del store.presets[model][slot]
-        if not store.presets[model]:
+def list_presets_for_quant(store: PresetStore, model: str, quant: str) -> dict[int, Preset]:
+    return dict(store.presets.get(model, {}).get(quant, {}))
+
+
+def next_free_slot(store: PresetStore, model: str, quant: str) -> int | None:
+    used = store.presets.get(model, {}).get(quant, {})
+    for slot in range(1, MAX_PRESETS_PER_MODEL + 1):
+        if slot not in used:
+            return slot
+    return None
+
+
+def set_preset(
+    store: PresetStore,
+    model: str,
+    quant: str,
+    slot: int,
+    name: str,
+    overrides: dict[str, Any],
+) -> None:
+    store.presets.setdefault(model, {}).setdefault(quant, {})[slot] = Preset(
+        slot=slot, name=name, overrides=overrides
+    )
+
+
+def delete_preset(store: PresetStore, model: str, quant: str, slot: int) -> None:
+    quants = store.presets.get(model, {})
+    if quant in quants and slot in quants[quant]:
+        del quants[quant][slot]
+        if not quants[quant]:
+            del quants[quant]
+        if not quants:
             del store.presets[model]
 
 
+def delete_all_presets_for_model(store: PresetStore, model: str) -> None:
+    store.presets.pop(model, None)
+    store.active.pop(model, None)
+
+
 def apply_preset(base_params: dict[str, Any], preset: Preset) -> dict[str, Any]:
-    """Merge base model params with preset overrides."""
     merged = dict(base_params)
     merged.update(preset.overrides)
     return merged
 
 
 def overrides_to_env(overrides: dict[str, Any]) -> dict[str, str]:
-    """Convert preset overrides to llm-serve environment variables."""
     env: dict[str, str] = {}
     for key, value in overrides.items():
         env_key = PARAM_TO_ENV.get(key, key.upper())

@@ -12,12 +12,22 @@ async def main():
     app = LLMServeApp()
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause(0.5)
-        # Check the tree has models
-        from tui.app import ModelTree, StatusPanel, ConfigPanel, LogPanel
+        from tui.app import ModelTree, StatusPanel, ConfigPanel
+
         tree = app.query_one(ModelTree)
-        labels = [str(c.label) for c in tree.root.children]
-        assert labels == ["qwen25", "qwen36", "qwen36-deep", "Aliases"], labels
-        print("tree models:", labels)
+        model_slugs = [
+            c.data[1]
+            for c in tree.root.children
+            if c.data and c.data[0] == "model"
+        ]
+        assert "qwen25" in model_slugs, model_slugs
+        assert "qwen36" in model_slugs, model_slugs
+        print("tree models:", model_slugs)
+
+        # Tree shows display names, not slugs
+        labels = [str(c.label) for c in tree.root.children if c.data and c.data[0] == "model"]
+        assert any("qwen" in label.lower() for label in labels), labels
+        print("tree labels:", labels)
 
         status = app.query_one(StatusPanel)
         rendered = status.render()
@@ -29,9 +39,9 @@ async def main():
         cfg.registry = app.registry
         text = cfg.render()
         assert "gpu_layers" in text and "32768" in text
+        assert "display" in text
         print("config panel OK")
 
-        # trigger refresh + gpu poll actions
         app._refresh_pid()
         app._poll_gpu()
         await pilot.pause(0.3)
@@ -39,10 +49,8 @@ async def main():
         assert "GPU" in r2 and ("AMD" in r2 or "RAM" in r2)
         print("gpu section OK")
 
-        # press keys
         await pilot.press("r")
         await pilot.pause(0.2)
         print("smoke test PASSED")
 
 asyncio.run(main())
-

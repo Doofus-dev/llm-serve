@@ -14,8 +14,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Focus
 from textual.reactive import reactive
+from textual import work
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Label, RichLog, Static, Tree,
+    Button, DataTable, Footer, Header, Input, Label, ProgressBar, RichLog, Static, Tree,
     Collapsible, Select
 )
 from textual.widgets.tree import TreeNode
@@ -28,15 +29,41 @@ from tui.data.models_json import (
     load_registry,
     save_registry,
     delete_model,
-    create_model,
     update_model,
     merge_editor_params,
+    sync_gguf_architecture,
+    set_active_quant,
+    add_or_update_quant,
+    find_model_by_repo,
+    model_author_size_line,
 )
 from tui.data.param_help import get_param_help, load_param_help
-from tui.data.presets import PresetStore, Preset, load_presets, save_presets, get_preset, set_preset, delete_preset, apply_preset, overrides_to_env, get_active_slot, set_active_preset, clear_active_preset, MAX_PRESETS_PER_MODEL
+from tui.data.presets import (
+    PresetStore,
+    Preset,
+    load_presets,
+    save_presets,
+    get_preset,
+    set_preset,
+    delete_preset,
+    apply_preset,
+    overrides_to_env,
+    get_active_slot,
+    set_active_preset,
+    clear_active_preset,
+    delete_all_presets_for_model,
+    MAX_PRESETS_PER_MODEL,
+    next_free_slot,
+    list_presets_for_quant,
+)
 from tui.data.settings import TUISettings, load_settings, save_settings
 from tui.screens.hub import HubScreen
+from tui.screens.quant_picker import QuantPickerScreen
+from tui.data.downloads import DownloadManager, DownloadJob
+from tui.data.quant import parse_gguf_filename, quant_from_filename
+from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
 from tui.data.baselines import RunBaseline, record_baseline
+from tui.data.gguf import apply_architecture_from_gguf
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
@@ -68,6 +95,9 @@ PARAM_GROUPS = {
 ALL_PARAMS = []
 for group_params in PARAM_GROUPS.values():
     ALL_PARAMS.extend(group_params)
+
+# Architecture facts from the GGUF header — shown but not editable.
+LOCKED_PARAMS = frozenset({"total_layers"})
 
 
 class ParamFocused(Message):
@@ -138,35 +168,6 @@ def fmt_ctx(n) -> str:
     return str(n)
 
 
-def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | None]:
-    """Extract (params, variant, quant) from a GGUF filename.
-
-    Examples:
-      Qwen2.5-7B-Instruct-Q8_0.gguf        → 7B, Instruct, Q8_0
-      Qwen3.6-27B-Q3_K_S.gguf              → 27B, None, Q3_K_S
-      Qwen3.6-27B-UD-Q3_K_XL.gguf          → 27B, UD, Q3_K_XL
-    """
-    stem = Path(filename).stem
-
-    params = None
-    if m := re.search(r"(\d+(?:\.\d+)?[BMbm])", stem):
-        params = m.group(1).upper()
-
-    variant = None
-    if re.search(r"[-_]UD[-_]", stem, re.I):
-        variant = "UD"  # Unsloth Dynamic — mixed-layer quant
-    elif re.search(r"Instruct", stem, re.I):
-        variant = "Instruct"
-    elif re.search(r"Chat", stem, re.I):
-        variant = "Chat"
-
-    quant = None
-    if m := re.search(r"(Q\d+_K_[A-Z0-9]+|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)", stem, re.I):
-        quant = m.group(1).upper()
-
-    return params, variant, quant
-
-
 def model_author(params: dict, file: str) -> str | None:
     source = params.get("source")
     if isinstance(source, dict):
@@ -218,8 +219,58 @@ def fmt_model_runtime_line(params: dict) -> str:
     return f"ctx: {ctx}  ngl: {ngl}"
 
 
+class DownloadBar(Vertical):
+    """Progress strip shown only while a Hub download is running."""
+
+    DEFAULT_CSS = """
+    DownloadBar {
+        height: 0;
+        overflow: hidden;
+        padding: 0;
+        border: none;
+    }
+
+    DownloadBar.visible {
+        height: 3;
+        padding: 0 1;
+        border-bottom: solid $warning;
+        background: $surface-darken-1;
+    }
+
+    DownloadBar #download-label {
+        height: 1;
+        color: $warning;
+    }
+
+    DownloadBar ProgressBar {
+        height: 1;
+        width: 1fr;
+    }
+    """
+
+    def apply_state(self, state) -> None:
+        """Update visibility and progress from DownloadState."""
+        if state.running:
+            self.add_class("visible")
+            label = self.query_one("#download-label", Label)
+            label.update(state.status_line or f"Downloading {state.filename}…")
+            bar = self.query_one("#download-progress", ProgressBar)
+            total = state.progress_total
+            if total:
+                bar.update(total=float(total), progress=float(state.used_bytes))
+            else:
+                bar.update(total=None, progress=0.0)
+        else:
+            self.remove_class("visible")
+            self.query_one("#download-progress", ProgressBar).update(total=None)
+
+    def compose(self) -> ComposeResult:
+        yield Label("", id="download-label")
+        yield ProgressBar(total=None, id="download-progress", show_eta=False)
+
+
 class ModelTree(Tree):
-    """Left panel: models, presets, and aliases."""
+    """Left panel: models (by family), quants, presets, and aliases."""
 
     def __init__(self, registry: Registry, preset_store: PresetStore):
         super().__init__("Models")
@@ -235,20 +286,20 @@ class ModelTree(Tree):
         self.root.remove_children()
         aliases = self.registry.aliases
         for name, model in self.registry.models.items():
-            node = self.root.add(name, data=("model", name))
-            node.add_leaf(fmt_model_file_line(model.file, model.params))
-            node.add_leaf(fmt_model_source_line(model.params, model.file))
-            node.add_leaf(fmt_model_runtime_line(model.params))
-            
-            # Add presets
-            if name in self.preset_store.presets:
-                for slot in sorted(self.preset_store.presets[name].keys()):
-                    preset = self.preset_store.presets[name][slot]
-                    label = f"[{slot}] {preset.name}"
-                    if self.preset_store.active.get(name) == slot:
-                        label += " [ACTIVE]"
-                    node.add_leaf(label, data=("preset", name, slot))
-        
+            display = model.display
+            node = self.root.add(display, data=("model", name))
+            node.add_leaf(model_author_size_line(model), data=("info", name))
+            active_q = model.active_quant or quant_from_filename(model.file)
+            quant_label = f"Quant  {active_q} ▾"
+            node.add_leaf(quant_label, data=("quant", name))
+            node.add_leaf(fmt_model_runtime_line(model.params), data=("info", name))
+
+            for slot, preset in sorted(list_presets_for_quant(self.preset_store, name, active_q).items()):
+                label = f"[{slot}] {preset.name}"
+                if get_active_slot(self.preset_store, name, active_q) == slot:
+                    label += " [ACTIVE]"
+                node.add_leaf(label, data=("preset", name, active_q, slot))
+
         if aliases:
             an = self.root.add("Aliases")
             for alias, target in aliases.items():
@@ -328,6 +379,10 @@ class ConfigPanel(Static):
         if self.selected and self.registry and self.selected in self.registry.models:
             model = self.registry.models[self.selected]
             params = model.params
+            lines.append(f"[$accent]{'display':<18}[/] {model.display}")
+            active_q = model.active_quant
+            if active_q:
+                lines.append(f"[$accent]{'active_quant':<18}[/] {active_q}")
             author = model_author(params, model.file)
             if author:
                 lines.append(f"[$accent]{'author':<18}[/] {author}")
@@ -418,6 +473,7 @@ class ModelEditor(VerticalScroll):
         super().__init__()
         self.model_name = name
         self.params = dict(params)
+        apply_architecture_from_gguf(self.params, MODELS_DIR / str(self.params.get("file", "")))
         self.registry = registry
         self.inputs: dict[str, ParamInput] = {}
         self.on_save_callback = on_save
@@ -436,10 +492,14 @@ class ModelEditor(VerticalScroll):
                         for param in row_params:
                             value = self.params.get(param, "")
                             with Vertical(classes="param-field"):
-                                yield Label(param, classes="param-label")
-                                inp = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
-                                self.inputs[param] = inp
-                                yield inp
+                                if param in LOCKED_PARAMS:
+                                    yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
+                                    yield Static(str(value) if value != "" else "—", classes="param-locked")
+                                else:
+                                    yield Label(param, classes="param-label")
+                                    inp = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
+                                    self.inputs[param] = inp
+                                    yield inp
         
         yield Label("")
         with Horizontal():
@@ -468,6 +528,9 @@ class ModelEditor(VerticalScroll):
                     new_params[param] = val
             else:
                 new_params[param] = val
+        for param in LOCKED_PARAMS:
+            if param in self.params:
+                new_params[param] = self.params[param]
         new_params = merge_editor_params(self.params, new_params, set(ALL_PARAMS))
         
         self.on_save_callback(new_params)
@@ -590,15 +653,20 @@ class PresetEditor(VerticalScroll):
         super().__init__()
         self.model_name = model_name
         self.slot = slot
+        self.is_new = preset is None
         self.preset = preset or Preset(slot=slot, name=f"slot-{slot}", overrides={})
-        self.base_params = base_params
+        self.base_params = dict(base_params)
+        apply_architecture_from_gguf(
+            self.base_params, MODELS_DIR / str(self.base_params.get("file", ""))
+        )
         self.inputs: dict[str, ParamInput] = {}
         self.name_input: EditorInput | None = None
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold]Edit Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
+        verb = "New" if self.is_new else "Edit"
+        yield Label(f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
         yield Label("")
         yield Label("Preset name:", classes="field-label")
         self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
@@ -619,6 +687,10 @@ class PresetEditor(VerticalScroll):
                             is_override = param in self.preset.overrides
                             
                             with Vertical(classes="param-field"):
+                                if param in LOCKED_PARAMS:
+                                    yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
+                                    yield Static(str(base_value) if base_value != "" else "—", classes="param-locked")
+                                    continue
                                 if is_override:
                                     yield Label(f"{param}*", classes="param-label-override")
                                 else:
@@ -650,7 +722,7 @@ class PresetEditor(VerticalScroll):
             base_val = str(self.base_params.get(param, ""))
             
             # Only save if different from base
-            if val != base_val:
+            if val != base_val and param not in LOCKED_PARAMS:
                 # Try to convert to number
                 if val and val.lstrip('-').replace('.', '').isdigit():
                     try:
@@ -733,6 +805,11 @@ class LLMServeApp(App):
         background: $surface;
     }
 
+    #app-body {
+        height: 1fr;
+        layout: vertical;
+    }
+
     #main { height: 1fr; }
     #left { width: 32; border-right: solid $primary; }
     #right { layout: vertical; }
@@ -756,10 +833,17 @@ class LLMServeApp(App):
         margin: 0;
     }
     
-    .param-field Input {
+    .param-field Input,
+    .param-field .param-locked {
         height: 3;
         margin: 0;
         padding: 0 1;
+    }
+
+    .param-locked {
+        color: $text-muted;
+        content-align: left middle;
+        border: tall $secondary;
     }
     
     Collapsible {
@@ -826,14 +910,16 @@ class LLMServeApp(App):
         Binding("a", "apply", "Apply"),
         Binding("t", "change_theme", "Theme"),
         Binding("h", "open_hub", "Hub"),
+        Binding("p", "pick_quant", "Quant"),
         Binding("f1", "help", "Help"),
     ]
 
     def __init__(self):
         super().__init__()
-        self.registry = load_registry(MODELS_JSON)
+        self.registry = load_registry(MODELS_JSON, models_dir=MODELS_DIR)
         self.preset_store = load_presets(PRESETS_JSON)
         self.settings = load_settings(TUI_SETTINGS_JSON)
+        self.download_manager = DownloadManager()
         self.client: ServerClient | None = None
         self._launch_time: float | None = None
         self._log_size: int = 0
@@ -847,13 +933,15 @@ class LLMServeApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Horizontal(id="main"):
-            with Vertical(id="left"):
-                yield ModelTree(self.registry, self.preset_store)
-            with Vertical(id="right"):
-                yield StatusPanel(id="status")
-                yield ConfigPanel(id="config")
-                yield LogPanel(id="logs")
+        with Vertical(id="app-body"):
+            yield DownloadBar(id="download-bar")
+            with Horizontal(id="main"):
+                with Vertical(id="left"):
+                    yield ModelTree(self.registry, self.preset_store)
+                with Vertical(id="right"):
+                    yield StatusPanel(id="status")
+                    yield ConfigPanel(id="config")
+                    yield LogPanel(id="logs")
         yield Footer()
 
     def _update_footer(self) -> None:
@@ -873,6 +961,7 @@ class LLMServeApp(App):
                 Binding("a", "apply", "Apply"),
                 Binding("t", "change_theme", "Theme"),
                 Binding("h", "open_hub", "Hub"),
+                Binding("p", "pick_quant", "Quant"),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
@@ -893,6 +982,168 @@ class LLMServeApp(App):
         self.set_interval(3.0, self._poll_log)
         self.query_one(LogPanel).tail_file(LOG_FILE)
         self._update_footer()
+        self.download_manager.subscribe(self._on_download_state)
+        self._reload_registry(notify_gguf=True)
+
+    def _on_download_state(self, state) -> None:
+        """Apply download progress on the UI thread."""
+
+        def apply() -> None:
+            try:
+                self.query_one("#download-bar", DownloadBar).apply_state(state)
+            except Exception:
+                pass
+
+        self.call_later(apply)
+
+    @work(exclusive=True)
+    async def _run_download_job(self, job: DownloadJob) -> None:
+        ok, message = await self.download_manager.run(job)
+        if ok:
+            if job.on_success:
+                job.on_success()
+        else:
+            if job.on_error:
+                job.on_error(message)
+
+    def _model_active_quant(self, model_name: str) -> str:
+        cfg = self.registry.models.get(model_name)
+        if not cfg:
+            return "LOCAL"
+        if cfg.active_quant:
+            return cfg.active_quant
+        return quant_from_filename(cfg.file)
+
+    def _switch_quant(self, model_name: str, quant_id: str) -> None:
+        if set_active_quant(MODELS_JSON, model_name, quant_id, models_dir=MODELS_DIR):
+            self._reload_registry()
+            self.notify(f"Switched to quant {quant_id}")
+        else:
+            self.notify(f"Quant {quant_id} not available", severity="error")
+
+    def start_model_download(
+        self,
+        *,
+        plan,
+        filename: str,
+        expected_bytes: int,
+        clone_from: str,
+        display: str | None = None,
+        on_complete=None,
+        on_error=None,
+    ) -> bool:
+        if self.download_manager.busy:
+            self.notify("Another download is already running", severity="warning")
+            return False
+
+        repo = plan.repo_id
+
+        def _after_download() -> None:
+            from tui.data.gguf import read_gguf_architecture
+
+            base_params = dict(self.registry.models[clone_from].params)
+            source = build_source_metadata(plan, filename)
+            gguf_path = plan.local_dir / filename
+            slug, quant_id = add_or_update_quant(
+                MODELS_JSON,
+                repo_id=repo,
+                filename=filename,
+                file_rel=plan.relative_file,
+                source=source,
+                base_params=base_params,
+                gguf_path=gguf_path,
+                models_dir=MODELS_DIR,
+                display=display,
+            )
+            self._reload_registry()
+            extra = ""
+            info = read_gguf_architecture(gguf_path)
+            if info.block_count is not None:
+                extra = f" layers={info.block_count}"
+            self.notify(f"Registered {slug} quant {quant_id}{extra}")
+            if on_complete:
+                on_complete()
+
+        def _on_error(message: str) -> None:
+            self.notify(message[:200], severity="error")
+            if on_error:
+                on_error(message)
+
+        job = DownloadJob(
+            plan=plan,
+            filename=filename,
+            expected_bytes=expected_bytes,
+            clone_from=clone_from,
+            display=display,
+            on_success=_after_download,
+            on_error=_on_error,
+        )
+        self._run_download_job(job)
+        return True
+
+    def action_pick_quant(self) -> None:
+        tree = self.query_one(ModelTree)
+        node = tree.cursor_node
+        if node is None or not node.data:
+            self.notify("Select a model first", severity="warning")
+            return
+        kind = node.data[0]
+        if kind == "quant":
+            model_name = node.data[1]
+        elif kind in ("model", "info", "preset"):
+            model_name = node.data[1]
+        else:
+            self.notify("Select a model to change quant", severity="warning")
+            return
+        if model_name not in self.registry.models:
+            return
+        cfg = self.registry.models[model_name]
+
+        def on_download(model: str, filename: str, expected_bytes: int = 0) -> None:
+            source = cfg.params.get("source")
+            if not isinstance(source, dict) or not source.get("repo"):
+                self.notify("No Hub repo for this model", severity="error")
+                return
+            clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
+            plan = build_download_plan(source["repo"], filename, MODELS_DIR)
+            if not self.start_model_download(
+                plan=plan,
+                filename=filename,
+                expected_bytes=expected_bytes,
+                clone_from=clone_from,
+                display=cfg.display,
+            ):
+                return
+            self.notify(f"Downloading {filename}…", timeout=4)
+
+        def handle(result: str | None) -> None:
+            if result:
+                self._switch_quant(model_name, result)
+
+        self.push_screen(
+            QuantPickerScreen(
+                model_name,
+                cfg,
+                self.registry,
+                MODELS_DIR,
+                MODELS_JSON,
+                baselines_path=TUI_BASELINES_JSON,
+                on_download=on_download,
+            ),
+            handle,
+        )
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        node = event.node
+        if node.data and node.data[0] == "quant":
+            self.action_pick_quant()
+        elif node.data and node.data[0] == "preset":
+            _, model_name, quant, slot = node.data
+            set_active_preset(self.preset_store, model_name, quant, slot)
+            save_presets(PRESETS_JSON, self.preset_store)
+            self._reload_registry()
+            preset = get_preset(self.preset_store, model_name, quant, slot)
+            self.notify(f"Applied preset [{slot}] {preset.name if preset else ''}")
 
     def watch_theme(self, theme_name: str) -> None:
         """Persist theme choice and refresh panels that use theme colors."""
@@ -935,11 +1186,17 @@ class LLMServeApp(App):
             panel.metrics = await self.client.metrics()
             if panel.props is None:
                 panel.props = await self.client.props()
-            self._record_baseline(panel)
+            try:
+                self._record_baseline(panel)
+            except Exception:
+                pass
 
     def _poll_gpu(self) -> None:
         self.query_one(StatusPanel).gpu = query_gpu()
-        self._record_baseline(self.query_one(StatusPanel))
+        try:
+            self._record_baseline(self.query_one(StatusPanel))
+        except Exception:
+            pass
 
     def _poll_log(self) -> None:
         try:
@@ -954,9 +1211,10 @@ class LLMServeApp(App):
         if model_name not in self.registry.models:
             return None
         params = dict(self.registry.models[model_name].params)
-        slot = get_active_slot(self.preset_store, model_name)
+        quant = self._model_active_quant(model_name)
+        slot = get_active_slot(self.preset_store, model_name, quant)
         if slot is not None:
-            preset = get_preset(self.preset_store, model_name, slot)
+            preset = get_preset(self.preset_store, model_name, quant, slot)
             if preset:
                 params.update(preset.overrides)
         return params
@@ -1024,9 +1282,10 @@ class LLMServeApp(App):
         except OSError:
             return
 
-    def _reload_registry(self) -> None:
+    def _reload_registry(self, *, notify_gguf: bool = False) -> None:
         """Reload models.json and presets.json, refresh UI."""
-        self.registry = load_registry(MODELS_JSON)
+        changes = sync_gguf_architecture(MODELS_JSON, MODELS_DIR)
+        self.registry = load_registry(MODELS_JSON, models_dir=MODELS_DIR)
         self.preset_store = load_presets(PRESETS_JSON)
         tree = self.query_one(ModelTree)
         tree.registry = self.registry
@@ -1034,6 +1293,9 @@ class LLMServeApp(App):
         tree.refresh_tree()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
+        if notify_gguf and changes:
+            bits = ", ".join(f"{name} {old}→{new}" for name, old, new in changes)
+            self.notify(f"Updated total_layers from GGUF: {bits}")
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         node: TreeNode = event.node
@@ -1054,6 +1316,10 @@ class LLMServeApp(App):
             return node.data[1]
         if node.data and node.data[0] == "alias":
             return self.registry.aliases.get(node.data[1])
+        if node.data and node.data[0] == "preset":
+            return node.data[1]
+        if node.data and node.data[0] in ("quant", "info"):
+            return node.data[1]
         if node.parent and node.parent.data and node.parent.data[0] == "model":
             return node.parent.data[1]
         return None
@@ -1066,12 +1332,13 @@ class LLMServeApp(App):
         
         # Check if we have an active preset for this model
         env_overrides = {}
-        slot = get_active_slot(self.preset_store, model)
+        quant = self._model_active_quant(model)
+        slot = get_active_slot(self.preset_store, model, quant)
         if slot is not None:
-            preset = get_preset(self.preset_store, model, slot)
+            preset = get_preset(self.preset_store, model, quant, slot)
             if preset:
                 env_overrides = overrides_to_env(preset.overrides)
-                self.notify(f"Launching {model} with preset [{slot}] {preset.name}")
+                self.notify(f"Launching {model} ({quant}) preset [{slot}] {preset.name}")
         
         try:
             import os
@@ -1101,7 +1368,7 @@ class LLMServeApp(App):
         self._refresh_pid()
 
     def action_refresh(self) -> None:
-        self._reload_registry()
+        self._reload_registry(notify_gguf=True)
         self._refresh_pid()
         self._poll_gpu()
         self._poll_log()
@@ -1167,8 +1434,8 @@ class LLMServeApp(App):
         
         # Check if it's a preset
         if node.data and node.data[0] == "preset":
-            _, model_name, slot = node.data
-            self._edit_preset(model_name, slot)
+            _, model_name, quant, slot = node.data
+            self._edit_preset(model_name, quant, slot)
             return
         
         # Check if it's an alias
@@ -1187,7 +1454,8 @@ class LLMServeApp(App):
         if model not in self.registry.models:
             self.notify(f"Model '{model}' not found", severity="error")
             return
-        
+
+        self._reload_registry()
         cfg = self.registry.models[model]
         
         def on_save(new_params: dict) -> None:
@@ -1203,17 +1471,18 @@ class LLMServeApp(App):
         editor = ModelEditor(model, cfg.params, self.registry, on_save, on_cancel)
         self._enter_param_editor(editor)
 
-    def _edit_preset(self, model_name: str, slot: int) -> None:
+    def _edit_preset(self, model_name: str, quant: str, slot: int) -> None:
         """Edit a preset."""
+        self._reload_registry()
         base_params = self.registry.models[model_name].params
-        preset = get_preset(self.preset_store, model_name, slot)
-        
+        preset = get_preset(self.preset_store, model_name, quant, slot)
+
         def on_save(name: str, overrides: dict) -> None:
-            set_preset(self.preset_store, model_name, slot, name, overrides)
+            set_preset(self.preset_store, model_name, quant, slot, name, overrides)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
             self._exit_editor()
-            self.notify(f"Saved preset {model_name} [{slot}] {name}")
+            self.notify(f"Saved preset {model_name}/{quant} [{slot}] {name}")
         
         def on_cancel() -> None:
             self._exit_editor()
@@ -1295,11 +1564,12 @@ class LLMServeApp(App):
             self.notify("Edit cancelled")
 
     def action_new(self) -> None:
-        # Check if an alias is selected
+        if self._editor_mode or self._alias_editor_mode:
+            self.notify("Close the editor first", severity="warning")
+            return
         tree = self.query_one(ModelTree)
         node = tree.cursor_node
         if node and node.data and node.data[0] == "alias":
-            # Create new alias
             def handle_alias_result(result: tuple[str, str] | None) -> None:
                 if result is not None:
                     name, target = result
@@ -1307,19 +1577,30 @@ class LLMServeApp(App):
                     save_registry(MODELS_JSON, self.registry)
                     self._reload_registry()
                     self.notify(f"Created alias {name} → {target}")
-            
+
             self.push_screen(CreateAliasDialog(self.registry), handle_alias_result)
-        else:
-            # Create new model
-            def handle_model_result(result: tuple[str, str] | None) -> None:
-                if result is not None:
-                    name, clone_from = result
-                    base_params = dict(self.registry.models[clone_from].params)
-                    create_model(MODELS_JSON, name, base_params)
-                    self._reload_registry()
-                    self.notify(f"Created {name} (cloned from {clone_from})")
-            
-            self.push_screen(CreateModelDialog(self.registry), handle_model_result)
+            return
+
+        model = self._selected_model()
+        if not model:
+            self.notify("Select a model first to create a preset", severity="warning")
+            return
+        self._new_preset_for_model(model)
+
+    def _new_preset_for_model(self, model_name: str) -> None:
+        """Open the preset editor on the next free slot for this model's active quant."""
+        if model_name not in self.registry.models:
+            self.notify(f"Model '{model_name}' not found", severity="error")
+            return
+        quant = self._model_active_quant(model_name)
+        slot = next_free_slot(self.preset_store, model_name, quant)
+        if slot is None:
+            self.notify(
+                f"{model_name}/{quant} already has {MAX_PRESETS_PER_MODEL} presets",
+                severity="warning",
+            )
+            return
+        self._edit_preset(model_name, quant, slot)
 
     def action_delete(self) -> None:
         tree = self.query_one(ModelTree)
@@ -1330,31 +1611,29 @@ class LLMServeApp(App):
         
         # Check if it's a preset
         if node.data and node.data[0] == "preset":
-            _, model_name, slot = node.data
-            preset = get_preset(self.preset_store, model_name, slot)
+            _, model_name, quant, slot = node.data
+            preset = get_preset(self.preset_store, model_name, quant, slot)
             if not preset:
                 self.notify("Preset not found", severity="error")
                 return
-            
-            # Check if server is running with this preset
+
             pid_info = read_pid_file(PID_FILE)
             if pid_info and pid_info.alive and pid_info.model == model_name:
-                # Check if this preset is active
-                if self.preset_store.active.get(model_name) == slot:
-                    self.notify(f"Cannot delete preset while server is running with it", severity="error")
+                if get_active_slot(self.preset_store, model_name, quant) == slot:
+                    self.notify("Cannot delete preset while server is running with it", severity="error")
                     return
-            
-            msg = f"Delete preset '{preset.name}' (slot {slot}) for {model_name}?"
-            
+
+            msg = f"Delete preset '{preset.name}' (slot {slot}) for {model_name}/{quant}?"
+
             def handle_preset_confirm(confirmed: bool) -> None:
                 if confirmed:
-                    delete_preset(self.preset_store, model_name, slot)
-                    if self.preset_store.active.get(model_name) == slot:
-                        clear_active_preset(self.preset_store, model_name)
+                    delete_preset(self.preset_store, model_name, quant, slot)
+                    if get_active_slot(self.preset_store, model_name, quant) == slot:
+                        clear_active_preset(self.preset_store, model_name, quant)
                     save_presets(PRESETS_JSON, self.preset_store)
                     self._reload_registry()
-                    self.notify(f"Deleted preset {model_name} [{slot}]")
-            
+                    self.notify(f"Deleted preset {model_name}/{quant} [{slot}]")
+
             self.push_screen(ConfirmDialog(msg), handle_preset_confirm)
             return
         
@@ -1388,10 +1667,7 @@ class LLMServeApp(App):
         def handle_model_confirm(confirmed: bool) -> None:
             if confirmed:
                 delete_model(MODELS_JSON, model)
-                # Also delete all presets for this model
-                if model in self.preset_store.presets:
-                    del self.preset_store.presets[model]
-                clear_active_preset(self.preset_store, model)
+                delete_all_presets_for_model(self.preset_store, model)
                 save_presets(PRESETS_JSON, self.preset_store)
                 self._reload_registry()
                 self.notify(f"Deleted {model}")
@@ -1399,16 +1675,16 @@ class LLMServeApp(App):
         self.push_screen(ConfirmDialog(msg), handle_model_confirm)
 
     def action_apply(self) -> None:
-        """Apply the selected preset (mark as active)."""
+        """Apply the selected preset (mark as active for its quant)."""
         tree = self.query_one(ModelTree)
         node = tree.cursor_node
         if node and node.data and node.data[0] == "preset":
-            _, model_name, slot = node.data
-            set_active_preset(self.preset_store, model_name, slot)
+            _, model_name, quant, slot = node.data
+            set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
-            preset = get_preset(self.preset_store, model_name, slot)
-            self.notify(f"Applied preset {model_name} [{slot}] {preset.name if preset else ''}")
+            preset = get_preset(self.preset_store, model_name, quant, slot)
+            self.notify(f"Applied preset {model_name}/{quant} [{slot}] {preset.name if preset else ''}")
         else:
             self.notify("Select a preset first", severity="warning")
 
@@ -1418,7 +1694,7 @@ class LLMServeApp(App):
             return
 
         def on_complete() -> None:
-            self.registry = load_registry(MODELS_JSON)
+            self.registry = load_registry(MODELS_JSON, models_dir=MODELS_DIR)
             self._reload_registry()
 
         self.push_screen(
@@ -1435,7 +1711,7 @@ class LLMServeApp(App):
 
     def action_help(self) -> None:
         self.notify(
-            "Tab: switch pane | ↑↓: navigate | L: launch | S: stop | E: edit | N: new | D: delete | A: apply preset | H: Hub download | T: theme | Q: quit",
+            "Tab: switch pane | ↑↓: navigate | P/Enter: quant | L: launch | S: stop | E: edit | N: new preset | D: delete | A: apply preset | H: Hub | T: theme | Q: quit",
             title="Help", timeout=10,
         )
 

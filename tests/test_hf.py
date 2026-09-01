@@ -141,7 +141,7 @@ class ModelJsonTests(unittest.TestCase):
             create_downloaded_model(
                 path,
                 "qwen36-bart",
-                {"file": "old.gguf", "ctx": 4096, "port": 8081},
+                {"file": "old.gguf", "ctx": 4096, "port": 8081, "total_layers": 28},
                 file_rel="bartowski/Qwen3.6-27B-Q3_K_S.gguf",
                 source={
                     "hub": "huggingface",
@@ -156,6 +156,7 @@ class ModelJsonTests(unittest.TestCase):
             params = reg.models["qwen36-bart"].params
             self.assertEqual(params["file"], "bartowski/Qwen3.6-27B-Q3_K_S.gguf")
             self.assertEqual(params["source"]["author"], "bartowski")
+            self.assertNotIn("total_layers", params)
 
             update_model(path, "qwen36-bart", merge_editor_params(params, {"ctx": 8192}, {"ctx"}))
             reg2 = load_registry(path)
