@@ -38,6 +38,16 @@ from tui.data.models_json import (
     model_author_size_line,
 )
 from tui.data.param_help import get_param_help, load_param_help
+from tui.data.param_widgets import (
+    HIDDEN_EDITOR_PARAMS,
+    PARAM_ALLOW_BLANK,
+    PRESERVED_EDITOR_PARAMS,
+    fmt_locked_value,
+    is_select_param,
+    read_field_value,
+    select_initial_value,
+    select_options,
+)
 from tui.data.presets import (
     PresetStore,
     Preset,
@@ -120,6 +130,10 @@ class EditorInput(Input):
 
     BINDINGS = EDITOR_BINDINGS
 
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("compact", True)
+        super().__init__(*args, **kwargs)
+
     def _param_editor(self) -> ModelEditor | PresetEditor | None:
         node = self.parent
         while node is not None:
@@ -151,6 +165,102 @@ class ParamInput(EditorInput):
 
     def on_focus(self, event: Focus) -> None:
         self.post_message(ParamFocused(self.param_name))
+
+
+class EditorSelect(Select):
+    """Select in model/preset editor — keeps editor hotkeys visible in the footer."""
+
+    BINDINGS = EDITOR_BINDINGS
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("compact", True)
+        super().__init__(*args, **kwargs)
+
+    def _param_editor(self) -> ModelEditor | PresetEditor | None:
+        node = self.parent
+        while node is not None:
+            if isinstance(node, (ModelEditor, PresetEditor)):
+                return node
+            node = node.parent
+        return None
+
+    def action_toggle_param_help(self) -> None:
+        self.app.action_toggle_param_help()
+
+    def action_save_editor(self) -> None:
+        editor = self._param_editor()
+        if editor:
+            editor.save()
+
+    def action_cancel_editor(self) -> None:
+        editor = self._param_editor()
+        if editor:
+            editor.on_cancel_callback()
+
+
+class ParamSelect(EditorSelect):
+    """Select that notifies the app when focused (for F2 param help)."""
+
+    def __init__(self, param_name: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.param_name = param_name
+
+    def on_focus(self, event: Focus) -> None:
+        self.post_message(ParamFocused(self.param_name))
+
+
+class ParamEditorMixin:
+    """Shared compose/save helpers for model and preset parameter editors."""
+
+    fields: dict[str, ParamInput | ParamSelect]
+
+    def _yield_param_controls(
+        self,
+        param: str,
+        value: object,
+        *,
+        label_class: str = "param-label",
+        label: str | None = None,
+    ):
+        if param in HIDDEN_EDITOR_PARAMS:
+            return
+        if param in LOCKED_PARAMS:
+            yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
+            yield Label(fmt_locked_value(value), classes="param-locked")
+            return
+
+        yield Label(label or param, classes=label_class)
+        if is_select_param(param):
+            initial = select_initial_value(param, value)
+            select_kwargs: dict = {
+                "options": select_options(param),
+                "id": f"select_{param}",
+                "prompt": param,
+            }
+            if param in PARAM_ALLOW_BLANK:
+                select_kwargs["allow_blank"] = True
+                select_kwargs["value"] = Select.NULL if initial is None else initial
+            else:
+                select_kwargs["value"] = initial
+            widget = ParamSelect(param, **select_kwargs)
+            self.fields[param] = widget
+            yield widget
+            return
+
+        widget = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
+        self.fields[param] = widget
+        yield widget
+
+    def _read_fields(self) -> dict[str, object]:
+        values: dict[str, object] = {}
+        for param, widget in self.fields.items():
+            values[param] = read_field_value(param, widget)
+        return values
+
+    def _first_focusable_field(self) -> ParamInput | ParamSelect | EditorInput | None:
+        if getattr(self, "name_input", None):
+            return self.name_input
+        return next(iter(self.fields.values()), None)
 
 
 def fmt_uptime(seconds: float) -> str:
@@ -464,7 +574,7 @@ class ParamHelpPanel(VerticalScroll):
             text.update(f"[bold $accent]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
 
 
-class ModelEditor(VerticalScroll):
+class ModelEditor(ParamEditorMixin, VerticalScroll):
     """Editor panel for a model's parameters (takes over right side)."""
 
     BINDINGS = EDITOR_BINDINGS
@@ -475,13 +585,12 @@ class ModelEditor(VerticalScroll):
         self.params = dict(params)
         apply_architecture_from_gguf(self.params, MODELS_DIR / str(self.params.get("file", "")))
         self.registry = registry
-        self.inputs: dict[str, ParamInput] = {}
+        self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
 
     def compose(self) -> ComposeResult:
         yield Label(f"[bold]Edit Model: {self.model_name}[/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
-        yield Label("")
         
         for group_name, param_names in PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
@@ -492,16 +601,8 @@ class ModelEditor(VerticalScroll):
                         for param in row_params:
                             value = self.params.get(param, "")
                             with Vertical(classes="param-field"):
-                                if param in LOCKED_PARAMS:
-                                    yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
-                                    yield Static(str(value) if value != "" else "—", classes="param-locked")
-                                else:
-                                    yield Label(param, classes="param-label")
-                                    inp = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
-                                    self.inputs[param] = inp
-                                    yield inp
+                                yield from self._yield_param_controls(param, value)
         
-        yield Label("")
         with Horizontal():
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", variant="default", id="cancel")
@@ -514,21 +615,8 @@ class ModelEditor(VerticalScroll):
 
     def save(self) -> None:
         """Collect values and call save callback."""
-        new_params = {}
-        for param, inp in self.inputs.items():
-            val = inp.value.strip()
-            # Try to convert to number
-            if val and val.lstrip('-').replace('.', '').isdigit():
-                try:
-                    if '.' in val:
-                        new_params[param] = float(val)
-                    else:
-                        new_params[param] = int(val)
-                except ValueError:
-                    new_params[param] = val
-            else:
-                new_params[param] = val
-        for param in LOCKED_PARAMS:
+        new_params = dict(self._read_fields())
+        for param in PRESERVED_EDITOR_PARAMS:
             if param in self.params:
                 new_params[param] = self.params[param]
         new_params = merge_editor_params(self.params, new_params, set(ALL_PARAMS))
@@ -537,9 +625,9 @@ class ModelEditor(VerticalScroll):
 
     def on_mount(self) -> None:
         """Focus the first input when the editor mounts."""
-        first_input = next(iter(self.inputs.values()), None)
-        if first_input:
-            first_input.focus()
+        first = self._first_focusable_field()
+        if first:
+            first.focus()
 
     def action_toggle_param_help(self) -> None:
         self.app.action_toggle_param_help()
@@ -644,7 +732,7 @@ class AliasEditor(VerticalScroll):
             self.on_cancel_callback()
 
 
-class PresetEditor(VerticalScroll):
+class PresetEditor(ParamEditorMixin, VerticalScroll):
     """Editor panel for a preset (takes over right side)."""
 
     BINDINGS = EDITOR_BINDINGS
@@ -659,7 +747,7 @@ class PresetEditor(VerticalScroll):
         apply_architecture_from_gguf(
             self.base_params, MODELS_DIR / str(self.base_params.get("file", ""))
         )
-        self.inputs: dict[str, ParamInput] = {}
+        self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.name_input: EditorInput | None = None
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
@@ -667,13 +755,10 @@ class PresetEditor(VerticalScroll):
     def compose(self) -> ComposeResult:
         verb = "New" if self.is_new else "Edit"
         yield Label(f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
-        yield Label("")
         yield Label("Preset name:", classes="field-label")
         self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
         yield self.name_input
-        yield Label("")
         yield Label("[dim]Params that differ from base model are highlighted[/dim]")
-        yield Label("")
         
         for group_name, param_names in PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
@@ -685,21 +770,20 @@ class PresetEditor(VerticalScroll):
                             base_value = self.base_params.get(param, "")
                             override_value = self.preset.overrides.get(param, base_value)
                             is_override = param in self.preset.overrides
-                            
+                            label_class = "param-label-override" if is_override else "param-label"
+                            label = f"{param}*" if is_override else param
                             with Vertical(classes="param-field"):
                                 if param in LOCKED_PARAMS:
                                     yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
-                                    yield Static(str(base_value) if base_value != "" else "—", classes="param-locked")
+                                    yield Label(fmt_locked_value(base_value), classes="param-locked")
                                     continue
-                                if is_override:
-                                    yield Label(f"{param}*", classes="param-label-override")
-                                else:
-                                    yield Label(param, classes="param-label")
-                                inp = ParamInput(param, value=str(override_value), placeholder=param, id=f"input_{param}")
-                                self.inputs[param] = inp
-                                yield inp
+                                yield from self._yield_param_controls(
+                                    param,
+                                    override_value,
+                                    label_class=label_class,
+                                    label=label,
+                                )
         
-        yield Label("")
         with Horizontal():
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", variant="default", id="cancel")
@@ -717,30 +801,19 @@ class PresetEditor(VerticalScroll):
             name = f"slot-{self.slot}"
         
         overrides = {}
-        for param, inp in self.inputs.items():
-            val = inp.value.strip()
+        for param, val in self._read_fields().items():
             base_val = str(self.base_params.get(param, ""))
-            
-            # Only save if different from base
-            if val != base_val and param not in LOCKED_PARAMS:
-                # Try to convert to number
-                if val and val.lstrip('-').replace('.', '').isdigit():
-                    try:
-                        if '.' in val:
-                            overrides[param] = float(val)
-                        else:
-                            overrides[param] = int(val)
-                    except ValueError:
-                        overrides[param] = val
-                else:
-                    overrides[param] = val
+            stored_val = str(val) if val != "" else ""
+            if stored_val != base_val and param not in LOCKED_PARAMS:
+                overrides[param] = val
         
         self.on_save_callback(name, overrides)
 
     def on_mount(self) -> None:
         """Focus the name input when the editor mounts."""
-        if self.name_input:
-            self.name_input.focus()
+        first = self._first_focusable_field()
+        if first:
+            first.focus()
 
     def action_toggle_param_help(self) -> None:
         self.app.action_toggle_param_help()
@@ -816,7 +889,12 @@ class LLMServeApp(App):
     #status { height: auto; max-height: 22; border-bottom: solid $secondary; padding: 0 1; }
     #config { height: 1fr; padding: 0 1; }
     #logs { height: 12; border-top: solid $secondary; }
-    #editor-scroll { height: 1fr; }
+    #editor-scroll { height: 1fr; padding: 0 1; }
+    #editor-scroll > Label {
+        height: 1;
+        margin: 0;
+        padding: 0;
+    }
     #param-help { height: 50%; border-top: solid $secondary; padding: 0 1; display: none; }
     #right.help-open #editor-scroll { height: 50%; }
     #right.help-open #param-help { display: block; }
@@ -824,7 +902,7 @@ class LLMServeApp(App):
     .param-field {
         width: 1fr;
         margin: 0 1;
-        height: 4;
+        height: auto;
     }
     
     .param-field Label {
@@ -834,16 +912,98 @@ class LLMServeApp(App):
     }
     
     .param-field Input,
-    .param-field .param-locked {
-        height: 3;
+    .param-field Select {
         margin: 0;
         padding: 0 1;
     }
 
-    .param-locked {
+    .param-field Label.param-locked {
+        height: 1;
+        width: 1fr;
+        margin: 0;
+        padding: 0 1;
+        background: $surface-darken-1;
         color: $text-muted;
         content-align: left middle;
-        border: tall $secondary;
+    }
+
+    .param-field Select {
+        height: 1;
+        width: 1fr;
+        padding: 0;
+    }
+
+    .param-field Select > SelectCurrent {
+        height: 1;
+        width: 1fr;
+        padding: 0 1;
+        border: none;
+        background: $surface;
+    }
+
+    .param-field Select SelectCurrent Static#label {
+        height: 1;
+        width: 1fr;
+        padding: 0;
+    }
+
+    .param-field Select SelectCurrent .arrow {
+        height: 1;
+        padding: 0;
+    }
+
+    .param-field Select:focus > SelectCurrent {
+        background-tint: $foreground 15%;
+        border: none;
+    }
+
+    .param-field Select:focus SelectCurrent Static#label,
+    .param-field Select:focus SelectCurrent.-has-value Static#label {
+        color: $accent;
+    }
+
+    .param-field Select:focus SelectCurrent .arrow {
+        color: $accent;
+    }
+
+    .param-field Input:focus {
+        background-tint: $foreground 15%;
+    }
+
+    #editor-scroll Input {
+        margin: 0;
+        padding: 0 1;
+    }
+
+    #editor-scroll Select {
+        height: 1;
+        margin: 0;
+        padding: 0;
+    }
+
+    #editor-scroll Select > SelectCurrent {
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: $surface;
+    }
+
+    #editor-scroll Input:focus {
+        background-tint: $foreground 15%;
+    }
+
+    #editor-scroll Select:focus > SelectCurrent {
+        background-tint: $foreground 15%;
+        border: none;
+    }
+
+    #editor-scroll Select:focus SelectCurrent Static#label,
+    #editor-scroll Select:focus SelectCurrent.-has-value Static#label {
+        color: $accent;
+    }
+
+    #editor-scroll Select:focus SelectCurrent .arrow {
+        color: $accent;
     }
     
     Collapsible {
@@ -886,7 +1046,7 @@ class LLMServeApp(App):
     }
     
     Button { margin: 0 1; }
-    Input { margin: 0 0 1 0; }
+    Input { margin: 0; }
 
     .param-label {
         color: $accent;
@@ -898,6 +1058,9 @@ class LLMServeApp(App):
 
     .field-label {
         color: $accent;
+        height: 1;
+        margin: 0;
+        padding: 0;
     }
     """
     BINDINGS = [
@@ -1400,9 +1563,9 @@ class LLMServeApp(App):
         self._update_footer()
 
     def _current_focused_param(self) -> str | None:
-        """Read the param name from whichever input is focused in the editor."""
+        """Read the param name from whichever field is focused in the editor."""
         focused = self.focused
-        if isinstance(focused, ParamInput):
+        if isinstance(focused, (ParamInput, ParamSelect)):
             return focused.param_name
         return self._focused_param
 
