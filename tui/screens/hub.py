@@ -10,7 +10,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Input, Label, RichLog, Select, Static
+from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 from rich.text import Text
 
@@ -113,12 +113,23 @@ class HubScreen(Screen):
     }
 
     #hub-panel {
-        width: 85%;
-        max-width: 100;
+        width: 100%;
+        max-width: 120;
         height: 100%;
-        border: thick $primary;
+        border: round $primary;
         background: $surface;
-        padding: 0 1;
+        padding: 1 2;
+    }
+
+    #hub-title {
+        height: 1;
+        color: $accent;
+        content-align: left middle;
+    }
+
+    #hub-status {
+        height: 1;
+        content-align: left middle;
     }
 
     #hub-filters Horizontal {
@@ -126,53 +137,107 @@ class HubScreen(Screen):
         align: left middle;
     }
 
+    #hub-filters {
+        height: 6;
+        min-height: 6;
+    }
+
+    #hub-filters Button {
+        height: 3;
+        min-width: 0;
+        width: auto;
+        padding: 0 1;
+        margin: 0 1 0 0;
+        border: round $primary;
+        background: transparent;
+        color: $text;
+    }
+
+    #hub-filters Button:hover,
+    #hub-filters Button:focus {
+        background: transparent;
+    }
+
+    #hub-filters Button.-success {
+        border: round $success;
+        color: $success;
+    }
+
+    #hub-filters Button.-primary {
+        border: round $primary;
+        color: $primary;
+    }
+
+    #hub-filters #select {
+        min-width: 0;
+    }
+
     #hub-table {
         height: 1fr;
-        min-height: 5;
-        border: solid $accent;
+        min-height: 3;
+        border: round $accent;
     }
 
     #context-controls {
-        height: 3;
+        height: 1;
         align: left middle;
     }
 
     #context-label {
         width: auto;
+        height: 1;
         content-align: left middle;
         margin: 0 1 0 0;
     }
 
     #context-value {
         width: 8;
+        height: 1;
         content-align: center middle;
+    }
+
+    #context-controls Button {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        min-height: 1;
+        padding: 0;
+        margin: 0;
+        border: none;
+        background: transparent;
+        color: $primary;
     }
 
     #hardware-summary {
         width: 1fr;
+        height: 1;
         content-align: left middle;
         margin: 0 1;
     }
 
-    #hub-log {
-        height: 4;
-        border: solid $accent;
+    #hub-help {
+        height: 1;
+        min-height: 1;
     }
 
     #hub-filters Input {
         height: 3;
         min-width: 12;
         width: 1fr;
+        border: round $accent;
     }
 
     #hub-filters Select {
         height: 3;
-        width: 20;
+        width: 26;
+        border: none;
+        background: transparent;
+        color: $accent;
     }
 
     #hub-filters .field-label {
         width: auto;
-        height: 3;
+        height: 1;
         content-align: left middle;
         margin: 0 1 0 0;
     }
@@ -181,7 +246,7 @@ class HubScreen(Screen):
         width: 70;
         height: auto;
         background: $surface;
-        border: thick $primary;
+        border: round $primary;
         padding: 1 2;
         align: center middle;
     }
@@ -219,12 +284,13 @@ class HubScreen(Screen):
             yield Static("", id="hub-status")
             yield Label(
                 "[bold]Browse Hugging Face GGUF models[/]  "
-                "[dim]Tab: controls · ↑↓: list · Enter: open/download[/]",
+                "[dim]Tab: controls · ↑↓: list · Enter: open/download · "
+                "B: back · Esc: close[/]",
                 id="hub-title",
             )
             with Vertical(id="hub-filters"):
                 with Horizontal():
-                    yield Select([], id="author_preset", allow_blank=True)
+                    yield Select([], prompt="Previous authors", id="author_preset", allow_blank=True)
                     yield Input(placeholder="Author (e.g. bartowski)", id="author_filter")
                     yield Input(placeholder="Model name (e.g. Qwen3.6)", id="search_filter")
                 with Horizontal():
@@ -240,13 +306,9 @@ class HubScreen(Screen):
                 yield Button("▶", id="context-next")
                 yield Static("", id="hardware-summary")
             yield DataTable(id="hub-table", cursor_type="row")
-            yield RichLog(id="hub-log", highlight=True, markup=True)
             yield Static(
-                "[dim]Leave filters blank for trending. Focus the list and press Enter "
-                "on a repo, then Enter on a GGUF file to download it. "
-                "Press B to go back to repos, or Esc to close the Hub. "
-                "[green]●[/] comfortable  [yellow]●[/] tight  "
-                "[yellow]⚠[/] marginal  [red]●[/] too large[/]",
+                "[dim]Enter open · F filters · "
+                "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="hub-help",
             )
 
@@ -256,6 +318,7 @@ class HubScreen(Screen):
         self._update_auth_status()
         self.gpu = query_gpu()
         self._update_context_options()
+        self.query_one("#context-controls").display = False
         self.query_one("#hub-table", DataTable).focus()
         self._load_repos("", "")
 
@@ -285,6 +348,7 @@ class HubScreen(Screen):
         self.mode = "repos"
         self.selected_repo = None
         self.files = []
+        self.query_one("#context-controls").display = False
         self.query_one("#back", Button).disabled = True
         self.query_one("#select", Button).label = "Open / download"
         self._render_repo_table()
@@ -293,6 +357,7 @@ class HubScreen(Screen):
     def _set_mode_files(self, repo: HubRepo) -> None:
         self.mode = "files"
         self.selected_repo = repo
+        self.query_one("#context-controls").display = True
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
         self._update_context_options(repo.context_length)
@@ -379,7 +444,8 @@ class HubScreen(Screen):
             )
 
     def _log(self, message: str) -> None:
-        self.query_one("#hub-log", RichLog).write(message)
+        # Retained as a worker callback hook; the Hub no longer has a log panel.
+        return
 
     @work(thread=True)
     def _load_repos(self, author: str, search: str) -> None:
