@@ -13,16 +13,17 @@
 #   llm-serve update                  pull + rebuild llama.cpp (interactive)
 #   llm-serve update --yes            pull + rebuild without confirmation
 #
-# Config is read from models.json (TUI-managed). Requires jq.
+# Config is read from models.json + presets.json (TUI-managed). Requires jq.
 #
 # Any default can be overridden with an env var:
-#   PORT=9000 llm-serve hermes3-8b
+#   PORT=9000 llm-serve "Qwen 3.8"
 #   CONTEXT_SIZE=32768 GPU_LAYERS=60 llm-serve qwen36-uncensored
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 MODELS_JSON="${SCRIPT_DIR}/models.json"
+PRESETS_JSON="${SCRIPT_DIR}/presets.json"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
 
@@ -59,11 +60,53 @@ resolve_alias() {
     jq -r --arg n "$name" '.aliases[$n] // $n' "$MODELS_JSON"
 }
 
-# Get a model parameter
+# Resolve user input to internal model slug (alias, slug, or display name)
+resolve_model() {
+    local requested="$1"
+    local name
+    name="$(resolve_alias "$requested")"
+    if model_exists "$name"; then
+        echo "$name"
+        return 0
+    fi
+    local by_display
+    by_display="$(jq -r --arg d "$requested" '.models | to_entries[] | select(.value.display == $d) | .key' "$MODELS_JSON" | head -n 1)"
+    if [[ -n "$by_display" ]]; then
+        echo "$by_display"
+        return 0
+    fi
+    by_display="$(jq -r --arg d "$name" '.models | to_entries[] | select(.value.display == $d) | .key' "$MODELS_JSON" | head -n 1)"
+    if [[ -n "$by_display" ]]; then
+        echo "$by_display"
+        return 0
+    fi
+    echo "$name"
+}
+
+# Get a model identity parameter from models.json
 m_get() {
     local model="$1" key="$2" default="${3:-}"
     jq -r --arg m "$model" --arg k "$key" --arg d "$default" \
         '.models[$m][$k] // $d' "$MODELS_JSON"
+}
+
+# Get active preset slot for model+quant
+preset_active_slot() {
+    local model="$1" quant="$2"
+    jq -r --arg m "$model" --arg q "$quant" '._active[$m][$q] // empty' "$PRESETS_JSON"
+}
+
+# Get a runtime parameter from the active preset
+p_get() {
+    local model="$1" quant="$2" key="$3" default="${4:-}"
+    local slot
+    slot="$(preset_active_slot "$model" "$quant")"
+    if [[ -z "$slot" ]]; then
+        echo "$default"
+        return 0
+    fi
+    jq -r --arg m "$model" --arg q "$quant" --arg s "$slot" --arg k "$key" --arg d "$default" \
+        '.[$m][$q][$s].params[$k] // .[$m][$q][$s].overrides[$k] // $d' "$PRESETS_JSON"
 }
 
 # Check if a model exists
@@ -165,7 +208,7 @@ do_stop() {
     else
         # Stop specific model
         local resolved_model
-        resolved_model="$(resolve_alias "$model")"
+        resolved_model="$(resolve_model "$model")"
         model_exists "$resolved_model" || die "unknown model '$model'"
 
         if [[ ! -f "$PID_FILE" ]]; then
@@ -199,7 +242,7 @@ do_stop() {
 list_models() {
     echo "Available models:"
     echo ""
-    jq -r '.models | to_entries[] | "\(.key)|\(.value.notes // "")"' "$MODELS_JSON" | \
+    jq -r '.models | to_entries[] | "\(.value.display // .key)|\(.value.notes // "")"' "$MODELS_JSON" | \
         while IFS='|' read -r name notes; do
             printf "  %-22s %s\n" "$name" "$notes"
         done
@@ -256,7 +299,12 @@ done
 [[ "${ARGS[0]:-}" == "status" ]] && { do_status; exit 0; }
 
 if [[ "${ARGS[0]:-}" == "stop" ]]; then
-    do_stop "${ARGS[@]:1}"
+    if [[ ${#ARGS[@]} -gt 1 ]]; then
+        stop_target=("${ARGS[@]:1}")
+        do_stop "${stop_target[*]}"
+    else
+        do_stop ""
+    fi
     exit 0
 fi
 
@@ -266,14 +314,27 @@ if [[ ${#ARGS[@]} -eq 0 ]] || [[ "${ARGS[0]:-}" == "list" ]]; then
 fi
 
 # ── Launch a model ──────────────────────────────────────────────────────────
-REQUESTED="${ARGS[0]}"
+# Join args so display names like "Qwen 3.8" work without quoting.
+REQUESTED="${ARGS[*]}"
 
-# Resolve aliases
-MODEL="$(resolve_alias "${REQUESTED}")"
-[[ "$MODEL" != "$REQUESTED" ]] && echo "Alias: ${REQUESTED} -> ${MODEL}"
+[[ -f "$PRESETS_JSON" ]] || die "presets.json not found at ${PRESETS_JSON}"
+
+# Resolve aliases and display names
+MODEL="$(resolve_model "${REQUESTED}")"
+[[ "$MODEL" != "$REQUESTED" ]] && echo "Resolved: ${REQUESTED} -> ${MODEL}"
 
 # Validate
 model_exists "$MODEL" || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
+
+ACTIVE_QUANT="$(m_get "${MODEL}" active_quant "")"
+[[ -z "$ACTIVE_QUANT" ]] && die "model '${REQUESTED}' has no active quant configured."
+
+PRESET_SLOT="$(preset_active_slot "$MODEL" "$ACTIVE_QUANT")"
+[[ -z "$PRESET_SLOT" ]] && die "model '${REQUESTED}' (${ACTIVE_QUANT}) has no active preset. Create one in the TUI."
+
+PRESET_NAME="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" --arg s "$PRESET_SLOT" \
+    '.[$m][$q][$s].name // "preset"' "$PRESETS_JSON")"
+echo "Preset: [${PRESET_SLOT}] ${PRESET_NAME} (${ACTIVE_QUANT})"
 
 # Best-effort version check
 llama_warn_if_outdated
@@ -300,50 +361,51 @@ MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/${MODEL_FILE}}"
 
 HOST="${HOST:-$(m_get "${MODEL}" host 127.0.0.1)}"
 PORT="${PORT:-$(m_get "${MODEL}" port 8081)}"
-CONTEXT_SIZE="${CONTEXT_SIZE:-$(m_get "${MODEL}" ctx 65536)}"
-GPU_LAYERS="${GPU_LAYERS:-$(m_get "${MODEL}" gpu_layers 99)}"
-CACHE_TYPE_K="${CACHE_TYPE_K:-$(m_get "${MODEL}" cache_k q4_0)}"
-CACHE_TYPE_V="${CACHE_TYPE_V:-$(m_get "${MODEL}" cache_v q4_0)}"
-THREADS="${THREADS:-$(m_get "${MODEL}" threads 8)}"
-PARALLEL="${PARALLEL:-$(m_get "${MODEL}" parallel 1)}"
+CONTEXT_SIZE="${CONTEXT_SIZE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ctx 65536)}"
+GPU_LAYERS="${GPU_LAYERS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" gpu_layers 99)}"
+CACHE_TYPE_K="${CACHE_TYPE_K:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_k q4_0)}"
+CACHE_TYPE_V="${CACHE_TYPE_V:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_v q4_0)}"
+THREADS="${THREADS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" threads 8)}"
+PARALLEL="${PARALLEL:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" parallel 1)}"
 
-BATCH_SIZE="${BATCH_SIZE:-$(m_get "${MODEL}" batch "")}"
-UBATCH="${UBATCH:-$(m_get "${MODEL}" ubatch "")}"
-N_PREDICT="${N_PREDICT:-$(m_get "${MODEL}" n_predict "")}"
-DEFRAG_THOLD="${DEFRAG_THOLD:-$(m_get "${MODEL}" defrag "")}"
+BATCH_SIZE="${BATCH_SIZE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" batch "")}"
+UBATCH="${UBATCH:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ubatch "")}"
+N_PREDICT="${N_PREDICT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" n_predict "")}"
+DEFRAG_THOLD="${DEFRAG_THOLD:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" defrag "")}"
 
-FLASH_ATTN="${FLASH_ATTN:-$(m_get "${MODEL}" flash_attn on)}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-$(m_get "${MODEL}" checkpoint_every -1)}"
-JINJA="${JINJA:-$(m_get "${MODEL}" jinja on)}"
-THREADS_BATCH="${THREADS_BATCH:-$(m_get "${MODEL}" threads_batch "")}"
-SERVER_TIMEOUT="${SERVER_TIMEOUT:-$(m_get "${MODEL}" timeout 600)}"
-CACHE_PROMPT="${CACHE_PROMPT:-$(m_get "${MODEL}" cache_prompt on)}"
-CACHE_REUSE="${CACHE_REUSE:-$(m_get "${MODEL}" cache_reuse 0)}"
-CONT_BATCHING="${CONT_BATCHING:-$(m_get "${MODEL}" cont_batching on)}"
-CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-$(m_get "${MODEL}" ctx_checkpoints "")}"
+FLASH_ATTN="${FLASH_ATTN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" flash_attn on)}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" checkpoint_every -1)}"
+JINJA="${JINJA:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" jinja on)}"
+THREADS_BATCH="${THREADS_BATCH:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" threads_batch "")}"
+SERVER_TIMEOUT="${SERVER_TIMEOUT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" timeout 600)}"
+CACHE_PROMPT="${CACHE_PROMPT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_prompt on)}"
+CACHE_REUSE="${CACHE_REUSE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_reuse 0)}"
+CONT_BATCHING="${CONT_BATCHING:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cont_batching on)}"
+CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ctx_checkpoints "")}"
 
-TEMP="${TEMP:-$(m_get "${MODEL}" temp 0.8)}"
-TOP_P="${TOP_P:-$(m_get "${MODEL}" top_p 0.95)}"
-TOP_K="${TOP_K:-$(m_get "${MODEL}" top_k 40)}"
-MIN_P="${MIN_P:-$(m_get "${MODEL}" min_p 0.05)}"
-SEED="${SEED:-$(m_get "${MODEL}" seed -1)}"
-REPEAT_PENALTY="${REPEAT_PENALTY:-$(m_get "${MODEL}" repeat_penalty 1.0)}"
-REPEAT_LAST_N="${REPEAT_LAST_N:-$(m_get "${MODEL}" repeat_last_n 64)}"
-PRESENCE_PENALTY="${PRESENCE_PENALTY:-$(m_get "${MODEL}" presence_penalty 0.0)}"
-FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-$(m_get "${MODEL}" frequency_penalty 0.0)}"
+TEMP="${TEMP:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" temp 0.8)}"
+TOP_P="${TOP_P:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" top_p 0.95)}"
+TOP_K="${TOP_K:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" top_k 40)}"
+MIN_P="${MIN_P:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" min_p 0.05)}"
+SEED="${SEED:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" seed -1)}"
+REPEAT_PENALTY="${REPEAT_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" repeat_penalty 1.0)}"
+REPEAT_LAST_N="${REPEAT_LAST_N:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" repeat_last_n 64)}"
+PRESENCE_PENALTY="${PRESENCE_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" presence_penalty 0.0)}"
+FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" frequency_penalty 0.0)}"
 
-REASONING_FORMAT="${REASONING_FORMAT:-$(m_get "${MODEL}" reasoning_format "")}"
-REASONING_BUDGET="${REASONING_BUDGET:-$(m_get "${MODEL}" reasoning_budget "")}"
+REASONING_FORMAT="${REASONING_FORMAT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" reasoning_format "")}"
+REASONING_BUDGET="${REASONING_BUDGET:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" reasoning_budget "")}"
 
-ENABLE_MTP="${ENABLE_MTP:-$(m_get "${MODEL}" mtp 0)}"
-SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-$(m_get "${MODEL}" spec_draft_n_max 2)}"
-SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-$(m_get "${MODEL}" spec_draft_n_min 0)}"
+ENABLE_MTP="${ENABLE_MTP:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" mtp 0)}"
+SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" spec_draft_n_max 2)}"
+SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" spec_draft_n_min 0)}"
 
-N_CPU_MOE="${N_CPU_MOE:-$(m_get "${MODEL}" n_cpu_moe "")}"
+N_CPU_MOE="${N_CPU_MOE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" n_cpu_moe "")}"
 
 TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
-THINKING="${THINKING:-$(m_get "${MODEL}" thinking "")}"
-PER_SLOT_MIN="${PER_SLOT_MIN:-$(m_get "${MODEL}" per_slot_min 0)}"
+THINKING="${THINKING:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" thinking "")}"
+PER_SLOT_MIN="${PER_SLOT_MIN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" per_slot_min 0)}"
+METRICS="${METRICS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" metrics on)}"
 
 # CUDA / ROCm paths
 [[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"
@@ -436,7 +498,6 @@ _append_server_arg SERVER_ARGS --reasoning-format "${REASONING_FORMAT}"
 _append_server_arg SERVER_ARGS --reasoning-budget "${REASONING_BUDGET}"
 
 # Metrics endpoint
-METRICS="${METRICS:-$(m_get "${MODEL}" metrics on)}"
 _append_server_bool SERVER_ARGS --metrics --no-metrics "${METRICS}"
 
 case "${THINKING}" in

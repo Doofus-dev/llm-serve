@@ -20,13 +20,12 @@ async def main():
             for c in tree.root.children
             if c.data and c.data[0] == "model"
         ]
-        assert "qwen25" in model_slugs, model_slugs
-        assert "qwen36" in model_slugs, model_slugs
+        assert "qwen38-27b-bartowski" in model_slugs, model_slugs
         print("tree models:", model_slugs)
 
         # Tree shows display names, not slugs
         labels = [str(c.label) for c in tree.root.children if c.data and c.data[0] == "model"]
-        assert any("qwen" in label.lower() for label in labels), labels
+        assert any("qwen 3.8" in label.lower() for label in labels), labels
         print("tree labels:", labels)
 
         status = app.query_one(StatusPanel)
@@ -35,11 +34,13 @@ async def main():
         print("status OK:", "RUNNING" if "RUNNING" in rendered.replace("NOT RUNNING", "") else "not running")
 
         cfg = app.query_one(ConfigPanel)
-        cfg.selected = "qwen25"
+        cfg.selected = "qwen38-27b-bartowski"
         cfg.registry = app.registry
+        cfg.preset_store = app.preset_store
         text = cfg.render()
-        assert "gpu_layers" in text and "32768" in text
         assert "display" in text
+        assert "Qwen 3.8" in text
+        assert "preset" in text.lower()
         print("config panel OK")
 
         app._refresh_pid()

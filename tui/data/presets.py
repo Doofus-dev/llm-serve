@@ -1,4 +1,4 @@
-"""Presets — named override sets per model quant. TUI owns presets.json."""
+"""Presets — full llama-server configs per model quant. TUI owns presets.json."""
 
 from __future__ import annotations
 
@@ -6,6 +6,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from tui.data.preset_template import (
+    DEFAULT_PRESET_NAME,
+    default_preset_params,
+)
 
 MAX_PRESETS_PER_MODEL = 5
 
@@ -42,12 +47,11 @@ PARAM_TO_ENV: dict[str, str] = {
     "spec_draft_n_max": "SPEC_DRAFT_N_MAX",
     "spec_draft_n_min": "SPEC_DRAFT_N_MIN",
     "n_cpu_moe": "N_CPU_MOE",
-    "port": "PORT",
-    "host": "HOST",
     "threads": "THREADS",
     "parallel": "PARALLEL",
     "thinking": "THINKING",
     "per_slot_min": "PER_SLOT_MIN",
+    "metrics": "METRICS",
 }
 
 
@@ -55,14 +59,21 @@ PARAM_TO_ENV: dict[str, str] = {
 class Preset:
     slot: int
     name: str
-    overrides: dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class PresetStore:
     """model -> quant -> slot -> Preset"""
+
     presets: dict[str, dict[str, dict[int, Preset]]] = field(default_factory=dict)
-    active: dict[str, dict[str, int]] = field(default_factory=dict)  # model -> quant -> slot
+    active: dict[str, dict[str, int]] = field(default_factory=dict)
+
+
+def _preset_params_from_raw(preset_data: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(preset_data.get("params"), dict):
+        return dict(preset_data["params"])
+    return dict(preset_data.get("overrides") or {})
 
 
 def _is_slot_dict(value: dict[str, Any]) -> bool:
@@ -73,7 +84,7 @@ def _is_slot_dict(value: dict[str, Any]) -> bool:
             return False
         if not isinstance(v, dict):
             return False
-        if "overrides" not in v and "name" not in v:
+        if "params" not in v and "overrides" not in v and "name" not in v:
             return False
     return True
 
@@ -103,7 +114,6 @@ def _parse_active(data: dict[str, Any]) -> dict[str, dict[str, int]]:
 
 
 def _migrate_flat_presets(data: dict[str, Any]) -> tuple[dict[str, dict[str, dict[int, Preset]]], dict[str, dict[str, int]], bool]:
-    """Convert model->slot presets to model->quant->slot."""
     changed = False
     presets: dict[str, dict[str, dict[int, Preset]]] = {}
     active = _parse_active(data)
@@ -120,7 +130,7 @@ def _migrate_flat_presets(data: dict[str, Any]) -> tuple[dict[str, dict[str, dic
                 presets[model_name][quant][slot] = Preset(
                     slot=slot,
                     name=preset_data.get("name", f"slot-{slot}"),
-                    overrides=preset_data.get("overrides", {}),
+                    params=_preset_params_from_raw(preset_data),
                 )
             if model_name in active and "" in active[model_name]:
                 old_slot = active[model_name].pop("")
@@ -136,10 +146,13 @@ def _migrate_flat_presets(data: dict[str, Any]) -> tuple[dict[str, dict[str, dic
                 if not str(slot_str).isdigit() or not isinstance(preset_data, dict):
                     continue
                 slot = int(slot_str)
+                params = _preset_params_from_raw(preset_data)
+                if "params" not in preset_data and preset_data.get("overrides") is not None:
+                    changed = True
                 presets[model_name][str(quant)][slot] = Preset(
                     slot=slot,
                     name=preset_data.get("name", f"slot-{slot}"),
-                    overrides=preset_data.get("overrides", {}),
+                    params=params,
                 )
 
     return presets, active, changed
@@ -178,7 +191,7 @@ def save_presets(path: Path, store: PresetStore) -> None:
             for slot, preset in slots.items():
                 data[model_name][quant][str(slot)] = {
                     "name": preset.name,
-                    "overrides": preset.overrides,
+                    "params": preset.params,
                 }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
@@ -227,10 +240,10 @@ def set_preset(
     quant: str,
     slot: int,
     name: str,
-    overrides: dict[str, Any],
+    params: dict[str, Any],
 ) -> None:
     store.presets.setdefault(model, {}).setdefault(quant, {})[slot] = Preset(
-        slot=slot, name=name, overrides=overrides
+        slot=slot, name=name, params=dict(params)
     )
 
 
@@ -249,15 +262,69 @@ def delete_all_presets_for_model(store: PresetStore, model: str) -> None:
     store.active.pop(model, None)
 
 
-def apply_preset(base_params: dict[str, Any], preset: Preset) -> dict[str, Any]:
-    merged = dict(base_params)
-    merged.update(preset.overrides)
+def seed_default_preset(
+    store: PresetStore,
+    model: str,
+    quant: str,
+    *,
+    runtime_seed: dict[str, Any] | None = None,
+    activate: bool = True,
+) -> bool:
+    """Create slot 1 from the fixed template if this quant has no presets yet."""
+    if list_presets_for_quant(store, model, quant):
+        return False
+    params = default_preset_params(seed=runtime_seed)
+    set_preset(store, model, quant, 1, DEFAULT_PRESET_NAME, params)
+    if activate or get_active_slot(store, model, quant) is None:
+        set_active_preset(store, model, quant, 1)
+    return True
+
+
+def migrate_preset_params(
+    store: PresetStore,
+    model: str,
+    quant: str,
+    runtime_seed: dict[str, Any],
+) -> bool:
+    """Upgrade legacy override-only presets to full params using a runtime seed."""
+    changed = False
+    slots = list_presets_for_quant(store, model, quant)
+    if not slots:
+        seed_default_preset(store, model, quant, runtime_seed=runtime_seed)
+        return True
+
+    full_seed = default_preset_params(seed=runtime_seed)
+    for preset in slots.values():
+        merged = dict(full_seed)
+        merged.update(preset.params)
+        if merged != preset.params:
+            preset.params = merged
+            changed = True
+    if get_active_slot(store, model, quant) is None:
+        set_active_preset(store, model, quant, 1)
+        changed = True
+    return changed
+
+
+def merge_identity_and_preset(identity: dict[str, Any], preset: Preset) -> dict[str, Any]:
+    merged = dict(identity)
+    merged.update(preset.params)
     return merged
 
 
-def overrides_to_env(overrides: dict[str, Any]) -> dict[str, str]:
+def params_to_env(params: dict[str, Any]) -> dict[str, str]:
     env: dict[str, str] = {}
-    for key, value in overrides.items():
+    for key, value in params.items():
         env_key = PARAM_TO_ENV.get(key, key.upper())
         env[env_key] = str(value)
     return env
+
+
+def overrides_to_env(overrides: dict[str, Any]) -> dict[str, str]:
+    """Backward-compatible alias."""
+    return params_to_env(overrides)
+
+
+def apply_preset(base_params: dict[str, Any], preset: Preset) -> dict[str, Any]:
+    """Backward-compatible merge helper."""
+    return merge_identity_and_preset(base_params, preset)

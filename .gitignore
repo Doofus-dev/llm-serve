@@ -4,6 +4,7 @@ logs/
 *.log
 
 # Model weights (gigantic, not for version control)
+models/
 *.gguf
 *.bin
 *.safetensors

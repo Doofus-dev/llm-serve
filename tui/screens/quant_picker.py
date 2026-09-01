@@ -256,7 +256,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
 
         status = self.query_one("#quant-picker-status", Static)
         if self._rows:
-            status.update(f"[dim]{len(self._rows)} quants · sorted by estimated VRAM[/]")
+            status.update(f"[dim]{len(self._rows)} quants · sorted by file size[/]")
             table.move_cursor(row=cursor_row)
         else:
             status.update("[dim]No quants found for this repo[/]")

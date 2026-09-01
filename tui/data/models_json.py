@@ -9,6 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from tui.data.gguf import apply_architecture_from_gguf, read_gguf_architecture
+from tui.data.preset_template import (
+    HERMES_KEYS,
+    extract_runtime_params,
+    identity_from_seed,
+    strip_to_identity,
+)
+from tui.data.presets import (
+    PresetStore,
+    load_presets,
+    migrate_preset_params,
+    save_presets,
+    seed_default_preset,
+)
 from tui.data.quant import (
     QuantEntry,
     author_size_label,
@@ -115,17 +128,90 @@ def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None)
     return params
 
 
+def resolve_model_key(data: dict[str, Any], requested: str) -> str | None:
+    """Resolve CLI/TUI model name: alias, internal slug, or display name."""
+    aliases = data.get("aliases", {})
+    name = str(aliases.get(requested, requested))
+    models = data.get("models", {})
+    if name in models:
+        return name
+    for key, params in models.items():
+        if str(params.get("display", "")) == name:
+            return key
+    if requested in models:
+        return requested
+    for key, params in models.items():
+        if str(params.get("display", "")) == requested:
+            return key
+    return None
+
+
+def validate_display_name(reg: Registry, display: str, *, exclude: str = "") -> str | None:
+    display = display.strip()
+    if not display:
+        return "Display name cannot be empty"
+    for name, cfg in reg.models.items():
+        if name == exclude:
+            continue
+        if cfg.display == display:
+            return f"Display name '{display}' is already in use"
+    return None
+
+
+def migrate_to_preset_architecture(data: dict[str, Any], presets_path: Path) -> bool:
+    """Move runtime params from models.json into presets.json."""
+    models = data.get("models", {})
+    if not models:
+        return False
+
+    changed = False
+    store = load_presets(presets_path) if presets_path.exists() else PresetStore()
+
+    for model_name, raw_params in list(models.items()):
+        params = dict(raw_params)
+        for key in HERMES_KEYS:
+            if key in params:
+                del params[key]
+                changed = True
+
+        params = _ensure_quants_block(params)
+        runtime = extract_runtime_params(params)
+        if runtime:
+            changed = True
+
+        quants = params.get("quants")
+        if isinstance(quants, dict) and quants:
+            quant_ids = [str(q) for q in quants]
+        else:
+            quant_ids = [str(params.get("active_quant") or "LOCAL")]
+
+        for quant_id in quant_ids:
+            if migrate_preset_params(store, model_name, quant_id, runtime):
+                changed = True
+
+        identity = strip_to_identity(params)
+        if identity != raw_params:
+            changed = True
+        data["models"][model_name] = identity
+
+    if changed:
+        save_presets(presets_path, store)
+    return changed
+
+
 def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
-    """Load models.json; migrate legacy per-quant profiles when needed."""
+    """Load models.json; migrate legacy profiles and preset-only architecture."""
     if not path.exists():
         return Registry()
 
     data = json.loads(path.read_text())
     migrated, preset_remap = migrate_models_json(data, models_dir=models_dir)
-    if migrated:
+    presets_path = path.parent / "presets.json"
+    preset_arch_migrated = migrate_to_preset_architecture(data, presets_path)
+    if migrated or preset_arch_migrated:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         if preset_remap:
-            _migrate_presets_file(path.parent / "presets.json", preset_remap)
+            _migrate_presets_file(presets_path, preset_remap)
 
     reg = Registry()
     for name, params in data.get("models", {}).items():
@@ -133,16 +219,19 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
             _ensure_quants_block(params, models_dir)
         else:
             _ensure_quants_block(params)
-        reg.models[name] = ModelConfig(name=name, params=params)
+        reg.models[name] = ModelConfig(name=name, params=strip_to_identity(params))
 
-    reg.aliases = data.get("aliases", {})
+    reg.aliases = dict(data.get("aliases", {}))
     return reg
 
 
 def save_registry(path: Path, reg: Registry) -> None:
-    """Save Registry back to models.json."""
+    """Save Registry back to models.json (identity fields only)."""
     data = {
-        "models": {name: cfg.params for name, cfg in reg.models.items()},
+        "models": {
+            name: strip_to_identity(_ensure_quants_block(dict(cfg.params)))
+            for name, cfg in reg.models.items()
+        },
         "aliases": reg.aliases,
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
@@ -236,7 +325,7 @@ def create_model(path: Path, name: str, params: dict[str, Any]) -> None:
 def update_model(path: Path, name: str, params: dict[str, Any]) -> None:
     reg = load_registry(path)
     if name in reg.models:
-        reg.models[name].params = params
+        reg.models[name].params = strip_to_identity(_ensure_quants_block(dict(params)))
         save_registry(path, reg)
 
 
@@ -277,6 +366,12 @@ def add_or_update_quant(
             params["source"]["filename"] = filename
         apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
         save_registry(path, reg)
+        _seed_preset_for_quant(
+            path,
+            existing,
+            quant_id,
+            runtime_seed=extract_runtime_params(base_params),
+        )
         return existing, quant_id
 
     author = source.get("author") or repo_id.split("/", 1)[0]
@@ -284,10 +379,7 @@ def add_or_update_quant(
     if model_slug in reg.models and _repo_id(reg.models[model_slug].params) != repo_id:
         model_slug = f"{model_slug}-{author}"[:48].strip("-")
 
-    params = dict(base_params)
-    params.pop("quants", None)
-    params.pop("active_quant", None)
-    params.pop("display", None)
+    params = identity_from_seed(base_params)
     params["file"] = file_rel
     params["source"] = source
     params["display"] = display or family_display(repo_id, filename)
@@ -296,7 +388,32 @@ def add_or_update_quant(
     apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
     reg.models[model_slug] = ModelConfig(name=model_slug, params=params)
     save_registry(path, reg)
+    _seed_preset_for_quant(
+        path,
+        model_slug,
+        quant_id,
+        runtime_seed=extract_runtime_params(base_params),
+    )
     return model_slug, quant_id
+
+
+def _seed_preset_for_quant(
+    models_path: Path,
+    model_slug: str,
+    quant_id: str,
+    *,
+    runtime_seed: dict[str, Any],
+) -> None:
+    presets_path = models_path.parent / "presets.json"
+    store = load_presets(presets_path)
+    if seed_default_preset(
+        store,
+        model_slug,
+        quant_id,
+        runtime_seed=runtime_seed or None,
+        activate=True,
+    ):
+        save_presets(presets_path, store)
 
 
 def create_downloaded_model(
@@ -325,7 +442,7 @@ def create_downloaded_model(
             slug=name if name and not re.search(r"(iq|q\d)", name.lower()) else None,
             display=family_display(repo, filename) if name and re.search(r"(iq|q\d)", name.lower()) else name,
         )
-    params = dict(base_params)
+    params = identity_from_seed(base_params)
     params["file"] = file_rel
     params["source"] = source
     qid = quant_from_filename(filename)
@@ -334,6 +451,12 @@ def create_downloaded_model(
     params["display"] = name
     apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
     create_model(path, name, params)
+    _seed_preset_for_quant(
+        path,
+        name,
+        qid,
+        runtime_seed=extract_runtime_params(base_params),
+    )
     return name, qid
 
 

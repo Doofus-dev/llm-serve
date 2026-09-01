@@ -30,18 +30,21 @@ from tui.data.models_json import (
     save_registry,
     delete_model,
     update_model,
-    merge_editor_params,
     sync_gguf_architecture,
     set_active_quant,
     add_or_update_quant,
     find_model_by_repo,
     model_author_size_line,
+    validate_display_name,
+)
+from tui.data.preset_template import (
+    PRESET_PARAM_GROUPS,
+    default_preset_params,
 )
 from tui.data.param_help import get_param_help, load_param_help
 from tui.data.param_widgets import (
     HIDDEN_EDITOR_PARAMS,
     PARAM_ALLOW_BLANK,
-    PRESERVED_EDITOR_PARAMS,
     fmt_locked_value,
     is_select_param,
     read_field_value,
@@ -56,8 +59,7 @@ from tui.data.presets import (
     get_preset,
     set_preset,
     delete_preset,
-    apply_preset,
-    overrides_to_env,
+    merge_identity_and_preset,
     get_active_slot,
     set_active_preset,
     clear_active_preset,
@@ -88,23 +90,12 @@ MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
 
-# Parameter groups for the editor
-PARAM_GROUPS = {
-    "Model": ["file", "port", "host", "notes"],
-    "Architecture": ["total_layers", "gpu_layers", "n_cpu_moe"],
-    "Context": ["ctx", "per_slot_min", "cache_k", "cache_v"],
-    "Batching": ["batch", "ubatch", "threads", "threads_batch", "parallel"],
-    "Generation": ["n_predict", "defrag", "thinking", "reasoning_format", "reasoning_budget"],
-    "Server": ["flash_attn", "checkpoint_every", "jinja", "timeout", "cache_prompt", "cache_reuse", "cont_batching", "ctx_checkpoints"],
-    "Sampling": ["temp", "top_p", "top_k", "min_p", "seed", "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty"],
-    "Speculative": ["mtp", "spec_draft_n_max", "spec_draft_n_min"],
-    "Metrics": ["metrics"],
-}
+# Preset editor param groups (runtime llama-server params only).
+PRESET_ALL_PARAMS: list[str] = []
+for _group_params in PRESET_PARAM_GROUPS.values():
+    PRESET_ALL_PARAMS.extend(_group_params)
 
-# All known params in order
-ALL_PARAMS = []
-for group_params in PARAM_GROUPS.values():
-    ALL_PARAMS.extend(group_params)
+PROFILE_KEYS = ("display", "port", "host", "notes")
 
 # Architecture facts from the GGUF header — shown but not editable.
 LOCKED_PARAMS = frozenset({"total_layers"})
@@ -134,10 +125,10 @@ class EditorInput(Input):
         kwargs.setdefault("compact", True)
         super().__init__(*args, **kwargs)
 
-    def _param_editor(self) -> ModelEditor | PresetEditor | None:
+    def _param_editor(self) -> ProfileEditor | PresetEditor | None:
         node = self.parent
         while node is not None:
-            if isinstance(node, (ModelEditor, PresetEditor)):
+            if isinstance(node, (ProfileEditor, PresetEditor)):
                 return node
             node = node.parent
         return None
@@ -176,10 +167,10 @@ class EditorSelect(Select):
         kwargs.setdefault("compact", True)
         super().__init__(*args, **kwargs)
 
-    def _param_editor(self) -> ModelEditor | PresetEditor | None:
+    def _param_editor(self) -> ProfileEditor | PresetEditor | None:
         node = self.parent
         while node is not None:
-            if isinstance(node, (ModelEditor, PresetEditor)):
+            if isinstance(node, (ProfileEditor, PresetEditor)):
                 return node
             node = node.parent
         return None
@@ -402,7 +393,13 @@ class ModelTree(Tree):
             active_q = model.active_quant or quant_from_filename(model.file)
             quant_label = f"Quant  {active_q} ▾"
             node.add_leaf(quant_label, data=("quant", name))
-            node.add_leaf(fmt_model_runtime_line(model.params), data=("info", name))
+            runtime_params = dict(model.params)
+            slot = get_active_slot(self.preset_store, name, active_q)
+            if slot is not None:
+                preset = get_preset(self.preset_store, name, active_q, slot)
+                if preset:
+                    runtime_params = merge_identity_and_preset(model.params, preset)
+            node.add_leaf(fmt_model_runtime_line(runtime_params), data=("info", name))
 
             for slot, preset in sorted(list_presets_for_quant(self.preset_store, name, active_q).items()):
                 label = f"[{slot}] {preset.name}"
@@ -479,33 +476,51 @@ class StatusPanel(Static):
 
 
 class ConfigPanel(Static):
-    """Active config of the selected model."""
+    """Active preset config for the selected model."""
 
     selected: reactive[str | None] = reactive(None)
     registry: Registry | None = None
+    preset_store: PresetStore | None = None
 
     def render(self) -> str:
-        lines = ["[bold]── ACTIVE CONFIG ──[/]"]
+        lines = ["[bold]── ACTIVE PRESET ──[/]"]
         if self.selected and self.registry and self.selected in self.registry.models:
             model = self.registry.models[self.selected]
-            params = model.params
+            identity = model.params
             lines.append(f"[$accent]{'display':<18}[/] {model.display}")
             active_q = model.active_quant
             if active_q:
                 lines.append(f"[$accent]{'active_quant':<18}[/] {active_q}")
-            author = model_author(params, model.file)
+            slot = None
+            preset = None
+            if self.preset_store and active_q:
+                slot = get_active_slot(self.preset_store, self.selected, active_q)
+                if slot is not None:
+                    preset = get_preset(self.preset_store, self.selected, active_q, slot)
+            if preset:
+                lines.append(f"[$accent]{'preset':<18}[/] [{slot}] {preset.name}")
+            else:
+                lines.append("[dim]No active preset — apply one before launch[/]")
+            author = model_author(identity, model.file)
             if author:
                 lines.append(f"[$accent]{'author':<18}[/] {author}")
-            source = params.get("source")
+            source = identity.get("source")
             if isinstance(source, dict):
                 for key in ("repo", "filename", "revision"):
                     if source.get(key):
                         lines.append(f"[$accent]{key:<18}[/] {source[key]}")
             file_status = "present" if model_file_exists(model.file) else "missing"
             lines.append(f"[$accent]{'file_status':<18}[/] {file_status}")
+            if not preset:
+                lines.append("")
+                lines.append("[dim]Select a preset and press A to activate[/]")
+                return "\n".join(lines)
+            params = merge_identity_and_preset(identity, preset)
             lines.append("")
             for k, v in params.items():
-                if k == "source":
+                if k in {"source", "quants", "file"}:
+                    continue
+                if k in PROFILE_KEYS:
                     continue
                 val = str(v) if v != "" else "[dim]—[/]"
                 lines.append(f"[$accent]{k:<18}[/] {val}")
@@ -574,38 +589,61 @@ class ParamHelpPanel(VerticalScroll):
             text.update(f"[bold $accent]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
 
 
-class ModelEditor(ParamEditorMixin, VerticalScroll):
-    """Editor panel for a model's parameters (takes over right side)."""
+class ProfileEditor(VerticalScroll):
+    """Edit model profile identity (display name, port, host)."""
 
     BINDINGS = EDITOR_BINDINGS
 
-    def __init__(self, name: str, params: dict, registry: Registry, on_save, on_cancel):
+    def __init__(self, model_name: str, params: dict, registry: Registry, on_save, on_cancel):
         super().__init__()
-        self.model_name = name
+        self.model_name = model_name
         self.params = dict(params)
-        apply_architecture_from_gguf(self.params, MODELS_DIR / str(self.params.get("file", "")))
         self.registry = registry
-        self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
+        self.display_input: EditorInput | None = None
+        self.port_input: EditorInput | None = None
+        self.host_input: EditorInput | None = None
+        self.notes_input: EditorInput | None = None
 
     def compose(self) -> ComposeResult:
-        yield Label(f"[bold]Edit Model: {self.model_name}[/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
-        
-        for group_name, param_names in PARAM_GROUPS.items():
-            with Collapsible(title=group_name, collapsed=False):
-                # Group params into rows of 3
-                for i in range(0, len(param_names), 3):
-                    row_params = param_names[i:i+3]
-                    with Horizontal():
-                        for param in row_params:
-                            value = self.params.get(param, "")
-                            with Vertical(classes="param-field"):
-                                yield from self._yield_param_controls(param, value)
-        
+        yield Label(
+            f"[bold]Edit Profile: {self.params.get('display', self.model_name)}[/bold]  "
+            "(Ctrl+S: save, Esc: cancel)"
+        )
+        yield Label("[dim]Display name is what you pass to llm-serve[/dim]")
+        yield Label("Display name:", classes="field-label")
+        self.display_input = EditorInput(
+            value=str(self.params.get("display", "")),
+            placeholder="Qwen 3.8",
+            id="profile_display",
+        )
+        yield self.display_input
+        yield Label("Port:", classes="field-label")
+        self.port_input = EditorInput(value=str(self.params.get("port", 8081)), id="profile_port")
+        yield self.port_input
+        yield Label("Host:", classes="field-label")
+        self.host_input = EditorInput(value=str(self.params.get("host", "127.0.0.1")), id="profile_host")
+        yield self.host_input
+        yield Label("Notes:", classes="field-label")
+        self.notes_input = EditorInput(value=str(self.params.get("notes", "")), id="profile_notes")
+        yield self.notes_input
         with Horizontal():
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", variant="default", id="cancel")
+
+    def save(self) -> None:
+        display = self.display_input.value.strip() if self.display_input else ""
+        error = validate_display_name(self.registry, display, exclude=self.model_name)
+        if error:
+            self.app.notify(error, severity="error")
+            return
+        updated = dict(self.params)
+        updated["display"] = display
+        updated["port"] = int(self.port_input.value.strip()) if self.port_input else updated.get("port", 8081)
+        updated["host"] = self.host_input.value.strip() if self.host_input else updated.get("host", "127.0.0.1")
+        updated["notes"] = self.notes_input.value.strip() if self.notes_input else ""
+        self.on_save_callback(updated)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -613,21 +651,9 @@ class ModelEditor(ParamEditorMixin, VerticalScroll):
         elif event.button.id == "save":
             self.save()
 
-    def save(self) -> None:
-        """Collect values and call save callback."""
-        new_params = dict(self._read_fields())
-        for param in PRESERVED_EDITOR_PARAMS:
-            if param in self.params:
-                new_params[param] = self.params[param]
-        new_params = merge_editor_params(self.params, new_params, set(ALL_PARAMS))
-        
-        self.on_save_callback(new_params)
-
     def on_mount(self) -> None:
-        """Focus the first input when the editor mounts."""
-        first = self._first_focusable_field()
-        if first:
-            first.focus()
+        if self.display_input:
+            self.display_input.focus()
 
     def action_toggle_param_help(self) -> None:
         self.app.action_toggle_param_help()
@@ -639,7 +665,6 @@ class ModelEditor(ParamEditorMixin, VerticalScroll):
         self.on_cancel_callback()
 
     def on_key(self, event) -> None:
-        """Handle Ctrl+S and Esc."""
         if event.key == "ctrl+s":
             event.prevent_default()
             self.save()
@@ -733,19 +758,36 @@ class AliasEditor(VerticalScroll):
 
 
 class PresetEditor(ParamEditorMixin, VerticalScroll):
-    """Editor panel for a preset (takes over right side)."""
+    """Editor panel for a preset (full llama-server params)."""
 
     BINDINGS = EDITOR_BINDINGS
 
-    def __init__(self, model_name: str, slot: int, preset: Preset | None, base_params: dict, on_save, on_cancel):
+    def __init__(
+        self,
+        model_name: str,
+        slot: int,
+        preset: Preset | None,
+        identity: dict,
+        *,
+        is_new: bool = False,
+        on_save,
+        on_cancel,
+    ):
         super().__init__()
         self.model_name = model_name
         self.slot = slot
-        self.is_new = preset is None
-        self.preset = preset or Preset(slot=slot, name=f"slot-{slot}", overrides={})
-        self.base_params = dict(base_params)
+        self.is_new = is_new
+        if preset is not None:
+            self.preset = preset
+        else:
+            self.preset = Preset(
+                slot=slot,
+                name=f"slot-{slot}",
+                params=default_preset_params(),
+            )
+        self.identity = dict(identity)
         apply_architecture_from_gguf(
-            self.base_params, MODELS_DIR / str(self.base_params.get("file", ""))
+            self.identity, MODELS_DIR / str(self.identity.get("file", ""))
         )
         self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.name_input: EditorInput | None = None
@@ -754,36 +796,30 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
 
     def compose(self) -> ComposeResult:
         verb = "New" if self.is_new else "Edit"
-        yield Label(f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  (Ctrl+S: save, Esc: cancel, F2: help)")
+        yield Label(
+            f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  "
+            "(Ctrl+S: save, Esc: cancel, F2: help)"
+        )
         yield Label("Preset name:", classes="field-label")
         self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
         yield self.name_input
-        yield Label("[dim]Params that differ from base model are highlighted[/dim]")
-        
-        for group_name, param_names in PARAM_GROUPS.items():
+
+        for group_name, param_names in PRESET_PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
-                # Group params into rows of 3
                 for i in range(0, len(param_names), 3):
-                    row_params = param_names[i:i+3]
+                    row_params = param_names[i : i + 3]
                     with Horizontal():
                         for param in row_params:
-                            base_value = self.base_params.get(param, "")
-                            override_value = self.preset.overrides.get(param, base_value)
-                            is_override = param in self.preset.overrides
-                            label_class = "param-label-override" if is_override else "param-label"
-                            label = f"{param}*" if is_override else param
-                            with Vertical(classes="param-field"):
-                                if param in LOCKED_PARAMS:
+                            if param in LOCKED_PARAMS:
+                                value = self.identity.get(param, "")
+                                with Vertical(classes="param-field"):
                                     yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
-                                    yield Label(fmt_locked_value(base_value), classes="param-locked")
-                                    continue
-                                yield from self._yield_param_controls(
-                                    param,
-                                    override_value,
-                                    label_class=label_class,
-                                    label=label,
-                                )
-        
+                                    yield Label(fmt_locked_value(value), classes="param-locked")
+                                continue
+                            value = self.preset.params.get(param, "")
+                            with Vertical(classes="param-field"):
+                                yield from self._yield_param_controls(param, value)
+
         with Horizontal():
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", variant="default", id="cancel")
@@ -795,22 +831,19 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
             self.save()
 
     def save(self) -> None:
-        """Collect values and call save callback."""
         name = self.name_input.value.strip() if self.name_input else self.preset.name
         if not name:
             name = f"slot-{self.slot}"
-        
-        overrides = {}
+
+        params = {}
         for param, val in self._read_fields().items():
-            base_val = str(self.base_params.get(param, ""))
-            stored_val = str(val) if val != "" else ""
-            if stored_val != base_val and param not in LOCKED_PARAMS:
-                overrides[param] = val
-        
-        self.on_save_callback(name, overrides)
+            if param in LOCKED_PARAMS:
+                continue
+            params[param] = val
+
+        self.on_save_callback(name, params)
 
     def on_mount(self) -> None:
-        """Focus the name input when the editor mounts."""
         first = self._first_focusable_field()
         if first:
             first.focus()
@@ -825,7 +858,6 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         self.on_cancel_callback()
 
     def on_key(self, event) -> None:
-        """Handle Ctrl+S and Esc."""
         if event.key == "ctrl+s":
             event.prevent_default()
             self.save()
@@ -1087,7 +1119,7 @@ class LLMServeApp(App):
         self._launch_time: float | None = None
         self._log_size: int = 0
         self._editor_mode: bool = False
-        self._editor_widget: ModelEditor | PresetEditor | None = None
+        self._editor_widget: ProfileEditor | PresetEditor | None = None
         self._help_panel: ParamHelpPanel | None = None
         self._help_visible: bool = False
         self._focused_param: str | None = None
@@ -1137,8 +1169,10 @@ class LLMServeApp(App):
         tree.focus()
         first = next(iter(self.registry.models), None)
         if first:
-            self.query_one(ConfigPanel).selected = first
-            self.query_one(ConfigPanel).registry = self.registry
+            cfg = self.query_one(ConfigPanel)
+            cfg.selected = first
+            cfg.registry = self.registry
+            cfg.preset_store = self.preset_store
         self._refresh_pid()
         self.set_interval(2.0, self._poll_metrics)
         self.set_interval(5.0, self._poll_gpu)
@@ -1373,14 +1407,14 @@ class LLMServeApp(App):
     def _effective_model_params(self, model_name: str) -> dict | None:
         if model_name not in self.registry.models:
             return None
-        params = dict(self.registry.models[model_name].params)
+        identity = dict(self.registry.models[model_name].params)
         quant = self._model_active_quant(model_name)
         slot = get_active_slot(self.preset_store, model_name, quant)
         if slot is not None:
             preset = get_preset(self.preset_store, model_name, quant, slot)
             if preset:
-                params.update(preset.overrides)
-        return params
+                return merge_identity_and_preset(identity, preset)
+        return identity
 
     def _record_baseline(self, panel: StatusPanel) -> None:
         """Persist observed VRAM / tok/s for the running model on this GPU."""
@@ -1456,6 +1490,7 @@ class LLMServeApp(App):
         tree.refresh_tree()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
+        cfg.preset_store = self.preset_store
         if notify_gguf and changes:
             bits = ", ".join(f"{name} {old}→{new}" for name, old, new in changes)
             self.notify(f"Updated total_layers from GGUF: {bits}")
@@ -1469,6 +1504,7 @@ class LLMServeApp(App):
         elif node.parent is not None and node.parent.data and node.parent.data[0] == "model":
             cfg.selected = node.parent.data[1]
         cfg.registry = self.registry
+        cfg.preset_store = self.preset_store
 
     def _selected_model(self) -> str | None:
         tree = self.query_one(ModelTree)
@@ -1492,39 +1528,59 @@ class LLMServeApp(App):
         if not model:
             self.notify("Select a model first", severity="warning")
             return
-        
-        # Check if we have an active preset for this model
-        env_overrides = {}
+
+        if model not in self.registry.models:
+            self.notify(f"Model '{model}' not found", severity="error")
+            return
+
+        cfg = self.registry.models[model]
         quant = self._model_active_quant(model)
         slot = get_active_slot(self.preset_store, model, quant)
-        if slot is not None:
-            preset = get_preset(self.preset_store, model, quant, slot)
-            if preset:
-                env_overrides = overrides_to_env(preset.overrides)
-                self.notify(f"Launching {model} ({quant}) preset [{slot}] {preset.name}")
-        
+        if slot is None:
+            self.notify(
+                f"No active preset for {cfg.display} ({quant}). Create and apply one first.",
+                severity="error",
+            )
+            return
+
+        preset = get_preset(self.preset_store, model, quant, slot)
+        if not preset:
+            self.notify(
+                f"Active preset slot {slot} is missing for {cfg.display} ({quant})",
+                severity="error",
+            )
+            return
+
+        launch_name = cfg.display
+        self.notify(f"Launching {launch_name} ({quant}) preset [{slot}] {preset.name}")
+
         try:
-            import os
-            env = os.environ.copy()
-            env.update(env_overrides)
-            
             r = subprocess.run(
-                [str(REPO_ROOT / "llm-serve"), model],
-                capture_output=True, text=True, timeout=60, cwd=REPO_ROOT, env=env,
+                [str(REPO_ROOT / "llm-serve"), launch_name],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=REPO_ROOT,
             )
             if r.returncode == 0:
-                self.notify(f"Launched {model}")
+                self.notify(f"Launched {launch_name}")
                 self._reload_registry()
             else:
-                self.notify(f"Launch failed: {r.stderr.strip()[:200]}", severity="error")
+                err = (r.stderr or r.stdout or "").strip()[:200]
+                self.notify(f"Launch failed: {err}", severity="error")
         except Exception as e:
             self.notify(f"Launch error: {e}", severity="error")
         self._refresh_pid()
 
     def action_stop(self) -> None:
         try:
-            r = subprocess.run([str(REPO_ROOT / "llm-serve"), "stop"],
-                               capture_output=True, text=True, timeout=30, cwd=REPO_ROOT)
+            r = subprocess.run(
+                [str(REPO_ROOT / "llm-serve"), "stop"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=REPO_ROOT,
+            )
             self.notify("Stopped" if r.returncode == 0 else f"Stop: {r.stdout.strip()[:100]}")
         except Exception as e:
             self.notify(f"Stop error: {e}", severity="error")
@@ -1542,7 +1598,7 @@ class LLMServeApp(App):
         if self._help_panel and self._help_visible:
             self._help_panel.show_param(event.param)
 
-    def _enter_param_editor(self, editor: ModelEditor | PresetEditor) -> None:
+    def _enter_param_editor(self, editor: ProfileEditor | PresetEditor) -> None:
         """Show model/preset editor with optional F2 help panel."""
         self.query_one("#status").display = False
         self.query_one("#config").display = False
@@ -1625,33 +1681,44 @@ class LLMServeApp(App):
             update_model(MODELS_JSON, model, new_params)
             self._reload_registry()
             self._exit_editor()
-            self.notify(f"Saved {model}")
-        
+            self.notify(f"Saved profile {cfg.display}")
+
         def on_cancel() -> None:
             self._exit_editor()
             self.notify("Edit cancelled")
 
-        editor = ModelEditor(model, cfg.params, self.registry, on_save, on_cancel)
+        editor = ProfileEditor(model, cfg.params, self.registry, on_save, on_cancel)
         self._enter_param_editor(editor)
 
     def _edit_preset(self, model_name: str, quant: str, slot: int) -> None:
         """Edit a preset."""
         self._reload_registry()
-        base_params = self.registry.models[model_name].params
+        identity = self.registry.models[model_name].params
         preset = get_preset(self.preset_store, model_name, quant, slot)
+        is_new = preset is None
 
-        def on_save(name: str, overrides: dict) -> None:
-            set_preset(self.preset_store, model_name, quant, slot, name, overrides)
+        def on_save(name: str, params: dict) -> None:
+            set_preset(self.preset_store, model_name, quant, slot, name, params)
+            if is_new or get_active_slot(self.preset_store, model_name, quant) is None:
+                set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
             self._exit_editor()
             self.notify(f"Saved preset {model_name}/{quant} [{slot}] {name}")
-        
+
         def on_cancel() -> None:
             self._exit_editor()
             self.notify("Edit cancelled")
 
-        editor = PresetEditor(model_name, slot, preset, base_params, on_save, on_cancel)
+        editor = PresetEditor(
+            model_name,
+            slot,
+            preset,
+            identity,
+            is_new=is_new,
+            on_save=on_save,
+            on_cancel=on_cancel,
+        )
         self._enter_param_editor(editor)
 
     def _edit_alias(self, alias_name: str, current_target: str) -> None:
@@ -1875,7 +1942,8 @@ class LLMServeApp(App):
     def action_help(self) -> None:
         self.notify(
             "Tab: switch pane | ↑↓: navigate | P/Enter: quant | L: launch | S: stop | E: edit | N: new preset | D: delete | A: apply preset | H: Hub | T: theme | Q: quit",
-            title="Help", timeout=10,
+            title="Help",
+            timeout=10,
         )
 
     def notify(self, message: str, *, title: str = "", severity: str = "information",

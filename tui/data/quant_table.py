@@ -27,7 +27,6 @@ class QuantFileRow:
     quant_id: str
     size: int
     downloaded: bool
-    vram_total_mb: float
     vram_cell: Text
     act_vram: str
     est_tps: str
@@ -52,7 +51,7 @@ def build_quant_file_rows(
     models_dir: Path | None = None,
     author: str = "",
 ) -> list[QuantFileRow]:
-    """Build sorted quant rows with VRAM/speed estimates (same data as Hub file view)."""
+    """Build quant rows sorted by file size, with VRAM/speed estimates."""
     runs = load_baselines(baselines_path) if baselines_path else []
     rows: list[QuantFileRow] = []
 
@@ -96,7 +95,6 @@ def build_quant_file_rows(
                 quant_id=quant_from_filename(item.path),
                 size=size,
                 downloaded=downloaded,
-                vram_total_mb=estimate.total_mb,
                 vram_cell=vram_cell,
                 act_vram=act_vram,
                 est_tps=fmt_tps(tps),
@@ -104,7 +102,7 @@ def build_quant_file_rows(
             )
         )
 
-    rows.sort(key=lambda row: row.vram_total_mb, reverse=True)
+    rows.sort(key=lambda row: row.size, reverse=True)
     return rows
 
 
