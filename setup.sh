@@ -519,8 +519,8 @@ else
     ok "models.json already exists (skipping)"
 fi
 
-# Make launchers executable
-chmod +x "${SCRIPT_DIR}/llm-serve" "${SCRIPT_DIR}/llm-serve-tui"
+# Make launcher executable
+chmod +x "${SCRIPT_DIR}/llm-serve"
 
 ###############################################################################
 # Phase 6: Install to PATH (~/.local/bin symlink)
@@ -557,7 +557,6 @@ link_into_local_bin() {
 }
 
 link_into_local_bin llm-serve
-link_into_local_bin llm-serve-tui
 
 if ! echo "${PATH}" | tr ':' '\n' | grep -qxF "${LOCAL_BIN}"; then
     warn "~/.local/bin is not on your PATH."
@@ -581,7 +580,7 @@ echo "Next steps:"
 echo ""
 echo "  1. Launch the TUI (Python env is already set up):"
 echo "     cd ${SCRIPT_DIR}"
-echo "     ./llm-serve-tui"
+echo "     ./llm-serve"
 echo ""
 echo "  2. Download a .gguf model and put it in: ${MODELS_DIR}/"
 echo "     (or press H in the TUI to browse/download from Hugging Face; optional: install hf CLI)"

@@ -43,9 +43,12 @@ cd llm-serve
 
 # Edit models.conf to register your model (or use the example entries)
 
-# Launch the server, or the TUI
+# Open the TUI, or launch a model directly
+./llm-serve
 ./llm-serve my-model
-./llm-serve-tui
+
+# Show configured models and CLI commands
+./llm-serve --help
 ```
 
 Verify it's working:
@@ -58,7 +61,6 @@ curl http://127.0.0.1:8081/v1/models
 ```
 llm-serve/ ← this repo
 ├── llm-serve              # Launcher script
-├── llm-serve-tui          # TUI launcher (uses .venv created by setup.sh)
 ├── setup.sh               # One-command environment setup
 ├── models.conf            # Your model registry (created from example on first setup)
 ├── models.conf.example    # Annotated template with all parameters documented
@@ -86,6 +88,7 @@ MODEL_DIR=/mnt/models ./llm-serve my-model
 Usage: llm-serve [command] [options]
 
 Commands:
+  (no command)           Open the interactive TUI
   <profile>              Launch the named model profile
   list                   List all configured models
   status                 Show running server status

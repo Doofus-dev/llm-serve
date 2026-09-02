@@ -2,11 +2,12 @@
 # llm-serve — unified llama-server launcher (JSON config)
 #
 # Usage:
-#   llm-serve                         list available models
+#   llm-serve                         launch the interactive TUI
+#   llm-serve --help                  list models, commands, and flags
 #   llm-serve <model>                 launch model in background
 #   llm-serve <model> --live          launch model in foreground (live logs)
 #   llm-serve <model> --remote        bind 0.0.0.0 for LAN/Meshnet access
-#   llm-serve list                    same as no args
+#   llm-serve list                    list models, commands, and flags
 #   llm-serve status                  show running model info
 #   llm-serve stop                    stop all running servers
 #   llm-serve stop <model>            stop a specific model
@@ -29,6 +30,8 @@ LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
 
 # shellcheck source=lib/llama-build.sh
 source "${SCRIPT_DIR}/lib/llama-build.sh"
+# shellcheck source=lib/tui-venv.sh
+source "${SCRIPT_DIR}/lib/tui-venv.sh"
 
 # Model files directory
 MODEL_DIR="${MODEL_DIR:-${SCRIPT_DIR}/models}"
@@ -258,6 +261,8 @@ list_models() {
 
     echo ""
     echo "Commands:"
+    echo "  llm-serve                      Open the interactive TUI"
+    echo "  llm-serve --help               Show this model and command reference"
     echo "  llm-serve <model>              Start model in background"
     echo "  llm-serve <model> --live      Start model in foreground (live logs)"
     echo "  llm-serve status              Show running model info"
@@ -279,14 +284,34 @@ list_models() {
     echo "  --dry-run             Show the command that would be run (no launch)"
 }
 
+launch_tui() {
+    if ! command -v python3 &>/dev/null; then
+        die "python3 not found. Run ./setup.sh to install Python and TUI dependencies."
+    fi
+    if ! tui_python_version_ok; then
+        die "Python $(tui_python_version) is too old. Need Python ${TUI_MIN_PY_MAJOR}.${TUI_MIN_PY_MINOR}+."
+    fi
+    if ! tui_venv_module_ok; then
+        echo "Python venv support is missing." >&2
+        echo "On Ubuntu/Debian: sudo apt-get install python3-venv python3-pip" >&2
+        exit 1
+    fi
+    if ! tui_ensure_runtime "${SCRIPT_DIR}"; then
+        die "Failed to set up the TUI Python environment. Re-run ./setup.sh."
+    fi
+    exec "$(tui_venv_dir "${SCRIPT_DIR}")/bin/python" -m tui
+}
+
 # ── Parse flags ─────────────────────────────────────────────────────────────
 SKIP_GATEWAY_RESTART=0
 LIVE="${LIVE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 REMOTE="${REMOTE:-0}"
+SHOW_HELP=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
+        -h|--help) SHOW_HELP=1 ;;
         --live) LIVE=1 ;;
         --dry-run) DRY_RUN=1 ;;
         --remote) REMOTE=1 ;;
@@ -295,6 +320,11 @@ for arg in "$@"; do
 done
 
 # ── Handle subcommands ──────────────────────────────────────────────────────
+
+if [[ "$SHOW_HELP" == "1" ]]; then
+    list_models
+    exit 0
+fi
 
 [[ "${ARGS[0]:-}" == "status" ]] && { do_status; exit 0; }
 
@@ -308,7 +338,11 @@ if [[ "${ARGS[0]:-}" == "stop" ]]; then
     exit 0
 fi
 
-if [[ ${#ARGS[@]} -eq 0 ]] || [[ "${ARGS[0]:-}" == "list" ]]; then
+if [[ ${#ARGS[@]} -eq 0 ]]; then
+    launch_tui
+fi
+
+if [[ "${ARGS[0]:-}" == "list" ]]; then
     list_models
     exit 0
 fi

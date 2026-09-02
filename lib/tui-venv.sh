@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared TUI virtualenv helpers for setup.sh and llm-serve-tui.
+# Shared TUI virtualenv helpers for setup.sh and llm-serve.
 # Source this file; do not execute directly.
 #
 # Requires callers to set SCRIPT_DIR to the repo root before sourcing,
