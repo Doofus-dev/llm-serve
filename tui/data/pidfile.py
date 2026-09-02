@@ -13,6 +13,8 @@ class PidInfo:
     model: str
     port: int
     ts: str
+    quant: str | None = None
+    preset_slot: int | None = None
 
     @property
     def alive(self) -> bool:
@@ -28,7 +30,13 @@ class PidInfo:
 def read_pid_file(path: Path) -> PidInfo | None:
     try:
         parts = path.read_text().split()
-        return PidInfo(pid=int(parts[0]), model=parts[1], port=int(parts[2]),
-                       ts=parts[3] if len(parts) > 3 else "")
+        return PidInfo(
+            pid=int(parts[0]),
+            model=parts[1],
+            port=int(parts[2]),
+            ts=parts[3] if len(parts) > 3 else "",
+            quant=parts[4] if len(parts) > 4 else None,
+            preset_slot=int(parts[5]) if len(parts) > 5 else None,
+        )
     except (OSError, ValueError, IndexError):
         return None

@@ -22,21 +22,26 @@ async def main():
     app = LLMServeApp()
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause(0.5)
-        from tui.app import ModelTree, StatusPanel, ConfigPanel
+        from tui.app import ConfigPanel, ModelNav, StatusPanel
 
-        tree = app.query_one(ModelTree)
+        nav = app.query_one(ModelNav)
         model_slugs = [
-            c.data[1]
-            for c in tree.root.children
-            if c.data and c.data[0] == "model"
+            data[1]
+            for data in nav._option_data.values()
+            if data and data[0] == "model"
         ]
         assert "qwen38-27b-bartowski" in model_slugs, model_slugs
-        print("tree models:", model_slugs)
+        print("nav models:", model_slugs)
 
-        # Tree shows display names, not slugs
-        labels = [str(c.label) for c in tree.root.children if c.data and c.data[0] == "model"]
+        # Cards show friendly display names, not internal slugs.
+        labels = [
+            str(nav.get_option(option_id).prompt)
+            for option_id, data in nav._option_data.items()
+            if data and data[0] == "model"
+        ]
         assert any("qwen 3.8" in label.lower() for label in labels), labels
-        print("tree labels:", labels)
+        assert any("Quant" in label and "ctx:" in label for label in labels), labels
+        print("nav cards:", labels)
 
         status = app.query_one(StatusPanel)
         rendered = render_text(status.render())

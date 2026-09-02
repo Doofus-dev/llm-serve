@@ -20,10 +20,10 @@ from textual.events import Focus
 from textual.reactive import reactive
 from textual import work
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Label, ProgressBar, RichLog, Static, Tree,
-    Collapsible, Select
+    Button, Collapsible, DataTable, Footer, Header, Input, Label, OptionList,
+    ProgressBar, RichLog, Select, Static,
 )
-from textual.widgets.tree import TreeNode
+from textual.widgets.option_list import Option
 from textual.screen import ModalScreen
 from textual.message import Message
 
@@ -375,54 +375,124 @@ class DownloadBar(Vertical):
         yield ProgressBar(total=None, id="download-progress", show_eta=False)
 
 
-class ModelTree(Tree):
-    """Left panel: models (by family), quants, presets, and aliases."""
+class ModelNav(OptionList):
+    """Card-based model navigation with directly selectable presets."""
+
+    BINDINGS = [
+        Binding("left", "cycle_alias(-1)", "Previous alias target", show=False),
+        Binding("right", "cycle_alias(1)", "Next alias target", show=False),
+    ]
 
     def __init__(self, registry: Registry, preset_store: PresetStore):
-        super().__init__("Models")
+        super().__init__(id="model-nav")
         self.registry = registry
         self.preset_store = preset_store
-        self.show_root = False
+        self._option_data: dict[str, tuple] = {}
 
     def on_mount(self) -> None:
-        self.refresh_tree()
+        self.refresh_cards()
 
-    def refresh_tree(self) -> None:
-        """Rebuild the tree from registry."""
-        self.root.remove_children()
+    def action_cycle_alias(self, direction: int) -> None:
+        self.app.cycle_selected_alias(direction)
+
+    @property
+    def selected_data(self) -> tuple | None:
+        if self.highlighted is None:
+            return None
+        option = self.get_option_at_index(self.highlighted)
+        return self._option_data.get(option.id or "")
+
+    @property
+    def selected_model(self) -> str | None:
+        data = self.selected_data
+        if not data:
+            return None
+        if data[0] == "alias":
+            return self.registry.aliases.get(data[1])
+        if data[0] in ("model", "preset"):
+            return data[1]
+        return None
+
+    def _add(self, prompt: Text, data: tuple, option_id: str) -> None:
+        self._option_data[option_id] = data
+        self.add_option(Option(prompt, id=option_id))
+
+    def refresh_cards(self) -> None:
+        """Rebuild model cards while retaining the current selection."""
+        selected = self.selected_data
+        self.clear_options()
+        self._option_data.clear()
         aliases = self.registry.aliases
-        for name, model in self.registry.models.items():
-            display = model.display
-            node = self.root.add(display, data=("model", name))
-            node.add_leaf(model_author_size_line(model), data=("info", name))
+        for model_index, (name, model) in enumerate(self.registry.models.items()):
             active_q = model.active_quant or quant_from_filename(model.file)
-            quant_label = f"Quant  {active_q} ▾"
-            node.add_leaf(quant_label, data=("quant", name))
             runtime_params = dict(model.params)
             slot = get_active_slot(self.preset_store, name, active_q)
+            preset = None
             if slot is not None:
                 preset = get_preset(self.preset_store, name, active_q, slot)
                 if preset:
                     runtime_params = merge_identity_and_preset(model.params, preset)
-            node.add_leaf(fmt_model_runtime_line(runtime_params), data=("info", name))
+
+            card = Text()
+            card.append(model.display, style="bold cyan")
+            model_aliases = [alias for alias, target in aliases.items() if target == name]
+            if model_aliases:
+                card.append(f"  {', '.join(model_aliases)}", style="dim")
+            card.append("\n")
+            card.append(model_author_size_line(model), style="dim")
+            card.append("\n")
+            card.append("Quant ", style="cyan")
+            card.append(active_q, style="bold yellow")
+            if preset is not None and slot is not None:
+                card.append("  •  Preset ", style="dim")
+                card.append(f"[{slot}] {preset.name}", style="bold yellow")
+            card.append("\n")
+            card.append(fmt_model_runtime_line(runtime_params), style="dim")
+            self._add(card, ("model", name), f"model-{model_index}")
 
             for slot, preset in sorted(list_presets_for_quant(self.preset_store, name, active_q).items()):
-                label = f"[{slot}] {preset.name}"
-                if get_active_slot(self.preset_store, name, active_q) == slot:
-                    label += " [ACTIVE]"
-                node.add_leaf(label, data=("preset", name, active_q, slot))
+                active = get_active_slot(self.preset_store, name, active_q) == slot
+                preset_line = Text("  ")
+                preset_line.append("● " if active else "○ ", style="green" if active else "dim")
+                preset_line.append(f"[{slot}] {preset.name}", style="bold" if active else "")
+                preset_line.append(
+                    f"  ctx {fmt_ctx(preset.params.get('ctx', '?'))}",
+                    style="dim",
+                )
+                self._add(
+                    preset_line,
+                    ("preset", name, active_q, slot),
+                    f"preset-{model_index}-{slot}",
+                )
+            self.add_option(None)
 
         if aliases:
-            an = self.root.add("Aliases")
-            for alias, target in aliases.items():
-                an.add_leaf(f"{alias} → {target}", data=("alias", alias))
-        self.root.expand_all()
+            heading = Text("ALIASES", style="bold dim")
+            self._add(heading, ("alias-heading",), "alias-heading")
+            for alias_index, (alias, target) in enumerate(aliases.items()):
+                line = Text(f"  {alias}", style="bold yellow")
+                target_model = self.registry.models.get(target)
+                line.append(
+                    f"  →  {target_model.display if target_model else target}",
+                    style="dim",
+                )
+                line.append("  ←/→", style="bold cyan")
+                self._add(line, ("alias", alias), f"alias-{alias_index}")
+
+        if selected:
+            for index in range(self.option_count):
+                option = self.get_option_at_index(index)
+                if self._option_data.get(option.id or "") == selected:
+                    self.highlighted = index
+                    break
 
 
 class StatusPanel(Static):
     """Live status + throughput + GPU."""
 
     pid_info: reactive[PidInfo | None] = reactive(None)
+    model_display: reactive[str | None] = reactive(None)
+    preset_display: reactive[str | None] = reactive(None)
     metrics: reactive[Metrics | None] = reactive(None)
     gpu: reactive[GPUStats | None] = reactive(None)
     props: reactive[dict | None] = reactive(None)
@@ -432,7 +502,9 @@ class StatusPanel(Static):
         info = self.pid_info
         if info and info.alive:
             state = Text("● RUNNING", style="bold green")
-            state.append(f"  {info.model}", style="bold cyan")
+            state.append(f"  {self.model_display or info.model}", style="bold cyan")
+            if self.preset_display:
+                state.append(f"  {self.preset_display}", style="bold yellow")
             details = Text(
                 f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(self.uptime)}",
                 style="dim",
@@ -1047,7 +1119,29 @@ class LLMServeApp(App):
     }
 
     #main { height: 1fr; }
-    #left { width: 32; border-right: solid $primary; }
+    #left {
+        width: 40;
+        border-right: solid $primary;
+        background: $surface-darken-1;
+    }
+    #model-nav {
+        height: 1fr;
+        border: none;
+        padding: 1;
+        background: $surface-darken-1;
+    }
+    #model-nav > .option-list--option {
+        padding: 0 1;
+        background: $surface;
+    }
+    #model-nav > .option-list--option-highlighted {
+        background: $primary-background;
+        color: $foreground;
+        text-style: none;
+    }
+    #model-nav > .option-list--separator {
+        color: $surface-darken-1;
+    }
     #right { layout: vertical; }
     #status {
         height: 9;
@@ -1250,6 +1344,11 @@ class LLMServeApp(App):
         Binding("t", "change_theme", "Theme"),
         Binding("h", "open_hub", "Hub"),
         Binding("p", "pick_quant", "Quant"),
+        Binding("1", "activate_preset(1)", "Preset 1", show=False),
+        Binding("2", "activate_preset(2)", "Preset 2", show=False),
+        Binding("3", "activate_preset(3)", "Preset 3", show=False),
+        Binding("4", "activate_preset(4)", "Preset 4", show=False),
+        Binding("5", "activate_preset(5)", "Preset 5", show=False),
         Binding("f1", "help", "Help"),
     ]
 
@@ -1276,7 +1375,7 @@ class LLMServeApp(App):
             yield DownloadBar(id="download-bar")
             with Horizontal(id="main"):
                 with Vertical(id="left"):
-                    yield ModelTree(self.registry, self.preset_store)
+                    yield ModelNav(self.registry, self.preset_store)
                 with Vertical(id="right"):
                     yield StatusPanel(id="status")
                     yield ConfigPanel(id="config")
@@ -1301,6 +1400,11 @@ class LLMServeApp(App):
                 Binding("t", "change_theme", "Theme"),
                 Binding("h", "open_hub", "Hub"),
                 Binding("p", "pick_quant", "Quant"),
+                Binding("1", "activate_preset(1)", "Preset 1", show=False),
+                Binding("2", "activate_preset(2)", "Preset 2", show=False),
+                Binding("3", "activate_preset(3)", "Preset 3", show=False),
+                Binding("4", "activate_preset(4)", "Preset 4", show=False),
+                Binding("5", "activate_preset(5)", "Preset 5", show=False),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
@@ -1309,8 +1413,8 @@ class LLMServeApp(App):
         saved_theme = self.settings.theme
         if saved_theme and saved_theme in self.available_themes:
             self.theme = saved_theme
-        tree = self.query_one(ModelTree)
-        tree.focus()
+        nav = self.query_one(ModelNav)
+        nav.focus()
         first = next(iter(self.registry.models), None)
         if first:
             cfg = self.query_one(ConfigPanel)
@@ -1425,18 +1529,10 @@ class LLMServeApp(App):
         return True
 
     def action_pick_quant(self) -> None:
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node is None or not node.data:
+        nav = self.query_one(ModelNav)
+        model_name = nav.selected_model
+        if not model_name:
             self.notify("Select a model first", severity="warning")
-            return
-        kind = node.data[0]
-        if kind == "quant":
-            model_name = node.data[1]
-        elif kind in ("model", "info", "preset"):
-            model_name = node.data[1]
-        else:
-            self.notify("Select a model to change quant", severity="warning")
             return
         if model_name not in self.registry.models:
             return
@@ -1476,12 +1572,12 @@ class LLMServeApp(App):
             handle,
         )
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        node = event.node
-        if node.data and node.data[0] == "quant":
-            self.action_pick_quant()
-        elif node.data and node.data[0] == "preset":
-            _, model_name, quant, slot = node.data
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if not isinstance(event.option_list, ModelNav):
+            return
+        data = event.option_list.selected_data
+        if data and data[0] == "preset":
+            _, model_name, quant, slot = data
             set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
@@ -1513,6 +1609,33 @@ class LLMServeApp(App):
         was_alive = panel.pid_info.alive if panel.pid_info else False
         alive = info.alive if info else False
         panel.pid_info = info if alive else None
+        running_key = None
+        if alive and info:
+            running_key = self.registry.aliases.get(info.model, info.model)
+            if running_key not in self.registry.models:
+                running_key = next(
+                    (
+                        key
+                        for key, model in self.registry.models.items()
+                        if model.display == info.model
+                    ),
+                    None,
+                )
+        panel.model_display = (
+            self.registry.models[running_key].display
+            if running_key in self.registry.models
+            else None
+        )
+        panel.preset_display = None
+        if running_key in self.registry.models:
+            quant = info.quant or self._model_active_quant(running_key)
+            slot = info.preset_slot
+            if slot is None:
+                slot = get_active_slot(self.preset_store, running_key, quant)
+            if slot is not None:
+                running_preset = get_preset(self.preset_store, running_key, quant, slot)
+                if running_preset:
+                    panel.preset_display = running_preset.name
         if alive and not was_alive:
             self._launch_time = time.time()
         if alive and info:
@@ -1631,10 +1754,10 @@ class LLMServeApp(App):
         clamped = clamp_preset_contexts(MODELS_JSON, PRESETS_JSON, models_dir=MODELS_DIR)
         self.registry = load_registry(MODELS_JSON, models_dir=MODELS_DIR)
         self.preset_store = load_presets(PRESETS_JSON)
-        tree = self.query_one(ModelTree)
-        tree.registry = self.registry
-        tree.preset_store = self.preset_store
-        tree.refresh_tree()
+        nav = self.query_one(ModelNav)
+        nav.registry = self.registry
+        nav.preset_store = self.preset_store
+        nav.refresh_cards()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
@@ -1651,33 +1774,20 @@ class LLMServeApp(App):
             extra = f" (+{len(clamped) - 3} more)" if len(clamped) > 3 else ""
             self.notify(f"Capped preset context: {bits}{extra}", severity="warning")
 
-    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
-        node: TreeNode = event.node
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if not isinstance(event.option_list, ModelNav):
+            return
         cfg = self.query_one(ConfigPanel)
-        data = node.data
-        if data and data[0] == "model":
+        data = event.option_list.selected_data
+        if data and data[0] in ("model", "preset"):
             cfg.selected = data[1]
-        elif node.parent is not None and node.parent.data and node.parent.data[0] == "model":
-            cfg.selected = node.parent.data[1]
+        elif data and data[0] == "alias":
+            cfg.selected = self.registry.aliases.get(data[1])
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
 
     def _selected_model(self) -> str | None:
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node is None:
-            return None
-        if node.data and node.data[0] == "model":
-            return node.data[1]
-        if node.data and node.data[0] == "alias":
-            return self.registry.aliases.get(node.data[1])
-        if node.data and node.data[0] == "preset":
-            return node.data[1]
-        if node.data and node.data[0] in ("quant", "info"):
-            return node.data[1]
-        if node.parent and node.parent.data and node.parent.data[0] == "model":
-            return node.parent.data[1]
-        return None
+        return self.query_one(ModelNav).selected_model
 
     def action_launch(self) -> None:
         model = self._selected_model()
@@ -1801,30 +1911,21 @@ class LLMServeApp(App):
             self.notify("Already in edit mode", severity="warning")
             return
         
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node is None:
+        nav = self.query_one(ModelNav)
+        data = nav.selected_data
+        if data is None:
             self.notify("Select a model, preset, or alias first", severity="warning")
             return
 
-        # The quant row represents the model's quant collection, so editing it
-        # means opening the quant picker rather than the model profile editor.
-        if node.data and node.data[0] == "quant":
-            self.action_pick_quant()
-            return
-        
         # Check if it's a preset
-        if node.data and node.data[0] == "preset":
-            _, model_name, quant, slot = node.data
+        if data[0] == "preset":
+            _, model_name, quant, slot = data
             self._edit_preset(model_name, quant, slot)
             return
         
         # Check if it's an alias
-        if node.data and node.data[0] == "alias":
-            alias_name = node.data[1]
-            target = self.registry.aliases.get(alias_name)
-            if target:
-                self._edit_alias(alias_name, target)
+        if data[0] == "alias":
+            self.notify("Use ←/→ to change this alias target")
             return
         
         # Otherwise it's a model
@@ -1908,6 +2009,31 @@ class LLMServeApp(App):
         self._alias_editor_mode = True
         self._update_footer()
 
+    def cycle_selected_alias(self, direction: int) -> None:
+        """Immediately point the selected alias at the adjacent model."""
+        nav = self.query_one(ModelNav)
+        data = nav.selected_data
+        if not data or data[0] != "alias":
+            return
+        alias_name = data[1]
+        model_names = list(self.registry.models)
+        if not model_names:
+            self.notify("No models are available", severity="warning")
+            return
+        current = self.registry.aliases.get(alias_name)
+        try:
+            index = model_names.index(current)
+        except ValueError:
+            index = 0
+        target = model_names[(index + direction) % len(model_names)]
+        if target == current:
+            return
+        self.registry.aliases[alias_name] = target
+        save_registry(MODELS_JSON, self.registry)
+        display = self.registry.models[target].display
+        self._reload_registry()
+        self.notify(f"{alias_name} → {display}")
+
     def _exit_editor(self) -> None:
         """Exit editor mode and restore normal view."""
         if self._help_panel:
@@ -1925,7 +2051,7 @@ class LLMServeApp(App):
         self.query_one("#logs").display = True
         self._editor_mode = False
         self._update_footer()
-        self.query_one(ModelTree).focus()
+        self.query_one(ModelNav).focus()
 
     def _exit_alias_editor(self) -> None:
         """Exit alias editor mode and restore normal view."""
@@ -1937,7 +2063,7 @@ class LLMServeApp(App):
         self.query_one("#logs").display = True
         self._alias_editor_mode = False
         self._update_footer()
-        self.query_one(ModelTree).focus()
+        self.query_one(ModelNav).focus()
 
     def action_save_edit(self) -> None:
         """Save current editor (called by Ctrl+S binding)."""
@@ -1959,9 +2085,8 @@ class LLMServeApp(App):
         if self._editor_mode or self._alias_editor_mode:
             self.notify("Close the editor first", severity="warning")
             return
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node and node.data and node.data[0] == "alias":
+        data = self.query_one(ModelNav).selected_data
+        if data and data[0] == "alias":
             def handle_alias_result(result: tuple[str, str] | None) -> None:
                 if result is not None:
                     name, target = result
@@ -1995,15 +2120,14 @@ class LLMServeApp(App):
         self._edit_preset(model_name, quant, slot)
 
     def action_delete(self) -> None:
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node is None:
+        data = self.query_one(ModelNav).selected_data
+        if data is None:
             self.notify("Select a model, preset, or alias first", severity="warning")
             return
         
         # Check if it's a preset
-        if node.data and node.data[0] == "preset":
-            _, model_name, quant, slot = node.data
+        if data[0] == "preset":
+            _, model_name, quant, slot = data
             preset = get_preset(self.preset_store, model_name, quant, slot)
             if not preset:
                 self.notify("Preset not found", severity="error")
@@ -2030,8 +2154,8 @@ class LLMServeApp(App):
             return
         
         # Check if it's an alias
-        if node.data and node.data[0] == "alias":
-            alias_name = node.data[1]
+        if data[0] == "alias":
+            alias_name = data[1]
             msg = f"Delete alias '{alias_name}'?"
             
             def handle_alias_confirm(confirmed: bool) -> None:
@@ -2068,10 +2192,9 @@ class LLMServeApp(App):
 
     def action_apply(self) -> None:
         """Apply the selected preset (mark as active for its quant)."""
-        tree = self.query_one(ModelTree)
-        node = tree.cursor_node
-        if node and node.data and node.data[0] == "preset":
-            _, model_name, quant, slot = node.data
+        data = self.query_one(ModelNav).selected_data
+        if data and data[0] == "preset":
+            _, model_name, quant, slot = data
             set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
@@ -2079,6 +2202,25 @@ class LLMServeApp(App):
             self.notify(f"Applied preset {model_name}/{quant} [{slot}] {preset.name if preset else ''}")
         else:
             self.notify("Select a preset first", severity="warning")
+
+    def action_activate_preset(self, slot: int) -> None:
+        """Activate a numbered preset for the currently selected model card."""
+        model_name = self._selected_model()
+        if not model_name:
+            self.notify("Select a model card first", severity="warning")
+            return
+        quant = self._model_active_quant(model_name)
+        preset = get_preset(self.preset_store, model_name, quant, slot)
+        if preset is None:
+            self.notify(
+                f"No preset [{slot}] for {self.registry.models[model_name].display}",
+                severity="warning",
+            )
+            return
+        set_active_preset(self.preset_store, model_name, quant, slot)
+        save_presets(PRESETS_JSON, self.preset_store)
+        self._reload_registry()
+        self.notify(f"Applied preset [{slot}] {preset.name}")
 
     def action_open_hub(self) -> None:
         if self._editor_mode or self._alias_editor_mode:
