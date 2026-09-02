@@ -94,6 +94,7 @@ class GgufArchitectureTests(unittest.TestCase):
             info = apply_architecture_from_gguf(params, path, replace_cloned=True)
             self.assertEqual(info.block_count, 28)
             self.assertEqual(params["total_layers"], 28)
+            self.assertIsNone(params.get("context_length"))
 
     def test_apply_drops_clone_when_header_unreadable(self) -> None:
         params = {"total_layers": 28, "ctx": 4096}
@@ -127,7 +128,7 @@ class GgufArchitectureTests(unittest.TestCase):
                 '{"models": {"demo": {"file": "demo.gguf", "total_layers": 28}}, "aliases": {}}'
             )
             changes = sync_gguf_architecture(path, models_dir)
-            self.assertEqual(changes, [("demo", 28, 65)])
+            self.assertEqual(changes, [("demo", "total_layers", 28, 65)])
             self.assertEqual(load_registry(path).models["demo"].params["total_layers"], 65)
 
 

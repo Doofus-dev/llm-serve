@@ -31,11 +31,17 @@ from tui.data.models_json import (
     delete_model,
     update_model,
     sync_gguf_architecture,
+    clamp_preset_contexts,
     set_active_quant,
     add_or_update_quant,
     find_model_by_repo,
     model_author_size_line,
     validate_display_name,
+)
+from tui.data.context_length import (
+    fmt_ctx_compact,
+    fmt_ctx_range,
+    resolve_context_length,
 )
 from tui.data.preset_template import (
     PRESET_PARAM_GROUPS,
@@ -98,7 +104,7 @@ for _group_params in PRESET_PARAM_GROUPS.values():
 PROFILE_KEYS = ("display", "port", "host", "notes")
 
 # Architecture facts from the GGUF header — shown but not editable.
-LOCKED_PARAMS = frozenset({"total_layers"})
+LOCKED_PARAMS = frozenset({"total_layers", "context_length"})
 
 
 class ParamFocused(Message):
@@ -260,13 +266,7 @@ def fmt_uptime(seconds: float) -> str:
 
 def fmt_ctx(n) -> str:
     """Compact context size: 32768 → 32k."""
-    try:
-        n = int(n)
-    except (TypeError, ValueError):
-        return str(n)
-    if n >= 1024 and n % 1024 == 0:
-        return f"{n // 1024}k"
-    return str(n)
+    return fmt_ctx_compact(n)
 
 
 def model_author(params: dict, file: str) -> str | None:
@@ -314,8 +314,9 @@ def fmt_model_source_line(params: dict, file: str) -> str:
 
 
 def fmt_model_runtime_line(params: dict) -> str:
-    """Line 2: context and GPU layers from config."""
-    ctx = fmt_ctx(params.get("ctx", "?"))
+    """Line 2: preset context vs model max, and GPU layers."""
+    max_ctx = resolve_context_length(params, MODELS_DIR)
+    ctx = fmt_ctx_range(params.get("ctx", "?"), max_ctx)
     ngl = params.get("gpu_layers", "?")
     return f"ctx: {ctx}  ngl: {ngl}"
 
@@ -504,6 +505,9 @@ class ConfigPanel(Static):
             author = model_author(identity, model.file)
             if author:
                 lines.append(f"[$accent]{'author':<18}[/] {author}")
+            max_ctx = resolve_context_length(identity, MODELS_DIR)
+            if max_ctx is not None:
+                lines.append(f"[$accent]{'max_context':<18}[/] {fmt_ctx(max_ctx)} tokens")
             source = identity.get("source")
             if isinstance(source, dict):
                 for key in ("repo", "filename", "revision"):
@@ -789,6 +793,7 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         apply_architecture_from_gguf(
             self.identity, MODELS_DIR / str(self.identity.get("file", ""))
         )
+        self.max_ctx = resolve_context_length(self.identity, MODELS_DIR)
         self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.name_input: EditorInput | None = None
         self.on_save_callback = on_save
@@ -811,12 +816,23 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
                     with Horizontal():
                         for param in row_params:
                             if param in LOCKED_PARAMS:
-                                value = self.identity.get(param, "")
+                                if param == "context_length":
+                                    value = self.max_ctx if self.max_ctx is not None else self.identity.get(param, "")
+                                else:
+                                    value = self.identity.get(param, "")
                                 with Vertical(classes="param-field"):
-                                    yield Label(f"{param}  [dim]from GGUF[/]", classes="param-label")
+                                    yield Label(f"{param}  [dim]from model[/]", classes="param-label")
                                     yield Label(fmt_locked_value(value), classes="param-locked")
                                 continue
                             value = self.preset.params.get(param, "")
+                            if param == "ctx" and self.max_ctx is not None:
+                                with Vertical(classes="param-field"):
+                                    yield from self._yield_param_controls(
+                                        param,
+                                        value,
+                                        label=f"ctx  [dim]max {fmt_ctx(self.max_ctx)}[/]",
+                                    )
+                                continue
                             with Vertical(classes="param-field"):
                                 yield from self._yield_param_controls(param, value)
 
@@ -840,6 +856,18 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
             if param in LOCKED_PARAMS:
                 continue
             params[param] = val
+
+        if self.max_ctx is not None and "ctx" in params:
+            try:
+                requested = int(params["ctx"])
+            except (TypeError, ValueError):
+                requested = None
+            if requested is not None and requested > self.max_ctx:
+                self.app.notify(
+                    f"Context capped to model max ({fmt_ctx(self.max_ctx)} tokens)",
+                    severity="warning",
+                )
+                params["ctx"] = self.max_ctx
 
         self.on_save_callback(name, params)
 
@@ -1226,6 +1254,7 @@ class LLMServeApp(App):
         expected_bytes: int,
         clone_from: str,
         display: str | None = None,
+        hf_context: int | None = None,
         on_complete=None,
         on_error=None,
     ) -> bool:
@@ -1251,6 +1280,7 @@ class LLMServeApp(App):
                 gguf_path=gguf_path,
                 models_dir=MODELS_DIR,
                 display=display,
+                hf_context=hf_context,
             )
             self._reload_registry()
             extra = ""
@@ -1482,6 +1512,7 @@ class LLMServeApp(App):
     def _reload_registry(self, *, notify_gguf: bool = False) -> None:
         """Reload models.json and presets.json, refresh UI."""
         changes = sync_gguf_architecture(MODELS_JSON, MODELS_DIR)
+        clamped = clamp_preset_contexts(MODELS_JSON, PRESETS_JSON, models_dir=MODELS_DIR)
         self.registry = load_registry(MODELS_JSON, models_dir=MODELS_DIR)
         self.preset_store = load_presets(PRESETS_JSON)
         tree = self.query_one(ModelTree)
@@ -1492,8 +1523,17 @@ class LLMServeApp(App):
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
         if notify_gguf and changes:
-            bits = ", ".join(f"{name} {old}→{new}" for name, old, new in changes)
-            self.notify(f"Updated total_layers from GGUF: {bits}")
+            bits = ", ".join(
+                f"{name} {field} {old}→{new}" for name, field, old, new in changes
+            )
+            self.notify(f"Updated from GGUF: {bits}")
+        if clamped:
+            bits = ", ".join(
+                f"{model}/{quant}[{slot}] {old}→{new}"
+                for model, quant, slot, old, new in clamped[:3]
+            )
+            extra = f" (+{len(clamped) - 3} more)" if len(clamped) > 3 else ""
+            self.notify(f"Capped preset context: {bits}{extra}", severity="warning")
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         node: TreeNode = event.node
@@ -1649,6 +1689,12 @@ class LLMServeApp(App):
         node = tree.cursor_node
         if node is None:
             self.notify("Select a model, preset, or alias first", severity="warning")
+            return
+
+        # The quant row represents the model's quant collection, so editing it
+        # means opening the quant picker rather than the model profile editor.
+        if node.data and node.data[0] == "quant":
+            self.action_pick_quant()
             return
         
         # Check if it's a preset

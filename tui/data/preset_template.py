@@ -15,6 +15,7 @@ IDENTITY_KEYS = frozenset({
     "host",
     "notes",
     "total_layers",
+    "context_length",
 })
 
 # Legacy Hermes-only keys — stripped on migration.
@@ -110,7 +111,7 @@ DEFAULT_PRESET_PARAMS: dict[str, Any] = {
 DEFAULT_PRESET_NAME = "default"
 
 PRESET_PARAM_GROUPS: dict[str, list[str]] = {
-    "Architecture": ["total_layers", "gpu_layers", "n_cpu_moe"],
+    "Architecture": ["total_layers", "context_length", "gpu_layers", "n_cpu_moe"],
     "Context": ["ctx", "per_slot_min", "cache_k", "cache_v"],
     "Batching": ["batch", "ubatch", "threads", "threads_batch", "parallel"],
     "Generation": ["n_predict", "defrag", "thinking", "reasoning_format", "reasoning_budget"],
@@ -167,8 +168,20 @@ def identity_from_seed(base_params: dict[str, Any] | None = None) -> dict[str, A
     return identity
 
 
-def default_preset_params(*, seed: dict[str, Any] | None = None) -> dict[str, Any]:
+def default_preset_params(
+    *,
+    seed: dict[str, Any] | None = None,
+    max_ctx: int | None = None,
+) -> dict[str, Any]:
+    from tui.data.context_length import cap_context_value, clamp_preset_params
+
     params = dict(DEFAULT_PRESET_PARAMS)
     if seed:
         params.update(extract_runtime_params(seed))
-    return params
+    if max_ctx is not None:
+        ctx = params.get("ctx", DEFAULT_PRESET_PARAMS["ctx"])
+        try:
+            params["ctx"] = cap_context_value(int(ctx), max_ctx)
+        except (TypeError, ValueError):
+            params["ctx"] = cap_context_value(int(DEFAULT_PRESET_PARAMS["ctx"]), max_ctx)
+    return clamp_preset_params(params, max_ctx)

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tui.data.context_length import clamp_preset_params, resolve_context_length
 from tui.data.gguf import apply_architecture_from_gguf, read_gguf_architecture
 from tui.data.preset_template import (
     HERMES_KEYS,
@@ -349,6 +350,7 @@ def add_or_update_quant(
     models_dir: Path | None = None,
     slug: str | None = None,
     display: str | None = None,
+    hf_context: int | None = None,
 ) -> tuple[str, str]:
     """Register a downloaded GGUF under its repo model. Returns (model_slug, quant_id)."""
     reg = load_registry(path, models_dir=models_dir)
@@ -364,12 +366,16 @@ def add_or_update_quant(
         params["file"] = file_rel
         if isinstance(params.get("source"), dict):
             params["source"]["filename"] = filename
-        apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
+        apply_architecture_from_gguf(
+            params, gguf_path, replace_cloned=True, hf_context=hf_context
+        )
         save_registry(path, reg)
         _seed_preset_for_quant(
             path,
             existing,
             quant_id,
+            identity=params,
+            models_dir=models_dir,
             runtime_seed=extract_runtime_params(base_params),
         )
         return existing, quant_id
@@ -385,13 +391,17 @@ def add_or_update_quant(
     params["display"] = display or family_display(repo_id, filename)
     params["active_quant"] = quant_id
     params["quants"] = {quant_id: {"filename": filename, "file": file_rel}}
-    apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
+    apply_architecture_from_gguf(
+        params, gguf_path, replace_cloned=True, hf_context=hf_context
+    )
     reg.models[model_slug] = ModelConfig(name=model_slug, params=params)
     save_registry(path, reg)
     _seed_preset_for_quant(
         path,
         model_slug,
         quant_id,
+        identity=params,
+        models_dir=models_dir,
         runtime_seed=extract_runtime_params(base_params),
     )
     return model_slug, quant_id
@@ -402,15 +412,19 @@ def _seed_preset_for_quant(
     model_slug: str,
     quant_id: str,
     *,
+    identity: dict[str, Any],
+    models_dir: Path | None = None,
     runtime_seed: dict[str, Any],
 ) -> None:
     presets_path = models_path.parent / "presets.json"
     store = load_presets(presets_path)
+    max_ctx = resolve_context_length(identity, models_dir)
     if seed_default_preset(
         store,
         model_slug,
         quant_id,
         runtime_seed=runtime_seed or None,
+        max_ctx=max_ctx,
         activate=True,
     ):
         save_presets(presets_path, store)
@@ -425,6 +439,7 @@ def create_downloaded_model(
     source: dict[str, str],
     gguf_path: Path | None = None,
     models_dir: Path | None = None,
+    hf_context: int | None = None,
 ) -> tuple[str, str]:
     """Backward-compatible wrapper; prefers repo merge over flat profile names."""
     repo = source.get("repo", "")
@@ -441,6 +456,7 @@ def create_downloaded_model(
             models_dir=models_dir,
             slug=name if name and not re.search(r"(iq|q\d)", name.lower()) else None,
             display=family_display(repo, filename) if name and re.search(r"(iq|q\d)", name.lower()) else name,
+            hf_context=hf_context,
         )
     params = identity_from_seed(base_params)
     params["file"] = file_rel
@@ -449,39 +465,86 @@ def create_downloaded_model(
     params["active_quant"] = qid
     params["quants"] = {qid: {"filename": filename, "file": file_rel}}
     params["display"] = name
-    apply_architecture_from_gguf(params, gguf_path, replace_cloned=True)
+    apply_architecture_from_gguf(
+        params, gguf_path, replace_cloned=True, hf_context=hf_context
+    )
     create_model(path, name, params)
     _seed_preset_for_quant(
         path,
         name,
         qid,
+        identity=params,
+        models_dir=models_dir,
         runtime_seed=extract_runtime_params(base_params),
     )
     return name, qid
 
 
-def sync_gguf_architecture(registry_path: Path, models_dir: Path) -> list[tuple[str, int | None, int]]:
+def sync_gguf_architecture(registry_path: Path, models_dir: Path) -> list[tuple[str, str, int | None, int]]:
     reg = load_registry(registry_path, models_dir=models_dir)
-    changes: list[tuple[str, int | None, int]] = []
+    changes: list[tuple[str, str, int | None, int]] = []
     for name, cfg in reg.models.items():
         file_rel = str(cfg.params.get("file", ""))
         if not file_rel:
             continue
         info = read_gguf_architecture(models_dir / file_rel)
-        if info.block_count is None:
-            continue
-        old = cfg.params.get("total_layers")
-        try:
-            old_int = int(old) if old is not None else None
-        except (TypeError, ValueError):
-            old_int = None
-        if old_int == info.block_count:
-            continue
-        cfg.params["total_layers"] = info.block_count
-        changes.append((name, old_int, info.block_count))
+        if info.block_count is not None:
+            old = cfg.params.get("total_layers")
+            try:
+                old_int = int(old) if old is not None else None
+            except (TypeError, ValueError):
+                old_int = None
+            if old_int != info.block_count:
+                cfg.params["total_layers"] = info.block_count
+                changes.append((name, "total_layers", old_int, info.block_count))
+        if info.context_length is not None:
+            old = cfg.params.get("context_length")
+            try:
+                old_int = int(old) if old is not None else None
+            except (TypeError, ValueError):
+                old_int = None
+            if old_int != info.context_length:
+                cfg.params["context_length"] = info.context_length
+                changes.append((name, "context_length", old_int, info.context_length))
     if changes:
         save_registry(registry_path, reg)
     return changes
+
+
+def clamp_preset_contexts(
+    registry_path: Path,
+    presets_path: Path,
+    *,
+    models_dir: Path | None = None,
+) -> list[tuple[str, str, int, int, int]]:
+    """Cap preset ctx values that exceed each model's native context_length."""
+    reg = load_registry(registry_path, models_dir=models_dir)
+    if not presets_path.exists():
+        return []
+    store = load_presets(presets_path)
+    changed: list[tuple[str, str, int, int, int]] = []
+    dirty = False
+    for model_name, quants in store.presets.items():
+        cfg = reg.models.get(model_name)
+        if cfg is None:
+            continue
+        max_ctx = resolve_context_length(cfg.params, models_dir)
+        if max_ctx is None:
+            continue
+        for quant_id, slots in quants.items():
+            for slot, preset in slots.items():
+                try:
+                    current = int(preset.params.get("ctx", 0))
+                except (TypeError, ValueError):
+                    continue
+                capped = min(current, max_ctx)
+                if capped != current:
+                    preset.params["ctx"] = capped
+                    changed.append((model_name, quant_id, slot, current, capped))
+                    dirty = True
+    if dirty:
+        save_presets(presets_path, store)
+    return changed
 
 
 def migrate_models_json(data: dict[str, Any], *, models_dir: Path | None = None) -> tuple[bool, dict[str, tuple[str, str]]]:

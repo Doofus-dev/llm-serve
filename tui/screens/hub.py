@@ -14,6 +14,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
+from tui.data.context_length import context_length_options, fmt_ctx_compact
 from tui.data.hf import (
     HF_INSTALL_HINT,
     AuthStatus,
@@ -371,6 +372,11 @@ class HubScreen(Screen):
     def _set_status(self, message: str) -> None:
         self.query_one("#hub-status", Static).update(message)
 
+    def _set_status_if_mounted(self, message: str) -> None:
+        """Update Hub status only while this screen is still in the DOM."""
+        if self.is_mounted:
+            self._set_status(message)
+
     def _update_auth_status(self) -> None:
         if self._downloading:
             return
@@ -409,13 +415,7 @@ class HubScreen(Screen):
 
     def _update_context_options(self, model_max: int | None = None) -> None:
         """Set doubling context stops, capped at the model's limit."""
-        maximum = model_max or 65_536
-        stops = [32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576]
-        self.context_options = [value for value in stops if value <= maximum]
-        if maximum >= 32_768 and maximum not in self.context_options:
-            self.context_options.append(maximum)
-        if not self.context_options:
-            self.context_options = [maximum]
+        self.context_options = context_length_options(model_max)
         self.context_tokens = min(65_536, self.context_options[-1])
         self._render_estimate_controls()
         if self.mode == "files":
@@ -450,7 +450,7 @@ class HubScreen(Screen):
 
     @staticmethod
     def _fmt_context(tokens: int) -> str:
-        return f"{tokens // 1024}K" if tokens < 1_048_576 else f"{tokens // 1_048_576}M"
+        return fmt_ctx_compact(tokens)
 
     @staticmethod
     def _fmt_offload(ratio: float) -> str:
@@ -479,11 +479,14 @@ class HubScreen(Screen):
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
         table.add_column("Repo / author", width=34, key="repo")
+        table.add_column("Context", width=9, key="context")
         table.add_column("Size", width=11, key="size")
         table.add_column("Downloads", width=12, key="downloads")
         for repo in self.repos:
+            ctx = self._fmt_context(repo.context_length) if repo.context_length else "?"
             table.add_row(
                 repo.id,
+                ctx,
                 fmt_size(repo.size),
                 str(repo.downloads),
                 key=repo.id,
@@ -564,7 +567,9 @@ class HubScreen(Screen):
             return
         self.files = files
         self._render_file_table()
-        self._log(f"Found {len(files)} GGUF files")
+        max_ctx = self.selected_repo.context_length if self.selected_repo else None
+        ctx_note = f" · max context {self._fmt_context(max_ctx)}" if max_ctx else ""
+        self._log(f"Found {len(files)} GGUF files{ctx_note}")
         self.query_one("#hub-table", DataTable).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -692,13 +697,17 @@ class HubScreen(Screen):
             def on_done() -> None:
                 self._downloading = False
                 self.registry = load_registry(self.models_json_path, models_dir=self.models_dir)
-                self._set_status(f"[bold $success]Registered[/] {filename}")
+                self._set_status_if_mounted(
+                    f"[bold $success]Registered[/] {filename}"
+                )
                 if self.on_complete:
                     self.on_complete()
 
             def on_fail(message: str) -> None:
                 self._downloading = False
-                self._set_status(f"[bold $error]Download failed[/] {message[:140]}")
+                self._set_status_if_mounted(
+                    f"[bold $error]Download failed[/] {message[:140]}"
+                )
 
             started = app.start_model_download(
                 plan=plan,
@@ -706,6 +715,7 @@ class HubScreen(Screen):
                 expected_bytes=expected,
                 clone_from=clone_from,
                 display=display_name,
+                hf_context=self.selected_repo.context_length,
                 on_complete=on_done,
                 on_error=on_fail,
             )
@@ -805,6 +815,7 @@ class HubScreen(Screen):
                 source=source,
                 gguf_path=gguf_path,
                 models_dir=self.models_dir,
+                hf_context=self.selected_repo.context_length if self.selected_repo else None,
             )
             self.registry = load_registry(self.models_json_path, models_dir=self.models_dir)
             if remember_hf_author(self.settings, plan.author):

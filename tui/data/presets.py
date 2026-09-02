@@ -268,12 +268,13 @@ def seed_default_preset(
     quant: str,
     *,
     runtime_seed: dict[str, Any] | None = None,
+    max_ctx: int | None = None,
     activate: bool = True,
 ) -> bool:
     """Create slot 1 from the fixed template if this quant has no presets yet."""
     if list_presets_for_quant(store, model, quant):
         return False
-    params = default_preset_params(seed=runtime_seed)
+    params = default_preset_params(seed=runtime_seed, max_ctx=max_ctx)
     set_preset(store, model, quant, 1, DEFAULT_PRESET_NAME, params)
     if activate or get_active_slot(store, model, quant) is None:
         set_active_preset(store, model, quant, 1)
@@ -285,15 +286,17 @@ def migrate_preset_params(
     model: str,
     quant: str,
     runtime_seed: dict[str, Any],
+    *,
+    max_ctx: int | None = None,
 ) -> bool:
     """Upgrade legacy override-only presets to full params using a runtime seed."""
     changed = False
     slots = list_presets_for_quant(store, model, quant)
     if not slots:
-        seed_default_preset(store, model, quant, runtime_seed=runtime_seed)
+        seed_default_preset(store, model, quant, runtime_seed=runtime_seed, max_ctx=max_ctx)
         return True
 
-    full_seed = default_preset_params(seed=runtime_seed)
+    full_seed = default_preset_params(seed=runtime_seed, max_ctx=max_ctx)
     for preset in slots.values():
         merged = dict(full_seed)
         merged.update(preset.params)

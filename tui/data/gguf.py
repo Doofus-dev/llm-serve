@@ -40,13 +40,23 @@ def apply_architecture_from_gguf(
     path: Path | None,
     *,
     replace_cloned: bool = False,
+    hf_context: int | None = None,
 ) -> GgufArchitecture:
-    """Copy GGUF block_count onto total_layers when the header can be read."""
+    """Copy GGUF block_count and context_length onto model identity when readable."""
     info = read_gguf_architecture(path)
     if info.block_count is not None:
         params["total_layers"] = info.block_count
     elif replace_cloned:
         params.pop("total_layers", None)
+
+    from tui.data.context_length import apply_context_length
+
+    apply_context_length(
+        params,
+        hf_context=hf_context,
+        gguf_path=path,
+        replace_cloned=replace_cloned,
+    )
     return info
 
 
@@ -72,7 +82,10 @@ def _parse_header(handle: BinaryIO) -> GgufArchitecture:
         metadata[key] = value
         arch = metadata.get("general.architecture")
         if isinstance(arch, str) and isinstance(metadata.get(f"{arch}.block_count"), int):
-            break
+            if isinstance(metadata.get(f"{arch}.context_length"), int):
+                break
+            if not key.startswith(f"{arch}."):
+                break
 
     architecture = metadata.get("general.architecture")
     if not isinstance(architecture, str):

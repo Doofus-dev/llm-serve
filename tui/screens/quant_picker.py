@@ -11,6 +11,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Select, Static
 
+from tui.data.context_length import context_length_options, fmt_ctx_compact, resolve_context_length
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.hf import HubFile, list_repo_ggufs
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
@@ -157,24 +158,21 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
-        self.query_one("#quant-picker-title", Label).update(
-            f"[bold]Quant — {self.cfg.display}[/]  [dim]({self.model_name})[/]"
-        )
+        max_ctx = resolve_context_length(self.cfg.params, self.models_dir)
+        title = f"[bold]Quant — {self.cfg.display}[/]  [dim]({self.model_name})[/]"
+        if max_ctx is not None:
+            title += f"  [dim]max ctx {fmt_ctx_compact(max_ctx)}[/]"
+        self.query_one("#quant-picker-title", Label).update(title)
         self.gpu = query_gpu()
-        try:
-            model_ctx = int(self.cfg.params.get("ctx", 65_536))
-            if model_ctx >= 32_768 and model_ctx not in self.context_options:
-                self.context_options = sorted(set(self.context_options + [model_ctx]))
-            self.context_tokens = min(model_ctx, max(self.context_options))
-        except (TypeError, ValueError):
-            pass
+        self.context_options = context_length_options(max_ctx)
+        self.context_tokens = self.context_options[-1]
         self._render_estimate_controls()
         self._load_id += 1
         self._fetch_files(self._load_id)
 
     @staticmethod
     def _fmt_context(tokens: int) -> str:
-        return f"{tokens // 1024}K" if tokens < 1_048_576 else f"{tokens // 1_048_576}M"
+        return fmt_ctx_compact(tokens)
 
     @staticmethod
     def _fmt_offload(ratio: float) -> str:

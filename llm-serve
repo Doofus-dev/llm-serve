@@ -421,6 +421,10 @@ METRICS="${METRICS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" metrics on)}"
 
 # Per-slot context floor
 PER_SLOT_CTX=$(( CONTEXT_SIZE / PARALLEL ))
+MODEL_MAX_CTX="$(m_get "${MODEL}" context_length "")"
+if [[ -n "${MODEL_MAX_CTX}" && "${MODEL_MAX_CTX}" =~ ^[0-9]+$ && "${CONTEXT_SIZE}" -gt "${MODEL_MAX_CTX}" ]]; then
+    echo "Warning: preset context ${CONTEXT_SIZE} exceeds model max ${MODEL_MAX_CTX} — llama-server will cap it." >&2
+fi
 if (( PER_SLOT_MIN > 0 && PER_SLOT_CTX < PER_SLOT_MIN )); then
     echo "Error: per-slot context is ${PER_SLOT_CTX} (${CONTEXT_SIZE} / ${PARALLEL}), " >&2
     echo "       below the ${PER_SLOT_MIN}-token floor for '${MODEL}'." >&2
@@ -516,6 +520,9 @@ echo "Starting llama-server: ${MODEL}"
 echo "  File:         ${MODEL_FILE}"
 echo "  URL:          http://${HOST}:${PORT}/v1"
 echo "  Context:      ${CONTEXT_SIZE} tokens  (${PARALLEL} slot(s), ${PER_SLOT_CTX} per slot)"
+if [[ -n "${MODEL_MAX_CTX}" && "${MODEL_MAX_CTX}" =~ ^[0-9]+$ ]]; then
+    echo "  Model max:    ${MODEL_MAX_CTX} tokens"
+fi
 echo "  KV cache:     K=${CACHE_TYPE_K}  V=${CACHE_TYPE_V}"
 if (( TOTAL_LAYERS > 0 )); then
     echo "  GPU layers:   ${GPU_LAYERS} / ${TOTAL_LAYERS}  (${CPU_LAYERS} on CPU)"
