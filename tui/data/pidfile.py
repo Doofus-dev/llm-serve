@@ -15,6 +15,7 @@ class PidInfo:
     ts: str
     quant: str | None = None
     preset_slot: int | None = None
+    remote: bool = False
 
     @property
     def alive(self) -> bool:
@@ -37,6 +38,7 @@ def read_pid_file(path: Path) -> PidInfo | None:
             ts=parts[3] if len(parts) > 3 else "",
             quant=parts[4] if len(parts) > 4 else None,
             preset_slot=int(parts[5]) if len(parts) > 5 else None,
+            remote=len(parts) > 6 and parts[6] == "1",
         )
     except (OSError, ValueError, IndexError):
         return None

@@ -54,13 +54,14 @@ class DashboardTests(unittest.TestCase):
             model="qwen36-27b-bartowski",
             port=8080,
             ts="",
+            remote=True,
         )
         panel.model_display = "Qwen 3.6"
         panel.preset_display = "default"
 
         rendered = render_text(panel.render())
 
-        self.assertIn("RUNNING  Qwen 3.6  default", rendered)
+        self.assertIn("RUNNING  Qwen 3.6  default  REMOTE", rendered)
         self.assertNotIn("qwen36-27b-bartowski", rendered)
 
     def test_status_health_thresholds(self) -> None:
@@ -89,6 +90,14 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("(94%) CRITICAL", rendered)
         self.assertIn("87°C HOT", rendered)
+
+    def test_status_panel_shows_next_launch_remote_toggle(self) -> None:
+        panel = StatusPanel()
+        self.assertIn("NEXT LAUNCH [LOCAL]", render_text(panel.render()))
+
+        panel.next_remote = True
+
+        self.assertIn("NEXT LAUNCH [REMOTE]", render_text(panel.render()))
 
 
 if __name__ == "__main__":

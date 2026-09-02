@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tui.app import LLMServeApp, ModelNav
@@ -107,6 +108,30 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(app.registry.aliases[alias_name], expected)
             save.assert_called_once()
+
+    async def test_remote_hotkey_adds_flag_to_next_launch(self) -> None:
+        app = LLMServeApp()
+        async with app.run_test(size=(120, 45)) as pilot:
+            nav = app.query_one(ModelNav)
+            self._select_model(nav, "q5-14b-bartowski")
+            nav.focus()
+
+            await pilot.press("r")
+            self.assertTrue(app.remote_launch)
+
+            with (
+                patch(
+                    "tui.app.subprocess.run",
+                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ) as run,
+                patch.object(app, "_reload_registry"),
+                patch.object(app, "_refresh_pid"),
+            ):
+                await pilot.press("l")
+                await pilot.pause()
+
+            command = run.call_args.args[0]
+            self.assertIn("--remote", command)
 
 
 if __name__ == "__main__":

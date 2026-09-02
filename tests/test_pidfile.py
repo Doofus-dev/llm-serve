@@ -17,11 +17,12 @@ class PidFileTests(unittest.TestCase):
             return read_pid_file(path)
 
     def test_reads_running_preset_metadata(self) -> None:
-        info = self._read("123 qwen36-27b-bartowski 8080 1000 Q2_K 1\n")
+        info = self._read("123 qwen36-27b-bartowski 8080 1000 Q2_K 1 1\n")
 
         self.assertIsNotNone(info)
         self.assertEqual(info.quant, "Q2_K")
         self.assertEqual(info.preset_slot, 1)
+        self.assertTrue(info.remote)
 
     def test_old_pid_format_remains_supported(self) -> None:
         info = self._read("123 qwen36-27b-bartowski 8080 1000\n")
@@ -29,6 +30,7 @@ class PidFileTests(unittest.TestCase):
         self.assertIsNotNone(info)
         self.assertIsNone(info.quant)
         self.assertIsNone(info.preset_slot)
+        self.assertFalse(info.remote)
 
 
 if __name__ == "__main__":

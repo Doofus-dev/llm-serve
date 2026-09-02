@@ -141,8 +141,8 @@ rotate_log() {
 
 # Write PID file
 write_pid() {
-    local pid="$1" model="$2" port="$3" quant="$4" preset_slot="$5"
-    echo "$pid $model $port $(date +%s) $quant $preset_slot" > "$PID_FILE"
+    local pid="$1" model="$2" port="$3" quant="$4" preset_slot="$5" remote="$6"
+    echo "$pid $model $port $(date +%s) $quant $preset_slot $remote" > "$PID_FILE"
 }
 
 # ── Subcommands ─────────────────────────────────────────────────────────────
@@ -153,8 +153,8 @@ do_status() {
         return 0
     fi
 
-    local pid model port ts quant preset_slot
-    read -r pid model port ts quant preset_slot < "$PID_FILE"
+    local pid model port ts quant preset_slot remote
+    read -r pid model port ts quant preset_slot remote < "$PID_FILE"
 
     if ! check_pid "$pid"; then
         echo "Stale PID file (PID $pid not running)"
@@ -169,6 +169,7 @@ do_status() {
     echo "Running: $model"
     echo "  PID:    $pid"
     echo "  Port:   $port"
+    echo "  Access: $([[ "${remote:-0}" == "1" ]] && echo "Remote (0.0.0.0)" || echo "Local")"
     echo "  Uptime: $uptime_str"
     echo ""
     echo "Last log lines:"
@@ -219,8 +220,8 @@ do_stop() {
             return 0
         fi
 
-        local pid running_model port ts quant preset_slot
-        read -r pid running_model port ts quant preset_slot < "$PID_FILE"
+        local pid running_model port ts quant preset_slot remote
+        read -r pid running_model port ts quant preset_slot remote < "$PID_FILE"
 
         if [[ "$running_model" != "$resolved_model" ]]; then
             echo "Model '$resolved_model' is not running (currently running: $running_model)"
@@ -375,7 +376,7 @@ llama_warn_if_outdated
 
 # Check if model is already running
 if [[ -f "$PID_FILE" ]]; then
-    read -r old_pid old_model old_port old_ts old_quant old_preset_slot < "$PID_FILE"
+    read -r old_pid old_model old_port old_ts old_quant old_preset_slot old_remote < "$PID_FILE"
     if check_pid "$old_pid"; then
         die "Model '$old_model' is already running (PID: $old_pid). Stop it first with 'llm-serve stop'."
     else
@@ -614,7 +615,7 @@ else
 
     echo "── $(date '+%Y-%m-%d %H:%M:%S') launch: ${MODEL} (PID ${bg_pid}) ──" >> "$LOG_FILE"
 
-    write_pid "$bg_pid" "$MODEL" "$PORT" "$ACTIVE_QUANT" "$PRESET_SLOT"
+    write_pid "$bg_pid" "$MODEL" "$PORT" "$ACTIVE_QUANT" "$PRESET_SLOT" "$REMOTE"
 
     # Fail fast if llama-server dies during model load
     sleep 1

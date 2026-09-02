@@ -522,6 +522,7 @@ class StatusPanel(Static):
     pid_info: reactive[PidInfo | None] = reactive(None)
     model_display: reactive[str | None] = reactive(None)
     preset_display: reactive[str | None] = reactive(None)
+    next_remote: reactive[bool] = reactive(False)
     metrics: reactive[Metrics | None] = reactive(None)
     gpu: reactive[GPUStats | None] = reactive(None)
     props: reactive[dict | None] = reactive(None)
@@ -534,21 +535,31 @@ class StatusPanel(Static):
             state.append(f"  {self.model_display or info.model}", style="bold cyan")
             if self.preset_display:
                 state.append(f"  {self.preset_display}", style="bold yellow")
-            details = Text(
-                f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(self.uptime)}",
-                style="dim",
-            )
+            if info.remote:
+                state.append("  REMOTE", style="bold magenta")
         else:
             state = Text("○ NOT RUNNING", style="bold red")
             state.append("  Press L to launch the selected model", style="dim")
-            details = Text("")
+
+        launch_flag = Text("NEXT LAUNCH ", style="dim")
+        if self.next_remote:
+            launch_flag.append("[REMOTE]", style="bold magenta")
+        else:
+            launch_flag.append("[LOCAL]", style="bold green")
 
         header = Table.grid(expand=True)
         header.add_column(ratio=1)
         header.add_column(justify="right")
-        header.add_row(state, details)
+        header.add_row(state, launch_flag)
 
         renderables: list = [header]
+        if info and info.alive:
+            renderables.append(
+                Text(
+                    f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(self.uptime)}",
+                    style="dim",
+                )
+            )
         if self.props:
             alias = self.props.get("model_alias", "?")
             mp = self.props.get("model_path", "?")
@@ -1382,6 +1393,7 @@ class LLMServeApp(App):
         Binding("t", "change_theme", "Theme"),
         Binding("h", "open_hub", "Hub"),
         Binding("p", "pick_quant", "Quant"),
+        Binding("r", "toggle_remote", "Remote OFF"),
         Binding("1", "activate_preset(1)", "Preset 1", show=False),
         Binding("2", "activate_preset(2)", "Preset 2", show=False),
         Binding("3", "activate_preset(3)", "Preset 3", show=False),
@@ -1397,6 +1409,7 @@ class LLMServeApp(App):
         self.settings = load_settings(TUI_SETTINGS_JSON)
         self.download_manager = DownloadManager()
         self.client: ServerClient | None = None
+        self.remote_launch: bool = False
         self._launch_time: float | None = None
         self._log_size: int = 0
         self._editor_mode: bool = False
@@ -1437,6 +1450,11 @@ class LLMServeApp(App):
                 Binding("t", "change_theme", "Theme"),
                 Binding("h", "open_hub", "Hub"),
                 Binding("p", "pick_quant", "Quant"),
+                Binding(
+                    "r",
+                    "toggle_remote",
+                    "Remote ON" if self.remote_launch else "Remote OFF",
+                ),
                 Binding("1", "activate_preset(1)", "Preset 1", show=False),
                 Binding("2", "activate_preset(2)", "Preset 2", show=False),
                 Binding("3", "activate_preset(3)", "Preset 3", show=False),
@@ -1855,11 +1873,17 @@ class LLMServeApp(App):
             return
 
         launch_name = cfg.display
-        self.notify(f"Launching {launch_name} ({quant}) preset [{slot}] {preset.name}")
+        access = "remote" if self.remote_launch else "local"
+        self.notify(
+            f"Launching {launch_name} ({quant}) preset [{slot}] {preset.name} — {access}"
+        )
 
         try:
+            command = [str(REPO_ROOT / "llm-serve"), launch_name]
+            if self.remote_launch:
+                command.append("--remote")
             r = subprocess.run(
-                [str(REPO_ROOT / "llm-serve"), launch_name],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -1874,6 +1898,12 @@ class LLMServeApp(App):
         except Exception as e:
             self.notify(f"Launch error: {e}", severity="error")
         self._refresh_pid()
+
+    def action_toggle_remote(self) -> None:
+        """Toggle Meshnet/LAN binding for the next launch."""
+        self.remote_launch = not self.remote_launch
+        self.query_one(StatusPanel).next_remote = self.remote_launch
+        self._update_footer()
 
     def action_stop(self) -> None:
         try:
