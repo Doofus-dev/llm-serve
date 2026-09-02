@@ -1,11 +1,21 @@
 """Headless smoke test for the TUI app using Textual's Pilot."""
 import asyncio
+import io
 import sys
 from pathlib import Path
+
+from rich.console import Console
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.app import LLMServeApp
+
+
+def render_text(renderable) -> str:
+    output = io.StringIO()
+    console = Console(file=output, width=100, color_system=None)
+    console.print(renderable)
+    return output.getvalue()
 
 
 async def main():
@@ -29,7 +39,7 @@ async def main():
         print("tree labels:", labels)
 
         status = app.query_one(StatusPanel)
-        rendered = status.render()
+        rendered = render_text(status.render())
         assert "NOT RUNNING" in rendered or "RUNNING" in rendered
         print("status OK:", "RUNNING" if "RUNNING" in rendered.replace("NOT RUNNING", "") else "not running")
 
@@ -37,16 +47,16 @@ async def main():
         cfg.selected = "qwen38-27b-bartowski"
         cfg.registry = app.registry
         cfg.preset_store = app.preset_store
-        text = cfg.render()
-        assert "display" in text
+        text = render_text(cfg.render())
+        assert "Model" in text
         assert "Qwen 3.8" in text
-        assert "preset" in text.lower()
+        assert "Preset" in text
         print("config panel OK")
 
         app._refresh_pid()
         app._poll_gpu()
         await pilot.pause(0.3)
-        r2 = app.query_one(StatusPanel).render()
+        r2 = render_text(app.query_one(StatusPanel).render())
         assert "GPU" in r2 and ("AMD" in r2 or "RAM" in r2)
         print("gpu section OK")
 

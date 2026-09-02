@@ -9,6 +9,10 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+from rich import box
+from rich.console import Group
+from rich.table import Table
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -424,56 +428,102 @@ class StatusPanel(Static):
     props: reactive[dict | None] = reactive(None)
     uptime: reactive[float] = reactive(0.0)
 
-    def render(self) -> str:
-        lines: list[str] = []
+    def render(self) -> Group:
         info = self.pid_info
         if info and info.alive:
-            lines.append(f"[bold $success]● RUNNING[/]  [$accent]{info.model}[/]  (PID {info.pid}, port {info.port})")
-            lines.append(f"Uptime: {fmt_uptime(self.uptime)}")
+            state = Text("● RUNNING", style="bold green")
+            state.append(f"  {info.model}", style="bold cyan")
+            details = Text(
+                f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(self.uptime)}",
+                style="dim",
+            )
         else:
-            lines.append("[bold $error]○ NOT RUNNING[/] — press [bold]L[/] to launch selected model")
+            state = Text("○ NOT RUNNING", style="bold red")
+            state.append("  Press L to launch the selected model", style="dim")
+            details = Text("")
 
+        header = Table.grid(expand=True)
+        header.add_column(ratio=1)
+        header.add_column(justify="right")
+        header.add_row(state, details)
+
+        renderables: list = [header]
         if self.props:
             alias = self.props.get("model_alias", "?")
             mp = self.props.get("model_path", "?")
-            lines.append(f"Alias: {alias}  Path: {Path(str(mp)).name}")
+            renderables.append(
+                Text(f"alias {alias}  •  {Path(str(mp)).name}", style="dim")
+            )
 
-        lines.append("")
-        lines.append("[bold]── THROUGHPUT ──[/]")
+        throughput: list[Text] = []
         m = self.metrics
         if m:
             gen = m.predicted_tokens_seconds or m.gen_tps_derived
             prompt = m.prompt_tokens_seconds or m.prompt_tps_derived
-            bar_len = min(int(gen / 5), 20)
-            bar = "█" * bar_len + "░" * (20 - bar_len)
-            lines.append(f"Generation: {gen:7.1f} tok/s  {bar}")
-            lines.append(f"Prompt:     {prompt:7.1f} tok/s")
-            lines.append(f"Total gen:  {int(m.tokens_predicted_total)} tokens   (avg {m.avg_gen_tps:.1f} tok/s)")
-            lines.append(f"Total prompt: {int(m.prompt_tokens_total)} tokens (avg {m.avg_prompt_tps:.1f} tok/s)")
-            if gen > 0:
-                lines.append(f"ms/token:   {1000.0/gen:.0f}")
-            lines.append(f"Requests:   {int(m.requests_processing)} processing, {int(m.requests_deferred)} deferred")
+            throughput.extend(
+                [
+                    Text.from_markup(
+                        f"[bold cyan]{gen:.1f}[/] tok/s generation  •  "
+                        f"[bold]{prompt:.1f}[/] prompt"
+                    ),
+                    Text(
+                        f"{(1000.0 / gen):.1f} ms/token"
+                        if gen > 0
+                        else "latency unavailable"
+                    ),
+                    Text(
+                        f"{int(m.requests_processing)} active  •  "
+                        f"{int(m.requests_deferred)} queued"
+                    ),
+                    Text(
+                        f"{int(m.tokens_predicted_total):,} gen / "
+                        f"{int(m.prompt_tokens_total):,} prompt tokens",
+                        style="dim",
+                    ),
+                ]
+            )
         else:
-            lines.append("[dim]metrics unavailable (server not running, or no --metrics)[/]")
+            throughput.append(
+                Text("Metrics unavailable", style="dim")
+            )
 
-        lines.append("")
-        lines.append("[bold]── GPU ──[/]")
+        gpu_lines: list[Text] = []
         g = self.gpu
         if g and g.available:
-            lines.append(g.name)
-            lines.append(
-                f"{g.memory_label}: {g.vram_used_mb/1024:.1f} / {g.vram_total_mb/1024:.1f} GB ({g.vram_pct:.0f}%)"
+            gpu_lines.append(Text(g.name, style="bold"))
+            gpu_lines.append(
+                Text(
+                    f"{g.memory_label} {g.vram_used_mb/1024:.1f} / "
+                    f"{g.vram_total_mb/1024:.1f} GB  ({g.vram_pct:.0f}%)"
+                )
+            )
+            gpu_lines.append(
+                Text(
+                    f"{g.utilization_pct:.0f}% utilization  •  {g.temp_c:.0f}°C"
+                )
             )
             if g.unified and g.dedicated_total_mb:
-                lines.append(
-                    f"[dim]rocm-smi VRAM BAR {g.dedicated_used_mb/1024:.1f} / "
-                    f"{g.dedicated_total_mb/1024:.1f} GB — not the model[/]"
+                gpu_lines.append(
+                    Text(
+                        f"VRAM BAR {g.dedicated_used_mb/1024:.1f} / "
+                        f"{g.dedicated_total_mb/1024:.1f} GB",
+                        style="dim",
+                    )
                 )
-            lines.append(f"Util: {g.utilization_pct:.0f}%   Temp: {g.temp_c:.0f}°C")
         else:
-            lines.append("[dim]GPU stats unavailable[/]")
+            gpu_lines.append(Text("GPU stats unavailable", style="dim"))
 
-        return "\n".join(lines)
+        telemetry = Table(
+            box=box.SIMPLE_HEAD,
+            expand=True,
+            padding=(0, 1),
+            show_edge=False,
+        )
+        telemetry.add_column("THROUGHPUT", ratio=1, style="white")
+        telemetry.add_column("GPU", ratio=1, style="white")
+        telemetry.add_row(Group(*throughput), Group(*gpu_lines))
+        renderables.append(telemetry)
+        return Group(*renderables)
 
 
 class ConfigPanel(Static):
@@ -483,54 +533,107 @@ class ConfigPanel(Static):
     registry: Registry | None = None
     preset_store: PresetStore | None = None
 
-    def render(self) -> str:
-        lines = ["[bold]── ACTIVE PRESET ──[/]"]
+    @staticmethod
+    def _label(label: str) -> Text:
+        return Text(label, style="cyan")
+
+    @staticmethod
+    def _value(value: object) -> Text:
+        if value == "":
+            return Text("—", style="dim")
+        return Text(str(value), style="bold yellow")
+
+    def render(self) -> Group:
+        title = Text("ACTIVE PRESET", style="bold")
         if self.selected and self.registry and self.selected in self.registry.models:
             model = self.registry.models[self.selected]
             identity = model.params
-            lines.append(f"[$accent]{'display':<18}[/] {model.display}")
             active_q = model.active_quant
-            if active_q:
-                lines.append(f"[$accent]{'active_quant':<18}[/] {active_q}")
             slot = None
             preset = None
             if self.preset_store and active_q:
                 slot = get_active_slot(self.preset_store, self.selected, active_q)
                 if slot is not None:
                     preset = get_preset(self.preset_store, self.selected, active_q, slot)
-            if preset:
-                lines.append(f"[$accent]{'preset':<18}[/] [{slot}] {preset.name}")
-            else:
-                lines.append("[dim]No active preset — apply one before launch[/]")
+
             author = model_author(identity, model.file)
-            if author:
-                lines.append(f"[$accent]{'author':<18}[/] {author}")
             max_ctx = resolve_context_length(identity, MODELS_DIR)
-            if max_ctx is not None:
-                lines.append(f"[$accent]{'max_context':<18}[/] {fmt_ctx(max_ctx)} tokens")
-            source = identity.get("source")
-            if isinstance(source, dict):
-                for key in ("repo", "filename", "revision"):
-                    if source.get(key):
-                        lines.append(f"[$accent]{key:<18}[/] {source[key]}")
             file_status = "present" if model_file_exists(model.file) else "missing"
-            lines.append(f"[$accent]{'file_status':<18}[/] {file_status}")
+
+            summary = Table.grid(expand=True, padding=(0, 1))
+            summary.add_column(width=12, no_wrap=True)
+            summary.add_column(ratio=1)
+            summary.add_column(width=12, no_wrap=True)
+            summary.add_column(ratio=1)
+            summary.add_row(
+                self._label("Model"),
+                self._value(model.display),
+                self._label("Quant"),
+                self._value(active_q or "—"),
+            )
+            summary.add_row(
+                self._label("Preset"),
+                self._value(f"[{slot}] {preset.name}" if preset else "none"),
+                self._label("Author"),
+                self._value(author or "local"),
+            )
+            summary.add_row(
+                self._label("Max context"),
+                self._value(
+                    f"{fmt_ctx(max_ctx)} tokens" if max_ctx is not None else "unknown"
+                ),
+                self._label("File"),
+                self._value(file_status),
+            )
+
+            renderables: list = [title, summary]
+            source = identity.get("source")
+            if isinstance(source, dict) and source.get("repo"):
+                renderables.append(
+                    Text(
+                        f"{source['repo']}  •  {source.get('filename', Path(model.file).name)}",
+                        style="dim",
+                    )
+                )
             if not preset:
-                lines.append("")
-                lines.append("[dim]Select a preset and press A to activate[/]")
-                return "\n".join(lines)
+                renderables.append(
+                    Text("Select a preset and press A to activate", style="dim")
+                )
+                return Group(*renderables)
+
             params = merge_identity_and_preset(identity, preset)
-            lines.append("")
+            settings: list[tuple[str, object]] = []
             for k, v in params.items():
                 if k in {"source", "quants", "file"}:
                     continue
                 if k in PROFILE_KEYS:
                     continue
-                val = str(v) if v != "" else "[dim]—[/]"
-                lines.append(f"[$accent]{k:<18}[/] {val}")
+                settings.append((k, v))
+
+            config = Table.grid(expand=True, padding=(0, 1))
+            config.add_column(width=19, no_wrap=True)
+            config.add_column(ratio=1)
+            config.add_column(width=19, no_wrap=True)
+            config.add_column(ratio=1)
+            for index in range(0, len(settings), 2):
+                left_label, left_value = settings[index]
+                if index + 1 < len(settings):
+                    right_label, right_value = settings[index + 1]
+                    right_cells = (
+                        self._label(right_label),
+                        self._value(right_value),
+                    )
+                else:
+                    right_cells = (Text(""), Text(""))
+                config.add_row(
+                    self._label(left_label),
+                    self._value(left_value),
+                    *right_cells,
+                )
+            renderables.extend((Text("RUNTIME CONFIG", style="bold dim"), config))
+            return Group(*renderables)
         else:
-            lines.append("[dim]select a model in the tree[/]")
-        return "\n".join(lines)
+            return Group(title, Text("Select a model in the tree", style="dim"))
 
 
 class LogPanel(RichLog):
@@ -946,9 +1049,22 @@ class LLMServeApp(App):
     #main { height: 1fr; }
     #left { width: 32; border-right: solid $primary; }
     #right { layout: vertical; }
-    #status { height: auto; max-height: 22; border-bottom: solid $secondary; padding: 0 1; }
-    #config { height: 1fr; padding: 0 1; }
-    #logs { height: 12; border-top: solid $secondary; }
+    #status {
+        height: 9;
+        min-height: 7;
+        border-bottom: solid $secondary;
+        padding: 0 1;
+    }
+    #config {
+        height: 1fr;
+        padding: 0 1;
+        overflow-y: auto;
+    }
+    #logs {
+        height: 10;
+        min-height: 6;
+        border-top: solid $secondary;
+    }
     #editor-scroll { height: 1fr; padding: 0 1; }
     #editor-scroll > Label {
         height: 1;
