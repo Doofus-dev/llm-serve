@@ -24,6 +24,8 @@ class QuantParseTests(unittest.TestCase):
     def test_quant_from_filename(self) -> None:
         self.assertEqual(quant_from_filename("Qwen3.8-27B-IQ2_S.gguf"), "IQ2_S")
         self.assertEqual(quant_from_filename("Qwen3.6-27B-Q4_K_M.gguf"), "Q4_K_M")
+        self.assertEqual(quant_from_filename("Qwen_Qwen3.6-27B-Q2_K.gguf"), "Q2_K")
+        self.assertEqual(quant_from_filename("Qwen_Qwen3.6-27B-Q6_K.gguf"), "Q6_K")
 
     def test_family_display(self) -> None:
         self.assertEqual(
@@ -33,6 +35,56 @@ class QuantParseTests(unittest.TestCase):
 
 
 class ModelsMigrationTests(unittest.TestCase):
+    def test_load_registry_repairs_filename_fallback_quant_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models_path = root / "models.json"
+            presets_path = root / "presets.json"
+            old_quant = "Qwen_Qwen3.6-27B-Q2_K"
+            filename = f"{old_quant}.gguf"
+            models_path.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "qwen36": {
+                                "display": "Qwen 3.6",
+                                "file": f"bartowski/{filename}",
+                                "active_quant": old_quant,
+                                "quants": {
+                                    old_quant: {
+                                        "filename": filename,
+                                        "file": f"bartowski/{filename}",
+                                    }
+                                },
+                            }
+                        },
+                        "aliases": {},
+                    }
+                )
+            )
+            presets_path.write_text(
+                json.dumps(
+                    {
+                        "_active": {"qwen36": {old_quant: 1}},
+                        "qwen36": {
+                            old_quant: {
+                                "1": {"name": "default", "params": {"ctx": 32768}}
+                            }
+                        },
+                    }
+                )
+            )
+
+            registry = load_registry(models_path)
+            model = registry.models["qwen36"]
+            self.assertEqual(model.active_quant, "Q2_K")
+            self.assertIn("Q2_K", model.params["quants"])
+            self.assertNotIn(old_quant, model.params["quants"])
+
+            presets = load_presets(presets_path)
+            self.assertEqual(get_active_slot(presets, "qwen36", "Q2_K"), 1)
+            self.assertIsNotNone(get_preset(presets, "qwen36", "Q2_K", 1))
+
     def test_merge_same_repo_profiles(self) -> None:
         data = {
             "models": {

@@ -340,6 +340,8 @@ def local_download_bytes(plan: DownloadPlan) -> int:
     """Bytes already on disk for this plan (finished or still arriving)."""
     total = 0
     cache_dir = plan.local_dir / ".cache" / "huggingface" / "download"
+    cache_files: set[Path] = set()
+    target_locks: list[Path] = []
     for name in plan.filenames:
         direct = plan.local_dir / name
         if direct.is_file():
@@ -352,12 +354,48 @@ def local_download_bytes(plan: DownloadPlan) -> int:
         lock = cache_dir / f"{name}.lock"
         if not lock.is_file():
             continue
-        locks = list(cache_dir.glob("*.lock")) if cache_dir.is_dir() else []
-        if len(locks) != 1:
+        target_locks.append(lock)
+
+        # huggingface_hub names the transfer file from its ETag rather than
+        # the requested filename. Completed metadata records that ETag on its
+        # second line, which lets resumed downloads be matched exactly.
+        metadata = cache_dir / f"{name}.metadata"
+        if metadata.is_file():
+            try:
+                lines = metadata.read_text().splitlines()
+            except OSError:
+                lines = []
+            if len(lines) >= 2 and lines[1]:
+                candidate = cache_dir / f"{lines[1]}.incomplete"
+                if candidate.is_file():
+                    cache_files.add(candidate)
+
+    if target_locks and cache_dir.is_dir():
+        # Metadata is commonly written only after completion. During a fresh
+        # transfer, count incomplete files created/updated since this plan's
+        # lock was acquired. Old lock files from earlier downloads must not
+        # disable progress reporting.
+        lock_mtimes: list[int] = []
+        for lock in target_locks:
+            try:
+                lock_mtimes.append(lock.stat().st_mtime_ns)
+            except OSError:
+                continue
+        if lock_mtimes:
+            oldest_lock_mtime = min(lock_mtimes)
+            for candidate in cache_dir.glob("*.incomplete"):
+                try:
+                    if candidate.stat().st_mtime_ns >= oldest_lock_mtime:
+                        cache_files.add(candidate)
+                except OSError:
+                    continue
+
+    for path in cache_files:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            # The final rename can happen between polling and stat.
             continue
-        incompletes = list(cache_dir.glob("*.incomplete"))
-        if incompletes:
-            total += max(path.stat().st_size for path in incompletes)
     return total
 
 

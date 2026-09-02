@@ -28,6 +28,7 @@ from tui.data.quant import (
     author_size_label,
     default_model_slug,
     family_display,
+    parse_gguf_filename,
     quant_entry_from_file,
     quant_from_filename,
 )
@@ -82,6 +83,35 @@ def _filename_from_params(params: dict[str, Any]) -> str:
         return str(source["filename"])
     file_rel = str(params.get("file", ""))
     return Path(file_rel).name if file_rel else ""
+
+
+def _normalize_quant_ids(params: dict[str, Any]) -> dict[str, str]:
+    """Replace filename-stem fallback IDs when the parser now knows the quant."""
+    quants = params.get("quants")
+    if not isinstance(quants, dict):
+        return {}
+
+    normalized: dict[str, Any] = {}
+    remapped: dict[str, str] = {}
+    for old_id, entry in quants.items():
+        old_id = str(old_id)
+        filename = ""
+        if isinstance(entry, dict):
+            filename = str(entry.get("filename") or Path(str(entry.get("file", ""))).name)
+        _, _, parsed_quant = parse_gguf_filename(filename) if filename else (None, None, None)
+        quant_id = parsed_quant or old_id
+        if quant_id != old_id and quant_id not in normalized and quant_id not in quants:
+            normalized[quant_id] = entry
+            remapped[old_id] = quant_id
+        else:
+            normalized[old_id] = entry
+
+    if remapped:
+        params["quants"] = normalized
+        active = str(params.get("active_quant") or "")
+        if active in remapped:
+            params["active_quant"] = remapped[active]
+    return remapped
 
 
 def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None) -> dict[str, Any]:
@@ -209,10 +239,17 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
     migrated, preset_remap = migrate_models_json(data, models_dir=models_dir)
     presets_path = path.parent / "presets.json"
     preset_arch_migrated = migrate_to_preset_architecture(data, presets_path)
-    if migrated or preset_arch_migrated:
+    quant_remaps: dict[str, dict[str, str]] = {}
+    for model_name, params in data.get("models", {}).items():
+        remapped = _normalize_quant_ids(params)
+        if remapped:
+            quant_remaps[str(model_name)] = remapped
+    if migrated or preset_arch_migrated or quant_remaps:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         if preset_remap:
             _migrate_presets_file(presets_path, preset_remap)
+        if quant_remaps:
+            _remap_preset_quant_ids(presets_path, quant_remaps)
 
     reg = Registry()
     for name, params in data.get("models", {}).items():
@@ -694,6 +731,29 @@ def _migrate_presets_file(path: Path, remap: dict[str, tuple[str, str]]) -> None
     if new_active:
         new_data["_active"] = new_active
     path.write_text(json.dumps(new_data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _remap_preset_quant_ids(
+    path: Path,
+    remaps: dict[str, dict[str, str]],
+) -> None:
+    """Keep preset and active keys aligned with normalized registry quant IDs."""
+    if not path.exists():
+        return
+    store = load_presets(path)
+    changed = False
+    for model_name, model_remaps in remaps.items():
+        presets = store.presets.get(model_name, {})
+        active = store.active.get(model_name, {})
+        for old_id, new_id in model_remaps.items():
+            if old_id in presets and new_id not in presets:
+                presets[new_id] = presets.pop(old_id)
+                changed = True
+            if old_id in active and new_id not in active:
+                active[new_id] = active.pop(old_id)
+                changed = True
+    if changed:
+        save_presets(path, store)
 
 
 def model_author_size_line(cfg: ModelConfig) -> str:

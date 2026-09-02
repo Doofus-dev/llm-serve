@@ -247,7 +247,10 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 row.act_vram,
                 row.est_tps,
                 row.act_tps,
-                key=row.quant_id,
+                # Repos may contain multiple files with the same inferred
+                # quant (for example the main Q8_0 and an MTP Q8_0 draft).
+                # The path is the unique identity of a selectable row.
+                key=row.path,
             )
             if row.quant_id == active:
                 cursor_row = idx

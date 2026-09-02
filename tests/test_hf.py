@@ -101,6 +101,33 @@ class HFPathTests(unittest.TestCase):
             (cache / "abc.etag.incomplete").write_bytes(b"z" * 120)
             self.assertEqual(local_download_bytes(plan), 120)
 
+    def test_local_download_bytes_ignores_stale_lock_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            plan = build_download_plan("bartowski/Demo-GGUF", "Demo-Q4.gguf", models_dir)
+            cache = plan.local_dir / ".cache" / "huggingface" / "download"
+            cache.mkdir(parents=True)
+            (cache / "Old-A.gguf.lock").write_bytes(b"")
+            (cache / "Old-B.gguf.lock").write_bytes(b"")
+            (cache / "Demo-Q4.gguf.lock").write_bytes(b"")
+            (cache / "current.etag.incomplete").write_bytes(b"z" * 120)
+
+            self.assertEqual(local_download_bytes(plan), 120)
+
+    def test_local_download_bytes_matches_metadata_etag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            plan = build_download_plan("bartowski/Demo-GGUF", "Demo-Q4.gguf", models_dir)
+            cache = plan.local_dir / ".cache" / "huggingface" / "download"
+            cache.mkdir(parents=True)
+            (cache / "Demo-Q4.gguf.lock").write_bytes(b"")
+            (cache / "Demo-Q4.gguf.metadata").write_text(
+                "revision\nexpected-etag\n0\n"
+            )
+            (cache / "expected-etag.incomplete").write_bytes(b"x" * 80)
+
+            self.assertEqual(local_download_bytes(plan), 80)
+
 
 class SettingsTests(unittest.TestCase):
     def test_hf_authors_round_trip(self) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 QUANT_RE = re.compile(
-    r"(Q\d+_K_[A-Z0-9]+|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)",
+    r"(Q\d+_K(?:_[A-Z0-9]+)?|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)",
     re.IGNORECASE,
 )
 SIZE_RE = re.compile(r"(\d+(?:\.\d+)?[BMbm])")
