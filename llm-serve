@@ -60,7 +60,22 @@ command -v jq >/dev/null 2>&1 || {
 # Resolve alias → model name
 resolve_alias() {
     local name="$1"
-    jq -r --arg n "$name" '.aliases[$n] // $n' "$MODELS_JSON"
+    jq -r --arg n "$name" '
+        .aliases[$n] as $alias |
+        if ($alias | type) == "object" then ($alias.model // $n)
+        else ($alias // $n)
+        end
+    ' "$MODELS_JSON"
+}
+
+alias_get() {
+    local alias="$1" key="$2"
+    jq -r --arg a "$alias" --arg k "$key" '
+        .aliases[$a] as $alias |
+        if ($alias | type) == "object" then ($alias[$k] // empty)
+        else empty
+        end
+    ' "$MODELS_JSON"
 }
 
 # Resolve user input to internal model slug (alias, slug, or display name)
@@ -102,8 +117,10 @@ preset_active_slot() {
 # Get a runtime parameter from the active preset
 p_get() {
     local model="$1" quant="$2" key="$3" default="${4:-}"
-    local slot
-    slot="$(preset_active_slot "$model" "$quant")"
+    local slot="${PRESET_SLOT:-}"
+    if [[ -z "$slot" ]]; then
+        slot="$(preset_active_slot "$model" "$quant")"
+    fi
     if [[ -z "$slot" ]]; then
         echo "$default"
         return 0
@@ -252,7 +269,15 @@ list_models() {
         done
 
     local aliases
-    aliases=$(jq -r '.aliases | to_entries[] | "  \(.key) -> \(.value)"' "$MODELS_JSON" 2>/dev/null || true)
+    aliases=$(jq -r '
+        .aliases | to_entries[] |
+        .value as $target |
+        if ($target | type) == "object" then
+            "  \(.key) -> \($target.model)" +
+            (if $target.preset then " [\($target.quant)/\($target.preset)]" else "" end)
+        else "  \(.key) -> \($target)"
+        end
+    ' "$MODELS_JSON" 2>/dev/null || true)
     if [[ -n "$aliases" ]]; then
         echo ""
         echo "Aliases:"
@@ -361,14 +386,17 @@ MODEL="$(resolve_model "${REQUESTED}")"
 # Validate
 model_exists "$MODEL" || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
 
-ACTIVE_QUANT="$(m_get "${MODEL}" active_quant "")"
+ALIAS_QUANT="$(alias_get "${REQUESTED}" quant)"
+ALIAS_PRESET_SLOT="$(alias_get "${REQUESTED}" preset)"
+ACTIVE_QUANT="${ALIAS_QUANT:-$(m_get "${MODEL}" active_quant "")}"
 [[ -z "$ACTIVE_QUANT" ]] && die "model '${REQUESTED}' has no active quant configured."
 
-PRESET_SLOT="$(preset_active_slot "$MODEL" "$ACTIVE_QUANT")"
+PRESET_SLOT="${ALIAS_PRESET_SLOT:-$(preset_active_slot "$MODEL" "$ACTIVE_QUANT")}"
 [[ -z "$PRESET_SLOT" ]] && die "model '${REQUESTED}' (${ACTIVE_QUANT}) has no active preset. Create one in the TUI."
 
 PRESET_NAME="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" --arg s "$PRESET_SLOT" \
-    '.[$m][$q][$s].name // "preset"' "$PRESETS_JSON")"
+    '.[$m][$q][$s].name // empty' "$PRESETS_JSON")"
+[[ -z "$PRESET_NAME" ]] && die "preset [${PRESET_SLOT}] for '${REQUESTED}' (${ACTIVE_QUANT}) does not exist."
 echo "Preset: [${PRESET_SLOT}] ${PRESET_NAME} (${ACTIVE_QUANT})"
 
 # Best-effort version check
@@ -391,7 +419,10 @@ if [[ "$REMOTE" == "1" ]]; then
 fi
 
 # Resolve config with env overrides
-MODEL_FILE="$(m_get "${MODEL}" file)"
+MODEL_FILE="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" '
+    .models[$m].quants[$q].file // .models[$m].file // empty
+' "$MODELS_JSON")"
+[[ -z "$MODEL_FILE" ]] && die "quant '${ACTIVE_QUANT}' for '${REQUESTED}' does not exist."
 MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/${MODEL_FILE}}"
 
 HOST="${HOST:-$(m_get "${MODEL}" host 127.0.0.1)}"

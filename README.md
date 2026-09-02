@@ -5,7 +5,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 ## Features
 
 - **Model registry** — Define all your models and their optimal settings in one `models.conf` file
-- **Friendly aliases** — `llm-serve coding` instead of `llm-serve qwen3-coder-3b-q4_k_m`
+- **Friendly aliases** — `llm-serve coding` can follow a model family’s defaults or pin an exact quant and preset
 - **Fine-grained parameter control** — GPU offload, KV cache quantization, MoE expert offload, speculative decoding, reasoning/thinking control, and more
 - **Environment overrides** — Tune any parameter at runtime without editing config (`GPU_LAYERS=50 llm-serve my-model`)
 - **Dry-run mode** — Preview the generated command without launching (`llm-serve --dry-run my-model`)

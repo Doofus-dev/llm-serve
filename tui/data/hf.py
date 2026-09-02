@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 HF_INSTALL_HINT = "Install: curl -LsSf https://hf.co/cli/install.sh | bash -s"
+HUB_REPO_EXPAND = "downloads,likes,gguf"
 
 SHARD_RE = re.compile(r"^(?P<prefix>.+)-(?P<part>\d+)-of-(?P<total>\d+)\.gguf$", re.IGNORECASE)
 
@@ -255,7 +256,7 @@ def list_gguf_repos(
         "--filter", "gguf",
         "--sort", sort,
         "--limit", str(limit),
-        "--expand", "gguf",
+        "--expand", HUB_REPO_EXPAND,
         "--format", "json",
     ]
     if author.strip():
@@ -397,6 +398,10 @@ def local_download_bytes(plan: DownloadPlan) -> int:
             # The final rename can happen between polling and stat.
             continue
     return total
+
+
+def fmt_count(value: int) -> str:
+    return f"{value:,}"
 
 
 def fmt_size(size: int) -> str:

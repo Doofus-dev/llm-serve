@@ -28,11 +28,13 @@ from textual.screen import ModalScreen
 from textual.message import Message
 
 from tui.data.models_json import (
+    AliasTarget,
     Registry,
     ModelConfig,
     load_registry,
     save_registry,
     delete_model,
+    unshared_model_file_paths,
     update_model,
     sync_gguf_architecture,
     clamp_preset_contexts,
@@ -407,11 +409,6 @@ class DownloadBar(Vertical):
 class ModelNav(OptionList):
     """Card-based model navigation with directly selectable presets."""
 
-    BINDINGS = [
-        Binding("left", "cycle_alias(-1)", "Previous alias target", show=False),
-        Binding("right", "cycle_alias(1)", "Next alias target", show=False),
-    ]
-
     def __init__(self, registry: Registry, preset_store: PresetStore):
         super().__init__(id="model-nav")
         self.registry = registry
@@ -436,8 +433,6 @@ class ModelNav(OptionList):
         data = self.selected_data
         if not data:
             return None
-        if data[0] == "alias":
-            return self.registry.aliases.get(data[1])
         if data[0] in ("model", "preset"):
             return data[1]
         return None
@@ -464,7 +459,9 @@ class ModelNav(OptionList):
 
             card = Text()
             card.append(model.display, style="bold cyan")
-            model_aliases = [alias for alias, target in aliases.items() if target == name]
+            model_aliases = [
+                alias for alias, target in aliases.items() if target.model == name
+            ]
             if model_aliases:
                 card.append(f"  {', '.join(model_aliases)}", style="dim")
             card.append("\n")
@@ -495,18 +492,69 @@ class ModelNav(OptionList):
                 )
             self.add_option(None)
 
-        if aliases:
-            heading = Text("ALIASES", style="bold dim")
-            self._add(heading, ("alias-heading",), "alias-heading")
-            for alias_index, (alias, target) in enumerate(aliases.items()):
-                line = Text(f"  {alias}", style="bold yellow")
-                target_model = self.registry.models.get(target)
+        if selected:
+            for index in range(self.option_count):
+                option = self.get_option_at_index(index)
+                if self._option_data.get(option.id or "") == selected:
+                    self.highlighted = index
+                    break
+
+
+class AliasNav(OptionList):
+    """Bottom sidebar section for aliases, reachable with Tab."""
+
+    BINDINGS = [
+        Binding("left", "cycle_alias(-1)", "Previous alias target", show=False),
+        Binding("right", "cycle_alias(1)", "Next alias target", show=False),
+    ]
+
+    def __init__(self, registry: Registry):
+        super().__init__(id="alias-nav")
+        self.registry = registry
+        self._option_data: dict[str, tuple] = {}
+
+    def on_mount(self) -> None:
+        self.refresh_aliases()
+
+    def action_cycle_alias(self, direction: int) -> None:
+        self.app.cycle_selected_alias(direction)
+
+    @property
+    def selected_data(self) -> tuple | None:
+        if self.highlighted is None:
+            return None
+        option = self.get_option_at_index(self.highlighted)
+        return self._option_data.get(option.id or "")
+
+    @property
+    def selected_model(self) -> str | None:
+        data = self.selected_data
+        target = self.registry.aliases.get(data[1]) if data else None
+        return target.model if target else None
+
+    def refresh_aliases(self) -> None:
+        selected = self.selected_data
+        self.clear_options()
+        self._option_data.clear()
+        for index, (alias, target) in enumerate(self.registry.aliases.items()):
+            line = Text(f"{alias}", style="bold yellow")
+            target_model = self.registry.models.get(target.model)
+            line.append(
+                f"  →  {target_model.display if target_model else target.model}",
+                style="dim",
+            )
+            if target.quant is not None and target.preset_slot is not None:
                 line.append(
-                    f"  →  {target_model.display if target_model else target}",
-                    style="dim",
+                    f"  {target.preset_slot}",
+                    style="bold green",
                 )
-                line.append("  ←/→", style="bold cyan")
-                self._add(line, ("alias", alias), f"alias-{alias_index}")
+            line.append("  ←/→", style="bold cyan")
+            option_id = f"alias-{index}"
+            self._option_data[option_id] = ("alias", alias)
+            self.add_option(Option(line, id=option_id))
+
+        if not self.registry.aliases:
+            self.add_option(Option(Text("No aliases", style="dim"), disabled=True))
 
         if selected:
             for index in range(self.option_count):
@@ -1157,7 +1205,7 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
 
 
 class LLMServeApp(App):
-    TITLE = "llm-serve TUI"
+    TITLE = "llm-serve"
     CSS = """
     Screen {
         background: $surface;
@@ -1191,6 +1239,30 @@ class LLMServeApp(App):
     }
     #model-nav > .option-list--separator {
         color: $surface-darken-1;
+    }
+    .nav-heading {
+        height: 1;
+        padding: 0 2;
+        color: $text-muted;
+        text-style: bold;
+        background: $surface-darken-1;
+    }
+    #alias-nav {
+        height: auto;
+        max-height: 8;
+        min-height: 3;
+        border: none;
+        padding: 0 1 1 1;
+        background: $surface-darken-1;
+    }
+    #alias-nav > .option-list--option {
+        padding: 0 1;
+        background: $surface;
+    }
+    #alias-nav > .option-list--option-highlighted {
+        background: $primary-background;
+        color: $foreground;
+        text-style: none;
     }
     #right { layout: vertical; }
     #status {
@@ -1426,7 +1498,10 @@ class LLMServeApp(App):
             yield DownloadBar(id="download-bar")
             with Horizontal(id="main"):
                 with Vertical(id="left"):
+                    yield Label("MODELS", classes="nav-heading")
                     yield ModelNav(self.registry, self.preset_store)
+                    yield Label("ALIASES  Tab · 1-5 pin", classes="nav-heading")
+                    yield AliasNav(self.registry)
                 with Vertical(id="right"):
                     yield StatusPanel(id="status")
                     yield ConfigPanel(id="config")
@@ -1584,8 +1659,7 @@ class LLMServeApp(App):
         return True
 
     def action_pick_quant(self) -> None:
-        nav = self.query_one(ModelNav)
-        model_name = nav.selected_model
+        model_name = self._selected_model()
         if not model_name:
             self.notify("Select a model first", severity="warning")
             return
@@ -1628,7 +1702,7 @@ class LLMServeApp(App):
         )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if not isinstance(event.option_list, ModelNav):
+        if not isinstance(event.option_list, (ModelNav, AliasNav)):
             return
         data = event.option_list.selected_data
         if data and data[0] == "preset":
@@ -1636,8 +1710,6 @@ class LLMServeApp(App):
             set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(PRESETS_JSON, self.preset_store)
             self._reload_registry()
-            preset = get_preset(self.preset_store, model_name, quant, slot)
-            self.notify(f"Applied preset [{slot}] {preset.name if preset else ''}")
 
     def watch_theme(self, theme_name: str) -> None:
         """Persist theme choice and refresh panels that use theme colors."""
@@ -1666,7 +1738,8 @@ class LLMServeApp(App):
         panel.pid_info = info if alive else None
         running_key = None
         if alive and info:
-            running_key = self.registry.aliases.get(info.model, info.model)
+            running_alias = self.registry.aliases.get(info.model)
+            running_key = running_alias.model if running_alias else info.model
             if running_key not in self.registry.models:
                 running_key = next(
                     (
@@ -1813,6 +1886,9 @@ class LLMServeApp(App):
         nav.registry = self.registry
         nav.preset_store = self.preset_store
         nav.refresh_cards()
+        aliases = self.query_one(AliasNav)
+        aliases.registry = self.registry
+        aliases.refresh_aliases()
         cfg = self.query_one(ConfigPanel)
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
@@ -1830,21 +1906,36 @@ class LLMServeApp(App):
             self.notify(f"Capped preset context: {bits}{extra}", severity="warning")
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if not isinstance(event.option_list, ModelNav):
+        if not isinstance(event.option_list, (ModelNav, AliasNav)):
             return
         cfg = self.query_one(ConfigPanel)
         data = event.option_list.selected_data
         if data and data[0] in ("model", "preset"):
             cfg.selected = data[1]
         elif data and data[0] == "alias":
-            cfg.selected = self.registry.aliases.get(data[1])
+            target = self.registry.aliases.get(data[1])
+            cfg.selected = target.model if target else None
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
 
     def _selected_model(self) -> str | None:
-        return self.query_one(ModelNav).selected_model
+        data = self._selected_data()
+        if not data:
+            return None
+        if data[0] == "alias":
+            target = self.registry.aliases.get(data[1])
+            return target.model if target else None
+        if data[0] in ("model", "preset"):
+            return data[1]
+        return None
+
+    def _selected_data(self) -> tuple | None:
+        if isinstance(self.focused, AliasNav):
+            return self.query_one(AliasNav).selected_data
+        return self.query_one(ModelNav).selected_data
 
     def action_launch(self) -> None:
+        selected = self._selected_data()
         model = self._selected_model()
         if not model:
             self.notify("Select a model first", severity="warning")
@@ -1855,8 +1946,18 @@ class LLMServeApp(App):
             return
 
         cfg = self.registry.models[model]
-        quant = self._model_active_quant(model)
-        slot = get_active_slot(self.preset_store, model, quant)
+        alias_name = selected[1] if selected and selected[0] == "alias" else None
+        alias_target = self.registry.aliases.get(alias_name) if alias_name else None
+        quant = (
+            alias_target.quant
+            if alias_target and alias_target.quant is not None
+            else self._model_active_quant(model)
+        )
+        slot = (
+            alias_target.preset_slot
+            if alias_target and alias_target.preset_slot is not None
+            else get_active_slot(self.preset_store, model, quant)
+        )
         if slot is None:
             self.notify(
                 f"No active preset for {cfg.display} ({quant}). Create and apply one first.",
@@ -1872,7 +1973,7 @@ class LLMServeApp(App):
             )
             return
 
-        launch_name = cfg.display
+        launch_name = alias_name or cfg.display
         access = "remote" if self.remote_launch else "local"
         self.notify(
             f"Launching {launch_name} ({quant}) preset [{slot}] {preset.name} — {access}"
@@ -1978,8 +2079,7 @@ class LLMServeApp(App):
             self.notify("Already in edit mode", severity="warning")
             return
         
-        nav = self.query_one(ModelNav)
-        data = nav.selected_data
+        data = self._selected_data()
         if data is None:
             self.notify("Select a model, preset, or alias first", severity="warning")
             return
@@ -2054,7 +2154,7 @@ class LLMServeApp(App):
     def _edit_alias(self, alias_name: str, current_target: str) -> None:
         """Edit an alias."""
         def on_save(new_target: str) -> None:
-            self.registry.aliases[alias_name] = new_target
+            self.registry.aliases[alias_name] = AliasTarget(model=new_target)
             save_registry(MODELS_JSON, self.registry)
             self._reload_registry()
             self._exit_alias_editor()
@@ -2078,7 +2178,7 @@ class LLMServeApp(App):
 
     def cycle_selected_alias(self, direction: int) -> None:
         """Immediately point the selected alias at the adjacent model."""
-        nav = self.query_one(ModelNav)
+        nav = self.query_one(AliasNav)
         data = nav.selected_data
         if not data or data[0] != "alias":
             return
@@ -2087,7 +2187,8 @@ class LLMServeApp(App):
         if not model_names:
             self.notify("No models are available", severity="warning")
             return
-        current = self.registry.aliases.get(alias_name)
+        current_target = self.registry.aliases.get(alias_name)
+        current = current_target.model if current_target else None
         try:
             index = model_names.index(current)
         except ValueError:
@@ -2095,11 +2196,9 @@ class LLMServeApp(App):
         target = model_names[(index + direction) % len(model_names)]
         if target == current:
             return
-        self.registry.aliases[alias_name] = target
+        self.registry.aliases[alias_name] = AliasTarget(model=target)
         save_registry(MODELS_JSON, self.registry)
-        display = self.registry.models[target].display
         self._reload_registry()
-        self.notify(f"{alias_name} → {display}")
 
     def _exit_editor(self) -> None:
         """Exit editor mode and restore normal view."""
@@ -2152,12 +2251,12 @@ class LLMServeApp(App):
         if self._editor_mode or self._alias_editor_mode:
             self.notify("Close the editor first", severity="warning")
             return
-        data = self.query_one(ModelNav).selected_data
+        data = self._selected_data()
         if data and data[0] == "alias":
             def handle_alias_result(result: tuple[str, str] | None) -> None:
                 if result is not None:
                     name, target = result
-                    self.registry.aliases[name] = target
+                    self.registry.aliases[name] = AliasTarget(model=target)
                     save_registry(MODELS_JSON, self.registry)
                     self._reload_registry()
                     self.notify(f"Created alias {name} → {target}")
@@ -2187,7 +2286,7 @@ class LLMServeApp(App):
         self._edit_preset(model_name, quant, slot)
 
     def action_delete(self) -> None:
-        data = self.query_one(ModelNav).selected_data
+        data = self._selected_data()
         if data is None:
             self.notify("Select a model, preset, or alias first", severity="warning")
             return
@@ -2240,29 +2339,65 @@ class LLMServeApp(App):
         if not model:
             self.notify("Select a model first", severity="warning")
             return
+        pid_info = read_pid_file(PID_FILE)
+        if pid_info and pid_info.alive and pid_info.model == model:
+            self.notify("Stop this model before deleting it", severity="error")
+            return
         
         # Check for aliases pointing to this model
-        aliases_using = [a for a, t in self.registry.aliases.items() if t == model]
-        msg = f"Delete model '{model}'?"
+        aliases_using = [
+            alias
+            for alias, target in self.registry.aliases.items()
+            if target.model == model
+        ]
+        files_to_delete = unshared_model_file_paths(self.registry, model, MODELS_DIR)
+        bytes_to_free = sum(path.stat().st_size for path in files_to_delete)
+        display_name = self.registry.models[model].display
+        msg = f"Delete model '{display_name}' and all of its presets?"
+        if files_to_delete:
+            msg += (
+                f"\n\nThis also permanently deletes {len(files_to_delete)} GGUF "
+                f"file{'s' if len(files_to_delete) != 1 else ''} "
+                f"({fmt_size(bytes_to_free)}) from disk."
+            )
+        else:
+            msg += "\n\nNo unshared GGUF files are stored on disk."
         if aliases_using:
-            msg += f"\n\nWarning: aliases using this model: {', '.join(aliases_using)}"
+            msg += f"\n\nAliases also removed: {', '.join(aliases_using)}"
         
         def handle_model_confirm(confirmed: bool) -> None:
             if confirmed:
+                try:
+                    for path in files_to_delete:
+                        path.unlink()
+                except OSError as exc:
+                    self.notify(f"Could not delete model file: {exc}", severity="error")
+                    return
                 delete_model(MODELS_JSON, model)
                 delete_all_presets_for_model(self.preset_store, model)
                 save_presets(PRESETS_JSON, self.preset_store)
                 self._reload_registry()
-                self.notify(f"Deleted {model}")
+                freed = f" and freed {fmt_size(bytes_to_free)}" if files_to_delete else ""
+                self.notify(f"Deleted {display_name}{freed}")
         
         self.push_screen(ConfirmDialog(msg), handle_model_confirm)
 
     def action_activate_preset(self, slot: int) -> None:
-        """Activate a numbered preset for the currently selected model card."""
+        """Activate a family default, or pin/unpin a preset on an alias."""
+        selected = self._selected_data()
         model_name = self._selected_model()
         if not model_name:
             self.notify("Select a model card first", severity="warning")
             return
+        if selected and selected[0] == "alias":
+            alias_name = selected[1]
+            target = self.registry.aliases[alias_name]
+            if target.preset_slot == slot:
+                target.quant = None
+                target.preset_slot = None
+                save_registry(MODELS_JSON, self.registry)
+                self._reload_registry()
+                return
         quant = self._model_active_quant(model_name)
         preset = get_preset(self.preset_store, model_name, quant, slot)
         if preset is None:
@@ -2271,10 +2406,17 @@ class LLMServeApp(App):
                 severity="warning",
             )
             return
+        if selected and selected[0] == "alias":
+            alias_name = selected[1]
+            target = self.registry.aliases[alias_name]
+            target.quant = quant
+            target.preset_slot = slot
+            save_registry(MODELS_JSON, self.registry)
+            self._reload_registry()
+            return
         set_active_preset(self.preset_store, model_name, quant, slot)
         save_presets(PRESETS_JSON, self.preset_store)
         self._reload_registry()
-        self.notify(f"Applied preset [{slot}] {preset.name}")
 
     def action_open_hub(self) -> None:
         if self._editor_mode or self._alias_editor_mode:

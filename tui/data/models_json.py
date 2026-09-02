@@ -65,9 +65,39 @@ class ModelConfig:
 
 
 @dataclass
+class AliasTarget:
+    """A model alias with an optional exact quant/preset pin."""
+
+    model: str
+    quant: str | None = None
+    preset_slot: int | None = None
+
+    @classmethod
+    def from_raw(cls, raw: object) -> AliasTarget | None:
+        if isinstance(raw, str) and raw:
+            return cls(model=raw)
+        if not isinstance(raw, dict) or not raw.get("model"):
+            return None
+        preset = raw.get("preset")
+        try:
+            preset_slot = int(preset) if preset is not None else None
+        except (TypeError, ValueError):
+            preset_slot = None
+        quant = str(raw["quant"]) if raw.get("quant") and preset_slot is not None else None
+        return cls(model=str(raw["model"]), quant=quant, preset_slot=preset_slot)
+
+    def to_json(self) -> dict[str, object]:
+        result: dict[str, object] = {"model": self.model}
+        if self.quant is not None and self.preset_slot is not None:
+            result["quant"] = self.quant
+            result["preset"] = self.preset_slot
+        return result
+
+
+@dataclass
 class Registry:
     models: dict[str, ModelConfig] = field(default_factory=dict)
-    aliases: dict[str, str] = field(default_factory=dict)
+    aliases: dict[str, AliasTarget] = field(default_factory=dict)
 
 
 def _repo_id(params: dict[str, Any]) -> str | None:
@@ -162,7 +192,8 @@ def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None)
 def resolve_model_key(data: dict[str, Any], requested: str) -> str | None:
     """Resolve CLI/TUI model name: alias, internal slug, or display name."""
     aliases = data.get("aliases", {})
-    name = str(aliases.get(requested, requested))
+    alias = AliasTarget.from_raw(aliases.get(requested))
+    name = alias.model if alias is not None else requested
     models = data.get("models", {})
     if name in models:
         return name
@@ -236,6 +267,15 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
         return Registry()
 
     data = json.loads(path.read_text())
+    raw_aliases = data.get("aliases", {})
+    normalized_aliases: dict[str, dict[str, object]] = {}
+    if isinstance(raw_aliases, dict):
+        for alias, raw_target in raw_aliases.items():
+            target = AliasTarget.from_raw(raw_target)
+            if target is not None:
+                normalized_aliases[str(alias)] = target.to_json()
+    aliases_migrated = raw_aliases != normalized_aliases
+    data["aliases"] = normalized_aliases
     migrated, preset_remap = migrate_models_json(data, models_dir=models_dir)
     presets_path = path.parent / "presets.json"
     preset_arch_migrated = migrate_to_preset_architecture(data, presets_path)
@@ -244,7 +284,16 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
         remapped = _normalize_quant_ids(params)
         if remapped:
             quant_remaps[str(model_name)] = remapped
-    if migrated or preset_arch_migrated or quant_remaps:
+            for alias, raw_target in data["aliases"].items():
+                target = AliasTarget.from_raw(raw_target)
+                if (
+                    target is not None
+                    and target.model == model_name
+                    and target.quant in remapped
+                ):
+                    target.quant = remapped[target.quant]
+                    data["aliases"][alias] = target.to_json()
+    if aliases_migrated or migrated or preset_arch_migrated or quant_remaps:
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         if preset_remap:
             _migrate_presets_file(presets_path, preset_remap)
@@ -259,7 +308,11 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
             _ensure_quants_block(params)
         reg.models[name] = ModelConfig(name=name, params=strip_to_identity(params))
 
-    reg.aliases = dict(data.get("aliases", {}))
+    reg.aliases = {
+        alias: target
+        for alias, raw_target in data.get("aliases", {}).items()
+        if (target := AliasTarget.from_raw(raw_target)) is not None
+    }
     return reg
 
 
@@ -270,7 +323,9 @@ def save_registry(path: Path, reg: Registry) -> None:
             name: strip_to_identity(_ensure_quants_block(dict(cfg.params)))
             for name, cfg in reg.models.items()
         },
-        "aliases": reg.aliases,
+        "aliases": {
+            alias: target.to_json() for alias, target in reg.aliases.items()
+        },
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
@@ -351,7 +406,46 @@ def delete_model(path: Path, name: str) -> None:
     reg = load_registry(path)
     if name in reg.models:
         del reg.models[name]
+        reg.aliases = {
+            alias: target
+            for alias, target in reg.aliases.items()
+            if target.model != name
+        }
         save_registry(path, reg)
+
+
+def model_file_paths(cfg: ModelConfig, models_dir: Path) -> set[Path]:
+    """Return safe, on-disk GGUF paths referenced by a model profile."""
+    relative_paths = {cfg.file} if cfg.file else set()
+    quants = cfg.params.get("quants")
+    if isinstance(quants, dict):
+        for entry in quants.values():
+            if isinstance(entry, dict) and entry.get("file"):
+                relative_paths.add(str(entry["file"]))
+
+    root = models_dir.resolve()
+    paths: set[Path] = set()
+    for relative in relative_paths:
+        candidate = (models_dir / relative).resolve()
+        if candidate.is_relative_to(root) and candidate.is_file():
+            paths.add(candidate)
+    return paths
+
+
+def unshared_model_file_paths(
+    reg: Registry,
+    name: str,
+    models_dir: Path,
+) -> set[Path]:
+    """Return this profile's model files that no other profile references."""
+    cfg = reg.models.get(name)
+    if cfg is None:
+        return set()
+    shared = set()
+    for other_name, other_cfg in reg.models.items():
+        if other_name != name:
+            shared.update(model_file_paths(other_cfg, models_dir))
+    return model_file_paths(cfg, models_dir) - shared
 
 
 def create_model(path: Path, name: str, params: dict[str, Any]) -> None:
@@ -669,10 +763,12 @@ def migrate_models_json(data: dict[str, Any], *, models_dir: Path | None = None)
         new_models[slug] = merged
 
         # Remap aliases
-        for alias, target in list(aliases.items()):
-            if target in preset_remap and preset_remap[target][0]:
-                if target != slug and any(old == target for old, _ in entries):
-                    aliases[alias] = slug
+        for alias, raw_target in list(aliases.items()):
+            target = AliasTarget.from_raw(raw_target)
+            if target and target.model in preset_remap and preset_remap[target.model][0]:
+                if target.model != slug and any(old == target.model for old, _ in entries):
+                    target.model = slug
+                    aliases[alias] = target.to_json()
 
     data["models"] = new_models
     data["aliases"] = aliases

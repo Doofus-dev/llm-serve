@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.hf import (
     HF_INSTALL_HINT,
+    HUB_REPO_EXPAND,
     AuthStatus,
     DownloadPlan,
     HubFile,
@@ -23,6 +24,7 @@ from tui.data.hf import (
     build_source_metadata,
     download_files,
     fmt_size,
+    fmt_count,
     hf_available,
     list_gguf_repos,
     list_repo_ggufs,
@@ -41,6 +43,10 @@ from tui.data.vram import (
 
 
 class HFPathTests(unittest.TestCase):
+    def test_fmt_count(self) -> None:
+        self.assertEqual(fmt_count(9354057), "9,354,057")
+        self.assertEqual(fmt_count(0), "0")
+
     def test_build_download_plan_flat_filename(self) -> None:
         models_dir = Path("/repo/models")
         plan = build_download_plan("bartowski/Qwen3.6-27B-GGUF", "Qwen3.6-27B-Q3_K_S.gguf", models_dir)
@@ -204,6 +210,10 @@ class HFCliTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(len(repos), 1)
         self.assertEqual(repos[0].author, "bartowski")
+        self.assertEqual(repos[0].downloads, 1)
+        self.assertEqual(repos[0].likes, 2)
+        expand_idx = mock_run.call_args.args[0].index("--expand")
+        self.assertEqual(mock_run.call_args.args[0][expand_idx + 1], HUB_REPO_EXPAND)
 
 
 class VRAMEstimateTests(unittest.TestCase):

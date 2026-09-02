@@ -27,6 +27,7 @@ from tui.data.hf import (
     build_source_metadata,
     download_files,
     fmt_size,
+    fmt_count,
     hf_available,
     local_download_bytes,
     list_gguf_repos,
@@ -488,7 +489,7 @@ class HubScreen(Screen):
                 repo.id,
                 ctx,
                 fmt_size(repo.size),
-                str(repo.downloads),
+                fmt_count(repo.downloads),
                 key=repo.id,
             )
 

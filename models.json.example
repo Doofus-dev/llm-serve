@@ -24,7 +24,13 @@
     }
   },
   "aliases": {
-    "default": "qwen38-27b-bartowski",
-    "coding": "qwen38-27b-bartowski"
+    "default": {
+      "model": "qwen38-27b-bartowski"
+    },
+    "coding": {
+      "model": "qwen38-27b-bartowski",
+      "quant": "IQ2_XXS",
+      "preset": 1
+    }
   }
 }

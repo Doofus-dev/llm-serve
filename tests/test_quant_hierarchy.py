@@ -11,10 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.models_json import (
+    AliasTarget,
     add_or_update_quant,
+    delete_model,
     load_registry,
     migrate_models_json,
+    resolve_model_key,
     set_active_quant,
+    unshared_model_file_paths,
 )
 from tui.data.presets import get_active_slot, get_preset, load_presets, set_preset
 from tui.data.quant import family_display, quant_from_filename
@@ -32,6 +36,86 @@ class QuantParseTests(unittest.TestCase):
             family_display("bartowski/Qwen3.8-27B-GGUF", "Qwen3.8-27B-IQ2_S.gguf"),
             "Qwen 3.8",
         )
+
+
+class ModelDeletionTests(unittest.TestCase):
+    def test_unshared_model_files_exclude_files_used_by_other_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            models_dir = root / "models"
+            models_dir.mkdir()
+            shared = models_dir / "shared.gguf"
+            unique = models_dir / "unique.gguf"
+            shared.write_bytes(b"shared")
+            unique.write_bytes(b"unique")
+            registry_path = root / "models.json"
+            registry_path.write_text(json.dumps({
+                "models": {
+                    "first": {
+                        "file": "unique.gguf",
+                        "quants": {
+                            "Q4": {"file": "unique.gguf"},
+                            "Q5": {"file": "shared.gguf"},
+                        },
+                    },
+                    "second": {
+                        "file": "shared.gguf",
+                        "quants": {"Q5": {"file": "shared.gguf"}},
+                    },
+                },
+                "aliases": {},
+            }))
+
+            reg = load_registry(registry_path, models_dir=models_dir)
+
+            self.assertEqual(
+                unshared_model_file_paths(reg, "first", models_dir),
+                {unique.resolve()},
+            )
+
+    def test_delete_model_removes_aliases_targeting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            path.write_text(json.dumps({
+                "models": {
+                    "first": {"file": "first.gguf"},
+                    "second": {"file": "second.gguf"},
+                },
+                "aliases": {"default": "first", "other": "second"},
+            }))
+
+            delete_model(path, "first")
+            reg = load_registry(path)
+
+            self.assertNotIn("first", reg.models)
+            self.assertNotIn("default", reg.aliases)
+            self.assertEqual(reg.aliases["other"], AliasTarget(model="second"))
+
+    def test_load_registry_migrates_legacy_alias_and_preserves_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            path.write_text(json.dumps({
+                "models": {"model": {"file": "model.gguf"}},
+                "aliases": {
+                    "legacy": "model",
+                    "pinned": {"model": "model", "quant": "Q4_K_M", "preset": 2},
+                },
+            }))
+
+            reg = load_registry(path)
+
+            self.assertEqual(reg.aliases["legacy"], AliasTarget(model="model"))
+            self.assertEqual(
+                reg.aliases["pinned"],
+                AliasTarget(model="model", quant="Q4_K_M", preset_slot=2),
+            )
+            saved = json.loads(path.read_text())
+            self.assertEqual(saved["aliases"]["legacy"], {"model": "model"})
+            self.assertEqual(
+                saved["aliases"]["pinned"],
+                {"model": "model", "quant": "Q4_K_M", "preset": 2},
+            )
+            self.assertEqual(resolve_model_key(saved, "pinned"), "model")
 
 
 class ModelsMigrationTests(unittest.TestCase):
@@ -121,7 +205,7 @@ class ModelsMigrationTests(unittest.TestCase):
         self.assertEqual(model["display"], "Qwen 3.8")
         self.assertIn("IQ2_S", model["quants"])
         self.assertIn("Q4_K_M", model["quants"])
-        self.assertEqual(data["aliases"]["heavy"], slug)
+        self.assertEqual(data["aliases"]["heavy"], {"model": slug})
         self.assertEqual(remap["bartowski-qwen38-iq2"], (slug, "IQ2_S"))
 
     def test_add_or_update_quant_appends_second_file(self) -> None:
