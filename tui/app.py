@@ -1379,7 +1379,6 @@ class LLMServeApp(App):
         Binding("e", "edit", "Edit"),
         Binding("n", "new", "New"),
         Binding("d", "delete", "Delete"),
-        Binding("a", "apply", "Apply"),
         Binding("t", "change_theme", "Theme"),
         Binding("h", "open_hub", "Hub"),
         Binding("p", "pick_quant", "Quant"),
@@ -1435,7 +1434,6 @@ class LLMServeApp(App):
                 Binding("e", "edit", "Edit"),
                 Binding("n", "new", "New"),
                 Binding("d", "delete", "Delete"),
-                Binding("a", "apply", "Apply"),
                 Binding("t", "change_theme", "Theme"),
                 Binding("h", "open_hub", "Hub"),
                 Binding("p", "pick_quant", "Quant"),
@@ -2228,19 +2226,6 @@ class LLMServeApp(App):
                 self.notify(f"Deleted {model}")
         
         self.push_screen(ConfirmDialog(msg), handle_model_confirm)
-
-    def action_apply(self) -> None:
-        """Apply the selected preset (mark as active for its quant)."""
-        data = self.query_one(ModelNav).selected_data
-        if data and data[0] == "preset":
-            _, model_name, quant, slot = data
-            set_active_preset(self.preset_store, model_name, quant, slot)
-            save_presets(PRESETS_JSON, self.preset_store)
-            self._reload_registry()
-            preset = get_preset(self.preset_store, model_name, quant, slot)
-            self.notify(f"Applied preset {model_name}/{quant} [{slot}] {preset.name if preset else ''}")
-        else:
-            self.notify("Select a preset first", severity="warning")
 
     def action_activate_preset(self, slot: int) -> None:
         """Activate a numbered preset for the currently selected model card."""
