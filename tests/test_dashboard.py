@@ -8,7 +8,14 @@ import unittest
 
 from rich.console import Console
 
-from tui.app import ConfigPanel, StatusPanel
+from tui.app import (
+    ConfigPanel,
+    StatusPanel,
+    generation_health,
+    temperature_health,
+    vram_health,
+)
+from tui.data.gpu import GPUStats
 from tui.data.pidfile import PidInfo
 from tui.data.stats import Metrics
 
@@ -55,6 +62,33 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("RUNNING  Qwen 3.6  default", rendered)
         self.assertNotIn("qwen36-27b-bartowski", rendered)
+
+    def test_status_health_thresholds(self) -> None:
+        self.assertEqual(vram_health(74.9), ("OK", "bold green"))
+        self.assertEqual(vram_health(75), ("HIGH", "bold yellow"))
+        self.assertEqual(vram_health(90), ("CRITICAL", "bold red"))
+        self.assertEqual(temperature_health(69.9), ("COOL", "bold green"))
+        self.assertEqual(temperature_health(70), ("WARM", "bold yellow"))
+        self.assertEqual(temperature_health(85), ("HOT", "bold red"))
+        self.assertEqual(generation_health(20), ("FAST", "bold green"))
+        self.assertEqual(generation_health(5), ("MODERATE", "bold yellow"))
+        self.assertEqual(generation_health(1), ("SLOW", "bold red"))
+
+    def test_status_panel_renders_gpu_pressure_indicators(self) -> None:
+        panel = StatusPanel()
+        panel.gpu = GPUStats(
+            name="Test GPU",
+            vram_used_mb=15_360,
+            vram_total_mb=16_384,
+            utilization_pct=96,
+            temp_c=87,
+            available=True,
+        )
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("(94%) CRITICAL", rendered)
+        self.assertIn("87°C HOT", rendered)
 
 
 if __name__ == "__main__":

@@ -325,6 +325,35 @@ def fmt_model_runtime_line(params: dict) -> str:
     return f"ctx: {ctx}  ngl: {ngl}"
 
 
+def vram_health(percent: float) -> tuple[str, str]:
+    """Return a concise VRAM pressure label and Rich style."""
+    if percent >= 90:
+        return "CRITICAL", "bold red"
+    if percent >= 75:
+        return "HIGH", "bold yellow"
+    return "OK", "bold green"
+
+
+def temperature_health(temp_c: float) -> tuple[str, str]:
+    """Return a conservative GPU temperature label and Rich style."""
+    if temp_c >= 85:
+        return "HOT", "bold red"
+    if temp_c >= 70:
+        return "WARM", "bold yellow"
+    return "COOL", "bold green"
+
+
+def generation_health(tokens_per_second: float) -> tuple[str, str]:
+    """Return a broad generation-speed indicator."""
+    if tokens_per_second >= 20:
+        return "FAST", "bold green"
+    if tokens_per_second >= 5:
+        return "MODERATE", "bold yellow"
+    if tokens_per_second > 0:
+        return "SLOW", "bold red"
+    return "IDLE", "dim"
+
+
 class DownloadBar(Vertical):
     """Progress strip shown only while a Hub download is running."""
 
@@ -532,12 +561,17 @@ class StatusPanel(Static):
         if m:
             gen = m.predicted_tokens_seconds or m.gen_tps_derived
             prompt = m.prompt_tokens_seconds or m.prompt_tps_derived
+            gen_label, gen_style = generation_health(gen)
+            speed = Text()
+            speed.append(f"{gen:.1f} tok/s", style=gen_style)
+            speed.append(" generation ", style="dim")
+            speed.append(gen_label, style=gen_style)
+            speed.append("  •  ", style="dim")
+            speed.append(f"{prompt:.1f}", style="bold cyan")
+            speed.append(" prompt", style="dim")
             throughput.extend(
                 [
-                    Text.from_markup(
-                        f"[bold cyan]{gen:.1f}[/] tok/s generation  •  "
-                        f"[bold]{prompt:.1f}[/] prompt"
-                    ),
+                    speed,
                     Text(
                         f"{(1000.0 / gen):.1f} ms/token"
                         if gen > 0
@@ -563,17 +597,22 @@ class StatusPanel(Static):
         g = self.gpu
         if g and g.available:
             gpu_lines.append(Text(g.name, style="bold"))
-            gpu_lines.append(
-                Text(
-                    f"{g.memory_label} {g.vram_used_mb/1024:.1f} / "
-                    f"{g.vram_total_mb/1024:.1f} GB  ({g.vram_pct:.0f}%)"
-                )
+            vram_label, vram_style = vram_health(g.vram_pct)
+            memory = Text(f"{g.memory_label} ")
+            memory.append(
+                f"{g.vram_used_mb/1024:.1f} / {g.vram_total_mb/1024:.1f} GB  "
+                f"({g.vram_pct:.0f}%) {vram_label}",
+                style=vram_style,
             )
-            gpu_lines.append(
-                Text(
-                    f"{g.utilization_pct:.0f}% utilization  •  {g.temp_c:.0f}°C"
-                )
-            )
+            gpu_lines.append(memory)
+
+            thermals = Text(f"{g.utilization_pct:.0f}% utilization  •  ")
+            if g.temp_c > 0:
+                temp_label, temp_style = temperature_health(g.temp_c)
+                thermals.append(f"{g.temp_c:.0f}°C {temp_label}", style=temp_style)
+            else:
+                thermals.append("temperature unavailable", style="dim")
+            gpu_lines.append(thermals)
             if g.unified and g.dedicated_total_mb:
                 gpu_lines.append(
                     Text(
