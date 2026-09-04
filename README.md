@@ -1,10 +1,11 @@
 # llm-serve
 
-A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) that manages model profiles, aliases, and server parameters through a single configuration file. Launch any configured model with one command.
+A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) that manages model profiles, aliases, and server parameters through JSON config and an interactive TUI. Launch any configured model with one command.
 
 ## Features
 
-- **Model registry** — Define all your models and their optimal settings in one `models.conf` file
+- **Model registry** — Define models, quants, and presets in `models.json` (and `presets.json`)
+- **Interactive TUI** — Browse models, edit settings, download from Hugging Face, and monitor live throughput
 - **Friendly aliases** — `llm-serve coding` can follow a model family’s defaults or pin an exact quant and preset
 - **Fine-grained parameter control** — GPU offload, KV cache quantization, MoE expert offload, speculative decoding, reasoning/thinking control, and more
 - **Environment overrides** — Tune any parameter at runtime without editing config (`GPU_LAYERS=50 llm-serve my-model`)
@@ -15,17 +16,16 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 - **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, installs Python and TUI dependencies, creates directories
 - **Clean uninstall** — `llm-serve uninstall` removes build artifacts while preserving models and config
 - **PATH integration** — Automatically symlinks `llm-serve` into `~/.local/bin/` for global access
-- **Hermes Agent integration** — (Optional) Automatically sync model settings to [Hermes Agent](https://hermes-agent.nousresearch.com/docs) configuration
 
 ## Prerequisites
 
 - **Linux** — setup.sh currently requires a Linux distro with pacman, apt, dnf, or zypper (for auto-installing missing packages)
 - **Bash 4.4+** — Required for associative arrays. Most modern Linux distributions include this.
 - **Python 3.9+** — Required for the TUI. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and TUI packages into a project `.venv`
+- **jq** — Required by the launcher to read `models.json`
 - **NVIDIA GPU** — Detected automatically via `nvidia-smi`; setup installs CUDA toolkit and builds with GPU support
 - **AMD GPU** — Detected automatically via `lspci`; setup installs ROCm HIP SDK and builds with `-DGGML_HIP=ON`
 - **Overrides** — `./setup.sh --cpu`, `--cuda`, or `--rocm` to force a build type
-- **Hermes Agent** — (Optional) Required only for the Hermes config sync feature
 
 ## Quick Start
 
@@ -39,9 +39,9 @@ cd llm-serve
 ./setup.sh --cuda       # Force CUDA (NVIDIA)
 ./setup.sh --rocm       # Force ROCm (AMD)
 
-# Drop a .gguf model in models/
+# Drop a .gguf model in models/ (or download from the TUI with H)
 
-# Edit models.conf to register your model (or use the example entries)
+# Edit models.json to register your model (or use the TUI editor)
 
 # Open the TUI, or launch a model directly
 ./llm-serve
@@ -62,8 +62,10 @@ curl http://127.0.0.1:8081/v1/models
 llm-serve/ ← this repo
 ├── llm-serve              # Launcher script
 ├── setup.sh               # One-command environment setup
-├── models.conf            # Your model registry (created from example on first setup)
-├── models.conf.example    # Annotated template with all parameters documented
+├── models.json            # Your model registry (created from example on first setup)
+├── models.json.example    # Starter model profile
+├── presets.json           # Per-model preset slots (created/edited by the TUI)
+├── param-help.conf        # Parameter docs for TUI F1 help (not a config file)
 ├── README.md              # This file
 ├── LICENSE                # MIT
 ├── .gitignore
@@ -94,7 +96,7 @@ Commands:
   status                 Show running server status
   stop                   Stop all running servers
   stop <model>           Stop a specific model
-  uninstall              Remove build artifacts (keep models/ and models.conf)
+  uninstall              Remove build artifacts (keep models/ and models.json)
   uninstall --force      Non-interactive uninstall
   --dry-run <profile>    Show the command that would be run
   --help                 Show this help message
@@ -102,13 +104,11 @@ Commands:
 Options:
   --live                 Run in foreground with live logs
   --remote               Bind 0.0.0.0 so other devices (LAN/Meshnet) can reach it
-  --no-hermes            Skip Hermes Agent config sync
-  --no-gateway-restart   Skip Hermes gateway restart after config sync
 ```
 
 ### Environment Variable Overrides
 
-Any parameter from `models.conf` can be overridden at runtime:
+Most server parameters can be overridden at runtime:
 
 ```bash
 GPU_LAYERS=50 ./llm-serve my-model
@@ -127,7 +127,7 @@ By default the server binds to `127.0.0.1` (localhost only). To serve other devi
 ./llm-serve my-model --remote
 ```
 
-This binds `0.0.0.0` (all interfaces), skips the Hermes config sync (so your local `base_url` isn't overwritten with `0.0.0.0`), and prints the addresses other devices can use:
+This binds `0.0.0.0` (all interfaces) and prints the addresses other devices can use:
 
 ```
 Remote mode: bound to 0.0.0.0 — reachable from other devices at:
@@ -137,31 +137,20 @@ Remote mode: bound to 0.0.0.0 — reachable from other devices at:
 
 Security note: `--remote` exposes the server to anything that can reach those addresses. Only use it on trusted networks (LAN, a private VPN mesh). Do not forward the port to the public internet — there is no authentication.
 
-### Hermes Agent Integration
-
-If you use [Hermes Agent](https://hermes-agent.nousresearch.com/docs), llm-serve can automatically update your Hermes profile configuration to match the launched model's settings — context length, sampling parameters, and server URL.
-
-```bash
-# Add register_hermes_config entries to models.conf (see models.conf.example)
-# Launch models normally — Hermes config is synced automatically
-
-# Or disable:
-./llm-serve --no-hermes my-model
-```
-
 ## Configuration Reference
 
-See `models.conf.example` for a complete annotated template with every parameter documented. Key concepts:
+Model profiles live in **`models.json`**. Each model can define multiple quants and preset slots; sampling and server tuning parameters are stored per quant/preset in **`presets.json`** (managed automatically by the TUI).
 
-- **`register_model`** — Defines a model profile with all its parameters (file, gpu_layers, ctx, cache types, sampling, reasoning, MTP, etc.)
-- **`register_alias`** — Creates a friendly name that maps to a profile
-- **`register_hermes_config`** — (Optional) Syncs model settings to Hermes Agent
-- Every parameter has a documented default
-- Parameters follow a fixed order (see the annotated template)
+Key concepts:
+
+- **`models`** — Model profiles with file paths, Hugging Face source metadata, ports, and quant variants
+- **`aliases`** — Friendly names that map to a model, optionally pinning `quant` and `preset`
+- **Presets** — Numbered slots (1, 2, 3, …) holding `gpu_layers`, `ctx`, cache types, sampling, reasoning, MTP, etc.
+- **F1 help** — In the TUI editor, focus a field to see docs parsed from `param-help.conf`
+
+See `models.json.example` for a minimal starting profile.
 
 ## FAQ
-
-**Do I need Hermes Agent to use this?** No. Hermes integration is optional. The core launcher works independently.
 
 **Can I use this with non-GGUF models?** No. This launcher is designed specifically for llama.cpp's GGUF format.
 
@@ -171,7 +160,7 @@ See `models.conf.example` for a complete annotated template with every parameter
 
 **Can I use this with vLLM or other backends?** Not yet. The launcher is llama.cpp-specific.
 
-**What does uninstall remove?** llama.cpp clone+build, logs, and the ~/.local/bin symlink. It preserves models/, models.conf, and any system packages installed by setup.sh.
+**What does uninstall remove?** llama.cpp clone+build, logs, and the ~/.local/bin symlink. It preserves models/, models.json, presets.json, and any system packages installed by setup.sh.
 
 ## License
 

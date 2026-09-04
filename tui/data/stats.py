@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -33,12 +33,6 @@ class Metrics:
     def avg_prompt_tps(self) -> float:
         if self.prompt_seconds_total > 0:
             return self.prompt_tokens_total / self.prompt_seconds_total
-        return 0.0
-
-    @property
-    def ms_per_token(self) -> float:
-        if self.predicted_tokens_seconds > 0:
-            return 1000.0 / self.predicted_tokens_seconds
         return 0.0
 
 
@@ -78,13 +72,6 @@ class ServerClient:
 
     async def close(self):
         await self._client.aclose()
-
-    async def health(self) -> bool:
-        try:
-            r = await self._client.get(f"{self.base}/health")
-            return r.status_code == 200
-        except httpx.HTTPError:
-            return False
 
     async def metrics(self) -> Metrics | None:
         try:

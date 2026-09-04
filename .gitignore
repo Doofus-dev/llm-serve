@@ -1,4 +1,5 @@
 # Runtime artifacts — never commit these
+models.conf
 logs/
 *.pid
 *.log

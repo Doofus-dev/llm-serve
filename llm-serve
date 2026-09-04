@@ -53,7 +53,7 @@ command -v jq >/dev/null 2>&1 || {
 # Check models.json exists
 [[ -f "$MODELS_JSON" ]] || {
     echo "Error: models.json not found at ${MODELS_JSON}" >&2
-    echo "Run migrate-to-json.py to convert from models.conf" >&2
+    echo "Run ./setup.sh to create models.json from models.json.example" >&2
     exit 1
 }
 

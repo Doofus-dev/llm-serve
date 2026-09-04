@@ -1,30 +1,284 @@
 {
   "models": {
     "qwen38-27b-bartowski": {
-      "host": "127.0.0.1",
-      "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
-      "file": "bartowski/Qwen3.8-27B-IQ2_XXS.gguf",
+      "active_quant": "IQ2_XS",
+      "context_length": 262144,
       "source": {
         "hub": "huggingface",
         "repo": "bartowski/Qwen3.8-27B-GGUF",
-        "filename": "Qwen3.8-27B-IQ2_XXS.gguf",
+        "filename": "Qwen3.8-27B-IQ2_XS.gguf",
         "author": "bartowski",
         "revision": "main"
       },
-      "total_layers": 65,
       "display": "Qwen 3.8",
-      "active_quant": "IQ2_XXS",
-      "port": 8081,
+      "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
       "quants": {
         "IQ2_XXS": {
           "filename": "Qwen3.8-27B-IQ2_XXS.gguf",
           "file": "bartowski/Qwen3.8-27B-IQ2_XXS.gguf"
+        },
+        "BF16": {
+          "filename": "mmproj-Qwen3.8-27B-bf16.gguf",
+          "file": "bartowski/mmproj-Qwen3.8-27B-bf16.gguf"
+        },
+        "F16": {
+          "filename": "mmproj-Qwen3.8-27B-f16.gguf",
+          "file": "bartowski/mmproj-Qwen3.8-27B-f16.gguf"
+        },
+        "Qwen3.8-27B-imatrix": {
+          "filename": "Qwen3.8-27B-imatrix.gguf",
+          "file": "bartowski/Qwen3.8-27B-imatrix.gguf"
+        },
+        "IQ2_M": {
+          "filename": "Qwen3.8-27B-IQ2_M.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ2_M.gguf"
+        },
+        "IQ2_S": {
+          "filename": "Qwen3.8-27B-IQ2_S.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ2_S.gguf"
+        },
+        "IQ2_XS": {
+          "filename": "Qwen3.8-27B-IQ2_XS.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ2_XS.gguf"
+        },
+        "IQ3_M": {
+          "filename": "Qwen3.8-27B-IQ3_M.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ3_M.gguf"
+        },
+        "IQ3_XS": {
+          "filename": "Qwen3.8-27B-IQ3_XS.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ3_XS.gguf"
+        },
+        "IQ3_XXS": {
+          "filename": "Qwen3.8-27B-IQ3_XXS.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ3_XXS.gguf"
+        },
+        "IQ4_NL": {
+          "filename": "Qwen3.8-27B-IQ4_NL.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ4_NL.gguf"
+        },
+        "IQ4_XS": {
+          "filename": "Qwen3.8-27B-IQ4_XS.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ4_XS.gguf"
+        },
+        "Q2_K": {
+          "filename": "Qwen3.8-27B-Q2_K.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q2_K.gguf"
+        },
+        "Q2_K_L": {
+          "filename": "Qwen3.8-27B-Q2_K_L.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q2_K_L.gguf"
+        },
+        "Q3_K_L": {
+          "filename": "Qwen3.8-27B-Q3_K_L.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q3_K_L.gguf"
+        },
+        "Q3_K_M": {
+          "filename": "Qwen3.8-27B-Q3_K_M.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q3_K_M.gguf"
+        },
+        "Q3_K_S": {
+          "filename": "Qwen3.8-27B-Q3_K_S.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q3_K_S.gguf"
+        },
+        "Q3_K_XL": {
+          "filename": "Qwen3.8-27B-Q3_K_XL.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q3_K_XL.gguf"
+        },
+        "Q4_0": {
+          "filename": "Qwen3.8-27B-Q4_0.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q4_0.gguf"
+        },
+        "Q4_1": {
+          "filename": "Qwen3.8-27B-Q4_1.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q4_1.gguf"
+        },
+        "Q4_K_L": {
+          "filename": "Qwen3.8-27B-Q4_K_L.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q4_K_L.gguf"
+        },
+        "Q4_K_M": {
+          "filename": "Qwen3.8-27B-Q4_K_M.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q4_K_M.gguf"
+        },
+        "Q4_K_S": {
+          "filename": "Qwen3.8-27B-Q4_K_S.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q4_K_S.gguf"
+        },
+        "Q5_K_L": {
+          "filename": "Qwen3.8-27B-Q5_K_L.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q5_K_L.gguf"
+        },
+        "Q5_K_M": {
+          "filename": "Qwen3.8-27B-Q5_K_M.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q5_K_M.gguf"
+        },
+        "Q5_K_S": {
+          "filename": "Qwen3.8-27B-Q5_K_S.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q5_K_S.gguf"
+        },
+        "Q6_K": {
+          "filename": "Qwen3.8-27B-Q6_K.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q6_K.gguf"
+        },
+        "Q6_K_L": {
+          "filename": "Qwen3.8-27B-Q6_K_L.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q6_K_L.gguf"
+        },
+        "Q8_0": {
+          "filename": "Qwen3.8-27B-Q8_0.gguf",
+          "file": "bartowski/Qwen3.8-27B-Q8_0.gguf"
         }
-      }
+      },
+      "host": "127.0.0.1",
+      "port": 8081,
+      "file": "bartowski/Qwen3.8-27B-IQ2_XS.gguf",
+      "total_layers": 65
+    },
+    "qwen36-27b-bartowski": {
+      "active_quant": "Q2_K",
+      "context_length": 262144,
+      "source": {
+        "hub": "huggingface",
+        "repo": "bartowski/Qwen_Qwen3.6-27B-GGUF",
+        "filename": "Qwen_Qwen3.6-27B-Q2_K.gguf",
+        "author": "bartowski",
+        "revision": "main"
+      },
+      "display": "Qwen 3.6",
+      "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
+      "quants": {
+        "Q3_K_M": {
+          "filename": "Qwen_Qwen3.6-27B-Q3_K_M.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q3_K_M.gguf"
+        },
+        "BF16": {
+          "filename": "mmproj-Qwen_Qwen3.6-27B-bf16.gguf",
+          "file": "bartowski/mmproj-Qwen_Qwen3.6-27B-bf16.gguf"
+        },
+        "F16": {
+          "filename": "mmproj-Qwen_Qwen3.6-27B-f16.gguf",
+          "file": "bartowski/mmproj-Qwen_Qwen3.6-27B-f16.gguf"
+        },
+        "Q4_0": {
+          "filename": "mtp-Qwen_Qwen3.6-27B-Q4_0.gguf",
+          "file": "bartowski/mtp-Qwen_Qwen3.6-27B-Q4_0.gguf"
+        },
+        "Q8_0": {
+          "filename": "mtp-Qwen_Qwen3.6-27B-Q8_0.gguf",
+          "file": "bartowski/mtp-Qwen_Qwen3.6-27B-Q8_0.gguf"
+        },
+        "Qwen_Qwen3.6-27B-imatrix": {
+          "filename": "Qwen_Qwen3.6-27B-imatrix.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-imatrix.gguf"
+        },
+        "IQ2_M": {
+          "filename": "Qwen_Qwen3.6-27B-IQ2_M.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ2_M.gguf"
+        },
+        "IQ2_S": {
+          "filename": "Qwen_Qwen3.6-27B-IQ2_S.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ2_S.gguf"
+        },
+        "IQ2_XS": {
+          "filename": "Qwen_Qwen3.6-27B-IQ2_XS.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ2_XS.gguf"
+        },
+        "IQ2_XXS": {
+          "filename": "Qwen_Qwen3.6-27B-IQ2_XXS.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ2_XXS.gguf"
+        },
+        "IQ3_M": {
+          "filename": "Qwen_Qwen3.6-27B-IQ3_M.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ3_M.gguf"
+        },
+        "IQ3_XS": {
+          "filename": "Qwen_Qwen3.6-27B-IQ3_XS.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ3_XS.gguf"
+        },
+        "IQ3_XXS": {
+          "filename": "Qwen_Qwen3.6-27B-IQ3_XXS.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ3_XXS.gguf"
+        },
+        "IQ4_NL": {
+          "filename": "Qwen_Qwen3.6-27B-IQ4_NL.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ4_NL.gguf"
+        },
+        "IQ4_XS": {
+          "filename": "Qwen_Qwen3.6-27B-IQ4_XS.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-IQ4_XS.gguf"
+        },
+        "Q2_K": {
+          "filename": "Qwen_Qwen3.6-27B-Q2_K.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q2_K.gguf"
+        },
+        "Q2_K_L": {
+          "filename": "Qwen_Qwen3.6-27B-Q2_K_L.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q2_K_L.gguf"
+        },
+        "Q3_K_L": {
+          "filename": "Qwen_Qwen3.6-27B-Q3_K_L.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q3_K_L.gguf"
+        },
+        "Q3_K_S": {
+          "filename": "Qwen_Qwen3.6-27B-Q3_K_S.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q3_K_S.gguf"
+        },
+        "Q3_K_XL": {
+          "filename": "Qwen_Qwen3.6-27B-Q3_K_XL.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q3_K_XL.gguf"
+        },
+        "Q4_1": {
+          "filename": "Qwen_Qwen3.6-27B-Q4_1.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q4_1.gguf"
+        },
+        "Q4_K_L": {
+          "filename": "Qwen_Qwen3.6-27B-Q4_K_L.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q4_K_L.gguf"
+        },
+        "Q4_K_M": {
+          "filename": "Qwen_Qwen3.6-27B-Q4_K_M.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q4_K_M.gguf"
+        },
+        "Q4_K_S": {
+          "filename": "Qwen_Qwen3.6-27B-Q4_K_S.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q4_K_S.gguf"
+        },
+        "Q5_K_L": {
+          "filename": "Qwen_Qwen3.6-27B-Q5_K_L.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q5_K_L.gguf"
+        },
+        "Q5_K_M": {
+          "filename": "Qwen_Qwen3.6-27B-Q5_K_M.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q5_K_M.gguf"
+        },
+        "Q5_K_S": {
+          "filename": "Qwen_Qwen3.6-27B-Q5_K_S.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q5_K_S.gguf"
+        },
+        "Q6_K": {
+          "filename": "Qwen_Qwen3.6-27B-Q6_K.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q6_K.gguf"
+        },
+        "Q6_K_L": {
+          "filename": "Qwen_Qwen3.6-27B-Q6_K_L.gguf",
+          "file": "bartowski/Qwen_Qwen3.6-27B-Q6_K_L.gguf"
+        }
+      },
+      "host": "127.0.0.1",
+      "port": 8081,
+      "file": "bartowski/Qwen_Qwen3.6-27B-Q2_K.gguf",
+      "total_layers": 65
     }
   },
   "aliases": {
-    "default": "qwen38-27b-bartowski",
-    "coding": "qwen38-27b-bartowski"
+    "default": {
+      "model": "qwen36-27b-bartowski"
+    },
+    "coding": {
+      "model": "qwen36-27b-bartowski",
+      "quant": "Q2_K",
+      "preset": 2
+    }
   }
 }

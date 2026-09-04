@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import subprocess
 import time
 from datetime import timedelta
@@ -20,7 +19,7 @@ from textual.events import Focus
 from textual.reactive import reactive
 from textual import work
 from textual.widgets import (
-    Button, Collapsible, DataTable, Footer, Header, Input, Label, OptionList,
+    Button, Collapsible, Footer, Header, Input, Label, OptionList,
     ProgressBar, RichLog, Select, Static,
 )
 from textual.widgets.option_list import Option
@@ -30,7 +29,6 @@ from textual.message import Message
 from tui.data.models_json import (
     AliasTarget,
     Registry,
-    ModelConfig,
     load_registry,
     save_registry,
     delete_model,
@@ -40,7 +38,6 @@ from tui.data.models_json import (
     clamp_preset_contexts,
     set_active_quant,
     add_or_update_quant,
-    find_model_by_repo,
     model_author_size_line,
     validate_display_name,
 )
@@ -80,11 +77,11 @@ from tui.data.presets import (
     next_free_slot,
     list_presets_for_quant,
 )
-from tui.data.settings import TUISettings, load_settings, save_settings
+from tui.data.settings import load_settings, save_settings
 from tui.screens.hub import HubScreen
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.data.downloads import DownloadManager, DownloadJob
-from tui.data.quant import parse_gguf_filename, quant_from_filename
+from tui.data.quant import quant_from_filename
 from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
 from tui.data.baselines import RunBaseline, record_baseline
 from tui.data.gguf import apply_architecture_from_gguf
@@ -114,14 +111,8 @@ MODELS_DIR = REPO_ROOT / "models"
 PRESETS_JSON = REPO_ROOT / "presets.json"
 TUI_SETTINGS_JSON = REPO_ROOT / "tui-settings.json"
 TUI_BASELINES_JSON = REPO_ROOT / "tui-baselines.json"
-MODELS_CONF_EXAMPLE = REPO_ROOT / "models.conf.example"
 LOG_FILE = REPO_ROOT / "logs" / "llm-serve.log"
 PID_FILE = REPO_ROOT / "logs" / ".llm-serve.pid"
-
-# Preset editor param groups (runtime llama-server params only).
-PRESET_ALL_PARAMS: list[str] = []
-for _group_params in PRESET_PARAM_GROUPS.values():
-    PRESET_ALL_PARAMS.extend(_group_params)
 
 PROFILE_KEYS = ("display", "port", "host", "notes")
 
@@ -308,33 +299,6 @@ def model_file_exists(file: str) -> bool:
     return (MODELS_DIR / file).is_file()
 
 
-def fmt_model_file_line(file: str, params: dict | None = None) -> str:
-    """Line 1: author · params · variant · quant from filename/path."""
-    parts: list[str] = []
-    author = model_author(params or {}, file) if params is not None else None
-    if author:
-        parts.append(author)
-    model_params, variant, quant = parse_gguf_filename(Path(file).name)
-    if model_params:
-        parts.append(model_params)
-    if variant:
-        parts.append(variant)
-    if quant:
-        parts.append(quant)
-    return " · ".join(parts) if parts else "?"
-
-
-def fmt_model_source_line(params: dict, file: str) -> str:
-    """Line for Hub source or on-disk status."""
-    source = params.get("source")
-    if isinstance(source, dict) and source.get("repo"):
-        repo = source.get("repo")
-        return f"HF: {repo}"
-    if model_file_exists(file):
-        return "on disk"
-    return "missing file"
-
-
 def fmt_model_runtime_line(params: dict) -> str:
     """Line 2: preset context vs model max, and GPU layers."""
     max_ctx = resolve_context_length(params, MODELS_DIR)
@@ -434,24 +398,12 @@ class ModelNav(OptionList):
     def on_mount(self) -> None:
         self.refresh_cards()
 
-    def action_cycle_alias(self, direction: int) -> None:
-        self.app.cycle_selected_alias(direction)
-
     @property
     def selected_data(self) -> tuple | None:
         if self.highlighted is None:
             return None
         option = self.get_option_at_index(self.highlighted)
         return self._option_data.get(option.id or "")
-
-    @property
-    def selected_model(self) -> str | None:
-        data = self.selected_data
-        if not data:
-            return None
-        if data[0] in ("model", "preset"):
-            return data[1]
-        return None
 
     def _add(self, prompt: Text, data: tuple, option_id: str) -> None:
         self._option_data[option_id] = data
@@ -541,12 +493,6 @@ class AliasNav(OptionList):
             return None
         option = self.get_option_at_index(self.highlighted)
         return self._option_data.get(option.id or "")
-
-    @property
-    def selected_model(self) -> str | None:
-        data = self.selected_data
-        target = self.registry.aliases.get(data[1]) if data else None
-        return target.model if target else None
 
     def refresh_aliases(self) -> None:
         selected = self.selected_data
@@ -872,14 +818,14 @@ class ParamHelpPanel(VerticalScroll):
         yield Static(self.DEFAULT_TEXT, id="param-help-text")
 
     def on_mount(self) -> None:
-        load_param_help(MODELS_CONF_EXAMPLE)
+        load_param_help()
 
     def show_param(self, param: str | None) -> None:
         text = self.query_one("#param-help-text", Static)
         if not param:
             text.update(self.DEFAULT_TEXT)
             return
-        help_text = get_param_help(param, MODELS_CONF_EXAMPLE)
+        help_text = get_param_help(param)
         if help_text:
             text.update(f"[bold $accent]{param}[/]\n\n{help_text}")
         else:
@@ -960,90 +906,6 @@ class ProfileEditor(VerticalScroll):
 
     def action_cancel_editor(self) -> None:
         self.on_cancel_callback()
-
-    def on_key(self, event) -> None:
-        if event.key == "ctrl+s":
-            event.prevent_default()
-            self.save()
-        elif event.key == "escape":
-            event.prevent_default()
-            self.on_cancel_callback()
-
-
-class CreateModelDialog(ModalScreen[tuple[str, str] | None]):
-    """Dialog to create a new model (name + clone from)."""
-
-    def __init__(self, registry: Registry):
-        super().__init__()
-        self.registry = registry
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="create-dialog"):
-            yield Label("[bold]Create New Model[/bold]")
-            yield Label("")
-            yield Label("Name:")
-            yield Input(placeholder="my-model", id="name")
-            yield Label("")
-            yield Label("Clone from:")
-            options = [(name, name) for name in self.registry.models.keys()]
-            yield Select(options, id="clone_from", value=options[0][1] if options else None)
-            yield Label("")
-            with Horizontal():
-                yield Button("Create", variant="success", id="create")
-                yield Button("Cancel", variant="default", id="cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
-            self.dismiss(None)
-        elif event.button.id == "create":
-            name = self.query_one("#name", Input).value.strip()
-            clone_from = self.query_one("#clone_from", Select).value
-            if not name:
-                self.app.notify("Name cannot be empty", severity="error")
-                return
-            if name in self.registry.models:
-                self.app.notify(f"Model '{name}' already exists", severity="error")
-                return
-            self.dismiss((name, clone_from))
-
-
-class AliasEditor(VerticalScroll):
-    """Editor panel for an alias (takes over right side)."""
-
-    def __init__(self, alias_name: str, current_target: str, registry: Registry, on_save, on_cancel):
-        super().__init__()
-        self.alias_name = alias_name
-        self.current_target = current_target
-        self.registry = registry
-        self.on_save_callback = on_save
-        self.on_cancel_callback = on_cancel
-
-    def compose(self) -> ComposeResult:
-        yield Label(f"[bold]Edit Alias: {self.alias_name}[/bold]  (Ctrl+S: save, Esc: cancel)")
-        yield Label("")
-        yield Label("Points to model:", classes="field-label")
-        
-        options = [(name, name) for name in self.registry.models.keys()]
-        yield Select(options, id="target_model", value=self.current_target)
-        
-        yield Label("")
-        with Horizontal():
-            yield Button("Save", variant="success", id="save")
-            yield Button("Cancel", variant="default", id="cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
-            self.on_cancel_callback()
-        elif event.button.id == "save":
-            self.save()
-
-    def save(self) -> None:
-        target = self.query_one("#target_model", Select).value
-        self.on_save_callback(target)
-
-    def on_mount(self) -> None:
-        """Focus the dropdown when the editor mounts."""
-        self.query_one("#target_model", Select).focus()
 
     def on_key(self, event) -> None:
         if event.key == "ctrl+s":
@@ -1464,10 +1326,6 @@ class LLMServeApp(App):
         color: $accent;
     }
 
-    .param-label-override {
-        color: $warning;
-    }
-
     .field-label {
         color: $accent;
         height: 1;
@@ -1509,8 +1367,6 @@ class LLMServeApp(App):
         self._help_panel: ParamHelpPanel | None = None
         self._help_visible: bool = False
         self._focused_param: str | None = None
-        self._alias_editor_mode: bool = False
-        self._alias_editor_widget: AliasEditor | None = None
         self._gen_history = ThroughputHistory(max_samples=METRICS_HISTORY_SAMPLES)
         self._throughput_reader = ThroughputReader()
 
@@ -1532,7 +1388,7 @@ class LLMServeApp(App):
 
     def _update_footer(self) -> None:
         """Update footer bindings based on mode."""
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             bindings = [Binding("ctrl+s", "save_edit", "Save")]
             bindings.append(Binding("escape", "cancel_edit", "Cancel"))
             self.bindings = bindings
@@ -1742,7 +1598,7 @@ class LLMServeApp(App):
 
     def _refresh_themed_widgets(self) -> None:
         """Re-render custom panels so theme markup/CSS picks up the new palette."""
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             return
         for selector in (StatusPanel, ConfigPanel):
             try:
@@ -1752,7 +1608,7 @@ class LLMServeApp(App):
 
     def _refresh_pid(self) -> None:
         info = read_pid_file(PID_FILE)
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             return
         panel = self.query_one(StatusPanel)
         was_alive = panel.pid_info.alive if panel.pid_info else False
@@ -2056,13 +1912,6 @@ class LLMServeApp(App):
             self.notify(f"Stop error: {e}", severity="error")
         self._refresh_pid()
 
-    def action_refresh(self) -> None:
-        self._reload_registry(notify_gguf=True)
-        self._refresh_pid()
-        self._poll_gpu()
-        self._poll_log()
-        self.notify("Refreshed")
-
     def on_param_focused(self, event: ParamFocused) -> None:
         self._focused_param = event.param
         if self._help_panel and self._help_visible:
@@ -2111,7 +1960,7 @@ class LLMServeApp(App):
         self._update_footer()
 
     def action_edit(self) -> None:
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             self.notify("Already in edit mode", severity="warning")
             return
         
@@ -2187,31 +2036,6 @@ class LLMServeApp(App):
         )
         self._enter_param_editor(editor)
 
-    def _edit_alias(self, alias_name: str, current_target: str) -> None:
-        """Edit an alias."""
-        def on_save(new_target: str) -> None:
-            self.registry.aliases[alias_name] = AliasTarget(model=new_target)
-            save_registry(MODELS_JSON, self.registry)
-            self._reload_registry()
-            self._exit_alias_editor()
-            self.notify(f"Saved alias {alias_name} → {new_target}")
-        
-        def on_cancel() -> None:
-            self._exit_alias_editor()
-            self.notify("Edit cancelled")
-        
-        # Hide status/config/logs, show editor
-        self.query_one("#status").display = False
-        self.query_one("#config").display = False
-        self.query_one("#logs").display = False
-        
-        editor = AliasEditor(alias_name, current_target, self.registry, on_save, on_cancel)
-        right = self.query_one("#right")
-        right.mount(editor)
-        self._alias_editor_widget = editor
-        self._alias_editor_mode = True
-        self._update_footer()
-
     def cycle_selected_alias(self, direction: int) -> None:
         """Immediately point the selected alias at the adjacent model."""
         nav = self.query_one(AliasNav)
@@ -2255,36 +2079,19 @@ class LLMServeApp(App):
         self._update_footer()
         self.query_one(ModelNav).focus()
 
-    def _exit_alias_editor(self) -> None:
-        """Exit alias editor mode and restore normal view."""
-        if self._alias_editor_widget:
-            self._alias_editor_widget.remove()
-            self._alias_editor_widget = None
-        self.query_one("#status").display = True
-        self.query_one("#config").display = True
-        self.query_one("#logs").display = True
-        self._alias_editor_mode = False
-        self._update_footer()
-        self.query_one(ModelNav).focus()
-
     def action_save_edit(self) -> None:
         """Save current editor (called by Ctrl+S binding)."""
         if self._editor_widget:
             self._editor_widget.save()
-        elif self._alias_editor_widget:
-            self._alias_editor_widget.save()
 
     def action_cancel_edit(self) -> None:
         """Cancel current editor (called by Esc binding)."""
         if self._editor_widget:
             self._exit_editor()
             self.notify("Edit cancelled")
-        elif self._alias_editor_widget:
-            self._exit_alias_editor()
-            self.notify("Edit cancelled")
 
     def action_new(self) -> None:
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             self.notify("Close the editor first", severity="warning")
             return
         data = self._selected_data()
@@ -2455,7 +2262,7 @@ class LLMServeApp(App):
         self._reload_registry()
 
     def action_open_hub(self) -> None:
-        if self._editor_mode or self._alias_editor_mode:
+        if self._editor_mode:
             self.notify("Close the editor first", severity="warning")
             return
 

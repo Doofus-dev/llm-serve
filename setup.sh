@@ -8,7 +8,7 @@
 #   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
 #   - Creates a Python venv and installs TUI packages (textual, httpx)
 #   - Creates models/ and logs/ directories
-#   - Copies models.conf.example → models.conf (if no config exists)
+#   - Copies models.json.example → models.json (if no config exists)
 #
 # Usage:
 #   ./setup.sh              # Auto-detect GPU
@@ -175,7 +175,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Checks prerequisites, clones & builds llama.cpp, installs"
             echo "Python and TUI dependencies, creates models/ and logs/"
-            echo "directories, and sets up a default models.conf."
+            echo "directories, and sets up a default models.json."
             echo ""
             echo "Idempotent — safe to re-run."
             exit 0
@@ -489,22 +489,8 @@ else
 fi
 
 ###############################################################################
-# Phase 5: Set up models.conf (if needed)
+# Phase 5: Set up models.json (if needed)
 ###############################################################################
-CONF="${SCRIPT_DIR}/models.conf"
-CONF_EXAMPLE="${SCRIPT_DIR}/models.conf.example"
-
-if [[ ! -f "${CONF}" ]]; then
-    if [[ -f "${CONF_EXAMPLE}" ]]; then
-        cp "${CONF_EXAMPLE}" "${CONF}"
-        ok "Created models.conf from example template"
-    else
-        warn "No models.conf.example found. You'll need to create models.conf manually."
-    fi
-else
-    ok "models.conf already exists (skipping)"
-fi
-
 MODELS_JSON="${SCRIPT_DIR}/models.json"
 MODELS_JSON_EXAMPLE="${SCRIPT_DIR}/models.json.example"
 
@@ -513,7 +499,7 @@ if [[ ! -f "${MODELS_JSON}" ]]; then
         cp "${MODELS_JSON_EXAMPLE}" "${MODELS_JSON}"
         ok "Created models.json from example template"
     else
-        warn "No models.json.example found. Create models.json manually or run migrate-to-json.py."
+        warn "No models.json.example found. Create models.json manually."
     fi
 else
     ok "models.json already exists (skipping)"
@@ -585,20 +571,13 @@ echo ""
 echo "  2. Download a .gguf model and put it in: ${MODELS_DIR}/"
 echo "     (or press H in the TUI to browse/download from Hugging Face; optional: install hf CLI)"
 echo ""
-echo "  3. Edit ${CONF} (or use the TUI editor):"
-echo "     - Set MODEL_DIR=${MODELS_DIR}  (or leave empty for default)"
-echo "     - Add a register_model entry for your model:"
-echo "       register_model \"my-model\" \\"
-echo "           file=\"my-model.gguf\" \\"
-echo "           gpu_layers=99 \\"
-echo "           ctx=32768 \\"
-echo "           ... (see models.conf.example for all parameters)"
+echo "  3. Add or edit models in ${MODELS_JSON} (or use the TUI editor):"
+echo "     - Set file paths under ${MODELS_DIR}/"
+echo "     - Tune gpu_layers, ctx, cache types, and sampling per quant/preset"
+echo "     - Press F1 in the editor for parameter help (from param-help.conf)"
 echo ""
 echo "  4. Test it:"
 echo "     ./llm-serve --dry-run my-model     # verify config without starting"
 echo "     ./llm-serve my-model                # start the server"
-echo ""
-echo "  5. Launch Hermes with the local model:"
-echo "     LLAMA_PORT=8081 hermes config set provider local"
 echo ""
 echo "─────────────────────────────────────────────────────────────────────"
