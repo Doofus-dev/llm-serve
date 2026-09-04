@@ -62,9 +62,13 @@ class FooterBindingTests(unittest.TestCase):
         self.assertTrue(all(b.group is None for b in bindings))
 
     def test_dynamic_labels(self) -> None:
-        labels = {b.action: b.description for b in build_app_bindings(remote_on=True, log_label="DEBUG")}
+        labels = {
+            b.action: b.description
+            for b in build_app_bindings(remote_on=True, log_label="DEBUG", info_label="Info ON")
+        }
         self.assertEqual(labels["toggle_remote"], "Remote ON")
         self.assertEqual(labels["cycle_log_verbosity"], "Log DEBUG")
+        self.assertEqual(labels["toggle_log_source"], "Info ON")
 
 
 class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
@@ -91,7 +95,9 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
         app = LLMServeApp()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
-            app.query_one(LogPanel).focus()
+            logs = app.query_one(LogPanel)
+            self.assertFalse(logs.auto_scroll)
+            logs.focus()
             await pilot.pause(0.1)
             on_logs = shown_actions(app)
             self.assertFalse({"launch", "edit", "pick_quant", "new", "delete"} & on_logs)

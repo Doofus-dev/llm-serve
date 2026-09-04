@@ -31,7 +31,7 @@ Thumbs.db
 *.pyc
 __pycache__/
 .venv/
-llama.cpp/
+/llama.cpp/
 presets.json
 tui-settings.json
 tui-baselines.json

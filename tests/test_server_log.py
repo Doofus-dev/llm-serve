@@ -10,6 +10,7 @@ from tui.data.server_log import (
     LogAggregator,
     LogTailer,
     format_elapsed,
+    is_unformatted_event,
     parse_line,
     render_event,
     slice_to_session,
@@ -169,6 +170,23 @@ class RequestRecapTests(unittest.TestCase):
         self.assertIn("read 44 tok", event.message)
         self.assertIn("wrote 37 tok", event.message)
         self.assertIn("no truncation", event.detail)
+        self.assertIsNone(event.client_addr)
+
+    def test_request_recap_includes_client_ip(self) -> None:
+        lines = LCP_REQUEST.splitlines()
+        done = (
+            "22.50.655.445 I srv  log_server_r: done request: "
+            "POST /v1/chat/completions 100.86.55.45 200"
+        )
+        text = "\n".join(lines[:-1] + [done, lines[-1]])
+        events, _ = events_from(text)
+        event = request_event(events)
+        self.assertEqual(event.client_addr, "100.86.55.45")
+        self.assertIn("from 100.86.55.45", event.message)
+        self.assertFalse(any(item.kind == "http" for item in events))
+        rendered = render_event(event)
+        self.assertIn("100.86.55.45", rendered)
+        self.assertIn("bold yellow", rendered)
 
     def test_lru_fresh_prompt(self) -> None:
         events, _ = events_from(LRU_REQUEST)
@@ -223,13 +241,31 @@ class RequestRecapTests(unittest.TestCase):
 
     def test_http_done_request(self) -> None:
         events, _ = events_from(
-            "1.02.000.000 I srv  log_server_r: done request: POST /v1/chat/completions 127.0.0.1 200\n"
+            "1.02.000.000 I srv  log_server_r: done request: POST /v1/chat/completions 100.86.55.45 200\n"
         )
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].kind, "http")
+        self.assertEqual(events[0].client_addr, "100.86.55.45")
+        self.assertEqual(events[0].http_status, 200)
         self.assertIn("POST /v1/chat/completions", events[0].message)
-        self.assertIn("127.0.0.1", events[0].message)
-        self.assertIn("200", events[0].message)
+        rendered = render_event(events[0])
+        self.assertIn("100.86.55.45", rendered)
+        self.assertIn("bold yellow", rendered)
+
+    def test_local_slots_polls_are_http_noise(self) -> None:
+        events, _ = events_from(
+            "1.02.000.000 I srv  log_server_r: done request: GET /slots 127.0.0.1 200\n"
+            "1.02.000.001 I srv  log_server_r: done request: GET /slots 127.0.0.1 503\n"
+            "1.02.000.002 I srv  log_server_r: done request: GET /v1/props 127.0.0.1 404\n"
+            "1.02.000.003 I srv  log_server_r: done request: GET /api/tags 100.86.55.45 404\n"
+            "1.02.000.004 I srv  log_server_r: done request: POST /v1/chat/completions 127.0.0.1 200\n"
+        )
+        kinds = [event.kind for event in events]
+        self.assertEqual(kinds, ["http", "http"])
+        self.assertEqual(events[0].client_addr, "100.86.55.45")
+        self.assertIn("GET /api/tags", events[0].message)
+        self.assertEqual(events[1].client_addr, "127.0.0.1")
+        self.assertIn("POST /v1/chat/completions", events[1].message)
 
     def test_debug_bodies_are_dropped(self) -> None:
         events, _ = events_from(
@@ -372,6 +408,16 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("print_timing", hidden)
         self.assertIn("print_timing", shown)
         self.assertIn("reused cache", shown)
+
+    def test_print_info_is_unformatted(self) -> None:
+        events, _ = events_from(
+            "0.00.339.417 I print_info: file type   = Q2_K - Medium\n"
+            + LCP_REQUEST
+        )
+        leftover = [event for event in events if event.kind == "info"]
+        self.assertTrue(leftover)
+        self.assertTrue(all(is_unformatted_event(event) for event in leftover))
+        self.assertFalse(is_unformatted_event(request_event(events)))
 
 
 if __name__ == "__main__":

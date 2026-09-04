@@ -49,6 +49,11 @@ EventLabel = Literal[
 
 FALLBACK_SESSION_LINES = 400
 
+
+def is_unformatted_event(event: "LogEvent") -> bool:
+    """Leftover llama.cpp lines that were not turned into a recap."""
+    return event.kind == "info"
+
 _LAUNCH = re.compile(
     r"^──\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+launch:\s+(\S+)\s+\(PID\s+(\d+)\)\s+──\s*$"
 )
@@ -157,6 +162,8 @@ class LogEvent:
     ckpt_of: int | None = None
     ckpt_mib: float | None = None
     restored: bool = False
+    client_addr: str | None = None
+    http_status: int | None = None
 
 
 @dataclass
@@ -173,6 +180,8 @@ class _RequestBuf:
     gen_tps: float | None = None
     context_tokens: int | None = None
     truncated: bool | None = None
+    client_addr: str | None = None
+    http_status: int | None = None
 
 
 def elapsed_from_fields(minutes: int, seconds: int, ms: int, us: int) -> float:
@@ -288,6 +297,29 @@ def _is_cors_line(parsed: ParsedLine) -> bool:
     )
 
 
+_HTTP_POLL_PATHS = {
+    "/health",
+    "/v1/health",
+    "/models",
+    "/v1/models",
+    "/props",
+    "/v1/props",
+    "/metrics",
+    "/slots",
+    "/v1/slots",
+}
+
+
+def _is_loopback_addr(addr: str) -> bool:
+    return addr in {"127.0.0.1", "::1", "localhost"}
+
+
+def _is_http_noise(method: str, path: str, addr: str) -> bool:
+    if path in _HTTP_POLL_PATHS:
+        return True
+    return method == "GET" and _is_loopback_addr(addr)
+
+
 def _is_unused_tensor(parsed: ParsedLine) -> bool:
     return "unused tensor" in parsed.message.lower()
 
@@ -347,11 +379,13 @@ class LogAggregator:
         self._n_ctx_slot: int | None = None
         self._pending_collapse: LogEvent | None = None
         self._emitted_collapse_this_batch = False
+        self._recent_http: tuple[str, int] | None = None
 
     def reset(self) -> None:
         self._cors.clear()
         self._unused.clear()
         self._requests.clear()
+        self._recent_http = None
         self._pending_choice = None
         self._n_slots = None
         self._n_ctx_slot = None
@@ -439,6 +473,16 @@ class LogAggregator:
         done = _DONE_REQUEST.search(parsed.message)
         if done:
             method, path, addr, status = done.groups()
+            if _is_http_noise(method, path, addr):
+                return []
+            code = int(status)
+            self._recent_http = (addr, code)
+            if method == "POST" and "completions" in path and self._requests:
+                if len(self._requests) == 1:
+                    buf = next(iter(self._requests.values()))
+                    buf.client_addr = addr
+                    buf.http_status = code
+                return []
             return [
                 LogEvent(
                     kind="http",
@@ -447,6 +491,8 @@ class LogAggregator:
                     elapsed_s=parsed.elapsed_s,
                     message=f"{method} {path}  from {addr}  →  {status}",
                     raw_lines=[parsed.raw],
+                    client_addr=addr,
+                    http_status=code,
                 )
             ]
 
@@ -783,6 +829,12 @@ class LogAggregator:
         if not parts:
             parts.append("finished")
 
+        if buf.client_addr is None and self._recent_http is not None:
+            buf.client_addr, buf.http_status = self._recent_http
+        if buf.client_addr is not None:
+            parts.append(f"from {buf.client_addr}")
+        self._recent_http = None
+
         detail_parts: list[str] = []
         if buf.context_tokens is not None:
             detail_parts.append(f"context {fmt_tok(buf.context_tokens)}")
@@ -808,6 +860,8 @@ class LogAggregator:
             gen_tps=buf.gen_tps,
             context_tokens=buf.context_tokens,
             truncated=bool(buf.truncated),
+            client_addr=buf.client_addr,
+            http_status=buf.http_status,
         )
 
     def _flush_cors(self) -> list[LogEvent]:
@@ -929,8 +983,16 @@ def _render_body(event: LogEvent) -> str:
         if event.gen_tokens is not None:
             tps = f" @ {_y(fmt_tps(event.gen_tps))} t/s" if event.gen_tps is not None else ""
             parts.append(f"wrote {_y(fmt_tok(event.gen_tokens))} tok{tps}")
+        if event.client_addr:
+            parts.append(f"from {_y(event.client_addr)}")
         return "  ·  ".join(parts) if parts else _esc(event.message)
     if event.kind == "http":
+        if event.client_addr is not None and event.http_status is not None:
+            method_path = event.message.split("  from ", 1)[0]
+            return (
+                f"{_esc(method_path)}  from {_y(event.client_addr)}"
+                f"  →  {_y(event.http_status)}"
+            )
         return _esc(event.message)
     if event.kind == "idle":
         body = "all slots idle"
