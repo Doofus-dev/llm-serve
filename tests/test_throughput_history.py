@@ -9,13 +9,17 @@ from rich.console import Console
 
 from tui.data.stats import Metrics
 from tui.data.throughput_history import (
+    LastRequest,
     LiveThroughput,
     SPARKLINE_WIDTH,
-    SlotSnapshot,
     ThroughputHistory,
     ThroughputReader,
     compute_live_tps,
+    format_avg_line,
+    format_last_request,
     live_tps_from_metrics,
+    render_prefill_progress,
+    render_stage_strip,
     render_tps_sparkline,
     sample_tps_for_history,
     summarize_slots,
@@ -77,7 +81,7 @@ class ThroughputHistoryTests(unittest.TestCase):
 
         self.assertAlmostEqual(live.gen_tps, 20.0)
         self.assertEqual(live.source, "slots")
-        self.assertEqual(live.phase, "generating")
+        self.assertEqual(live.stage, "generating")
 
     def test_slot_prompt_delta_sets_prefill_phase(self) -> None:
         metrics = Metrics(requests_processing=1)
@@ -106,7 +110,7 @@ class ThroughputHistoryTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(live.prompt_tps, 100.0)
-        self.assertEqual(live.phase, "prompt")
+        self.assertEqual(live.stage, "prefill")
 
     def test_direct_tg_tps_from_slots(self) -> None:
         metrics = Metrics(requests_processing=1)
@@ -127,8 +131,10 @@ class ThroughputHistoryTests(unittest.TestCase):
             }
         ]
         live, _, _ = compute_live_tps(metrics, slots)
-        self.assertEqual(live.phase, "prompt")
+        self.assertEqual(live.stage, "prefill")
         self.assertEqual(live.gen_tps, 0.0)
+        self.assertEqual(live.n_prompt_processed, 200)
+        self.assertEqual(live.n_prompt_total, 1000)
 
     def test_metrics_gauge_not_used_while_processing(self) -> None:
         metrics = Metrics(
@@ -144,17 +150,22 @@ class ThroughputHistoryTests(unittest.TestCase):
         live = LiveThroughput(
             gen_tps=293.9,
             prompt_tps=0.0,
-            phase="generating",
+            stage="generating",
             source="metrics_gauge",
         )
         self.assertEqual(sample_tps_for_history(live), 0.0)
 
-    def test_sample_tps_uses_prompt_rate_during_prefill(self) -> None:
-        live = LiveThroughput(gen_tps=0.0, prompt_tps=85.0, phase="prompt", source="slots")
-        self.assertAlmostEqual(sample_tps_for_history(live), 85.0)
+    def test_sample_tps_ignores_prefill_rate(self) -> None:
+        live = LiveThroughput(
+            gen_tps=0.0,
+            prompt_tps=3800.0,
+            stage="prefill",
+            source="slots",
+        )
+        self.assertEqual(sample_tps_for_history(live), 0.0)
 
     def test_sample_tps_uses_gen_rate_during_generation(self) -> None:
-        live = LiveThroughput(gen_tps=42.0, prompt_tps=0.0, phase="generating", source="slots")
+        live = LiveThroughput(gen_tps=42.0, prompt_tps=0.0, stage="generating", source="slots")
         self.assertAlmostEqual(sample_tps_for_history(live), 42.0)
 
     def test_phase_hold_prevents_idle_flicker(self) -> None:
@@ -172,19 +183,25 @@ class ThroughputHistoryTests(unittest.TestCase):
         ]
 
         live_busy = reader.update(metrics_busy, slots_prefill)
-        self.assertEqual(live_busy.phase, "prompt")
+        self.assertEqual(live_busy.stage, "prefill")
 
         live_idle = reader.update(metrics_idle, [])
-        self.assertEqual(live_idle.phase, "prompt")
+        self.assertEqual(live_idle.stage, "prefill")
 
-    def test_history_rolling_average_includes_zeros(self) -> None:
+    def test_format_avg_line_ignores_idle_samples(self) -> None:
+        self.assertIsNone(format_avg_line([0.0, 0.0], 0.5))
+        line = format_avg_line([0.0, 20.0, 0.0, 40.0], 0.5)
+        assert line is not None
+        self.assertIn("avg 15.0 tok/s", line.plain)
+        self.assertIn("2s rolling", line.plain)
+
+    def test_history_average_includes_zeros(self) -> None:
         history = ThroughputHistory(max_samples=10)
         history.push(0.0)
         history.push(20.0)
         history.push(0.0)
         history.push(40.0)
-        self.assertAlmostEqual(history.rolling_average, 15.0)
-        self.assertTrue(history.has_activity)
+        self.assertAlmostEqual(history.average, 15.0)
 
     def test_summarize_slots_aggregates_processing_slots(self) -> None:
         slots = [
@@ -209,6 +226,117 @@ class ThroughputHistoryTests(unittest.TestCase):
         self.assertTrue(snap.is_processing)
         self.assertEqual(snap.n_prompt_processed, 15)
         self.assertEqual(snap.n_decoded, 5)
+        self.assertEqual(snap.n_prompt_cache, 0)
+
+    def test_summarize_slots_reads_cache_tokens(self) -> None:
+        slots = [
+            {
+                "is_processing": True,
+                "n_prompt_tokens": 4096,
+                "n_prompt_tokens_processed": 200,
+                "n_prompt_tokens_cache": 1200,
+                "next_token": [{"n_decoded": 0}],
+            }
+        ]
+        snap = summarize_slots(slots)
+        assert snap is not None
+        self.assertEqual(snap.n_prompt_cache, 1200)
+        self.assertEqual(snap.n_prompt_total, 4096)
+        self.assertTrue(snap.in_prefill)
+
+    def test_deferred_without_processing_is_queued(self) -> None:
+        metrics = Metrics(requests_processing=0, requests_deferred=2)
+        live, _, _ = compute_live_tps(metrics, [])
+        self.assertEqual(live.stage, "queued")
+        self.assertEqual(live.requests_deferred, 2)
+
+    def test_prefill_with_cache_keeps_prefill_stage(self) -> None:
+        metrics = Metrics(requests_processing=1)
+        slots = [
+            {
+                "is_processing": True,
+                "n_prompt_tokens": 4096,
+                "n_prompt_tokens_processed": 2431,
+                "n_prompt_tokens_cache": 1200,
+                "next_token": [{"n_decoded": 0}],
+            }
+        ]
+        live, _, _ = compute_live_tps(metrics, slots)
+        self.assertEqual(live.stage, "prefill")
+        self.assertEqual(live.n_prompt_cache, 1200)
+        self.assertEqual(live.n_prompt_processed, 2431)
+        self.assertEqual(live.n_prompt_total, 4096)
+
+    def test_stage_strip_highlights_prefill_and_cache(self) -> None:
+        live = LiveThroughput(
+            stage="prefill",
+            n_prompt_cache=1200,
+            n_prompt_processed=2431,
+            n_prompt_total=4096,
+            source="slots",
+        )
+        rendered = render_text(render_stage_strip(live))
+        self.assertIn("PREFILL", rendered)
+        self.assertIn("CACHE", rendered)
+        self.assertIn("idle", rendered)
+        self.assertNotIn("IDLE", rendered)
+        self.assertNotIn("GENERATE", rendered)
+
+    def test_stage_strip_lights_queue_while_generating(self) -> None:
+        live = LiveThroughput(stage="generating", requests_deferred=1, source="slots")
+        rendered = render_text(render_stage_strip(live))
+        self.assertIn("QUEUE", rendered)
+        self.assertIn("GENERATE", rendered)
+        self.assertNotIn("PREFILL", rendered)
+
+    def test_prefill_progress_includes_cache(self) -> None:
+        live = LiveThroughput(
+            stage="prefill",
+            prompt_tps=3800.0,
+            n_prompt_processed=2431,
+            n_prompt_total=4096,
+            n_prompt_cache=1200,
+            source="slots",
+        )
+        rendered = render_text(render_prefill_progress(live))
+        self.assertIn("3,631/4,096", rendered)
+        self.assertIn("cache 1,200", rendered)
+        self.assertIn("3.8k t/s", rendered)
+        self.assertTrue(any(ch in rendered for ch in "█░"))
+
+    def test_format_last_request_recap(self) -> None:
+        line = format_last_request(
+            LastRequest(prompt_tokens=4096, cache_tokens=1200, gen_tokens=142, gen_tps=41.2)
+        )
+        assert line is not None
+        self.assertIn("last: 4,096 prompt (1,200 cache) · 142 gen @ 41 t/s", line.plain)
+
+    def test_throughput_reader_freezes_last_request(self) -> None:
+        reader = ThroughputReader()
+        reader.PHASE_HOLD_S = 0.0
+        busy = Metrics(requests_processing=1)
+        idle = Metrics(requests_processing=0)
+        slots = [
+            {
+                "is_processing": True,
+                "n_prompt_tokens": 4096,
+                "n_prompt_tokens_processed": 2896,
+                "n_prompt_tokens_cache": 1200,
+                "next_token": [{"n_decoded": 142}],
+                "tg_tps": 41.0,
+            }
+        ]
+        live_busy = reader.update(busy, slots)
+        self.assertEqual(live_busy.stage, "generating")
+        self.assertIsNone(live_busy.last_request)
+
+        live_idle = reader.update(idle, [])
+        self.assertEqual(live_idle.stage, "idle")
+        assert live_idle.last_request is not None
+        self.assertEqual(live_idle.last_request.prompt_tokens, 4096)
+        self.assertEqual(live_idle.last_request.cache_tokens, 1200)
+        self.assertEqual(live_idle.last_request.gen_tokens, 142)
+        self.assertAlmostEqual(live_idle.last_request.gen_tps, 41.0)
 
     def test_throughput_reader_tracks_state(self) -> None:
         reader = ThroughputReader()

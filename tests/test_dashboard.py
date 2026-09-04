@@ -18,7 +18,7 @@ from tui.app import (
 from tui.data.gpu import GPUStats
 from tui.data.pidfile import PidInfo
 from tui.data.stats import Metrics
-from tui.data.throughput_history import LiveThroughput
+from tui.data.throughput_history import LastRequest, LiveThroughput
 
 
 def render_text(renderable) -> str:
@@ -45,29 +45,55 @@ class DashboardTests(unittest.TestCase):
             gen_tps=49.5,
             prompt_tps=120.5,
             source="metrics_gauge",
-            phase="generating",
+            stage="generating",
         )
 
         rendered = render_text(panel.render())
 
-        self.assertIn("3,732 gen / 59,916 prompt tokens", rendered)
-        self.assertIn("49.5 tok/s generation", rendered)
-        self.assertIn("1 active", rendered)
+        self.assertIn("GENERATE", rendered)
+        self.assertIn("49.5 t/s generation", rendered)
+        self.assertNotIn("59,916 prompt tokens", rendered)
 
     def test_status_panel_shows_prefill_phase(self) -> None:
         panel = StatusPanel()
         panel.metrics = Metrics(requests_processing=1, prompt_tokens_seconds=80.0)
         panel.live_throughput = LiveThroughput(
             gen_tps=0.0,
-            prompt_tps=80.0,
+            prompt_tps=3800.0,
             source="slots",
-            phase="prompt",
+            stage="prefill",
+            n_prompt_processed=2431,
+            n_prompt_total=4096,
+            n_prompt_cache=1200,
         )
 
         rendered = render_text(panel.render())
 
-        self.assertIn("[PREFILL]", rendered)
-        self.assertIn("80.0 tok/s prefill", rendered)
+        self.assertIn("PREFILL", rendered)
+        self.assertIn("CACHE", rendered)
+        self.assertIn("3,631/4,096", rendered)
+        self.assertIn("3.8k t/s", rendered)
+        self.assertIn("waiting on generate", rendered)
+        self.assertNotIn("3800", rendered)
+
+    def test_status_panel_shows_last_request_when_idle(self) -> None:
+        panel = StatusPanel()
+        panel.metrics = Metrics()
+        panel.live_throughput = LiveThroughput(
+            stage="idle",
+            last_request=LastRequest(
+                prompt_tokens=4096,
+                cache_tokens=1200,
+                gen_tokens=142,
+                gen_tps=41.0,
+            ),
+        )
+
+        rendered = render_text(panel.render())
+        collapsed = " ".join(rendered.split())
+
+        self.assertIn("IDLE queue cache prefill generate", collapsed)
+        self.assertIn("last: 4,096 prompt (1,200 cache) · 142 gen @ 41 t/s", collapsed)
 
     def test_status_panel_prefers_friendly_model_name(self) -> None:
         panel = StatusPanel()

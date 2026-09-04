@@ -96,7 +96,11 @@ from tui.data.throughput_history import (
     SPARKLINE_WIDTH,
     ThroughputHistory,
     ThroughputReader,
+    format_avg_line,
+    format_last_request,
     live_tps_from_metrics,
+    render_prefill_progress,
+    render_stage_strip,
     render_tps_sparkline,
     sample_tps_for_history,
 )
@@ -634,56 +638,35 @@ class StatusPanel(Static):
         if m:
             live = self.live_throughput or live_tps_from_metrics(m)
             gen = live.gen_tps
-            prompt = live.prompt_tps
             history = self.gen_tps_history
-            speed = Text()
-            if live.phase == "prompt":
-                prompt_label, prompt_style = generation_health(prompt)
-                speed.append(f"{prompt:.1f} tok/s", style="bold cyan")
-                speed.append(" prefill ", style="dim")
-                speed.append(prompt_label, style=prompt_style)
-                speed.append("  [PREFILL]", style="bold magenta")
-                if gen > 0:
-                    speed.append("  •  ", style="dim")
-                    speed.append(f"{gen:.1f} gen", style="dim")
-            else:
+            throughput.append(render_stage_strip(live))
+            if live.stage == "prefill":
+                throughput.append(render_prefill_progress(live))
+            elif live.stage == "generating":
                 gen_label, gen_style = generation_health(gen)
-                speed.append(f"{gen:.1f} tok/s", style=gen_style)
-                speed.append(" generation ", style="dim")
+                speed = Text()
+                speed.append(f"{gen:.1f} t/s", style=gen_style)
+                speed.append(" generation  ", style="dim")
                 speed.append(gen_label, style=gen_style)
-                if prompt > 0:
-                    speed.append("  •  ", style="dim")
-                    speed.append(f"{prompt:.1f} prompt", style="bold cyan")
-            avg_line = Text()
-            if history and any(s > 0 for s in history):
-                avg = sum(history) / len(history)
-                window_s = len(history) * METRICS_POLL_INTERVAL
-                avg_line.append(f"avg {avg:.1f} tok/s", style="bold cyan")
-                avg_line.append(f"  ({window_s:.0f}s rolling)", style="dim")
-            latency = Text(
-                f"{(1000.0 / gen):.1f} ms/token" if gen > 0 else "latency unavailable"
+                if gen > 0:
+                    speed.append(f"  {(1000.0 / gen):.1f} ms/token", style="dim")
+                throughput.append(speed)
+            elif live.stage == "queued":
+                throughput.append(Text("waiting for a free slot", style="bold yellow"))
+            else:
+                recap = format_last_request(live.last_request)
+                throughput.append(recap if recap is not None else Text("idle", style="dim"))
+            throughput.append(
+                render_tps_sparkline(history, width=SPARKLINE_WIDTH)
+                if history
+                else Text(" " * SPARKLINE_WIDTH, style="dim", no_wrap=True)
             )
-            if live.phase == "prompt" and prompt > 0:
-                latency = Text(f"{(1000.0 / prompt):.1f} ms/prompt token")
-            throughput.extend(
-                [
-                    speed,
-                    latency,
-                    render_tps_sparkline(history, width=SPARKLINE_WIDTH)
-                    if history
-                    else Text(" " * SPARKLINE_WIDTH, style="dim", no_wrap=True),
-                    avg_line if (history and any(s > 0 for s in history)) else Text("avg —", style="dim"),
-                    Text(
-                        f"{int(m.requests_processing)} active  •  "
-                        f"{int(m.requests_deferred)} queued"
-                    ),
-                    Text(
-                        f"{int(m.tokens_predicted_total):,} gen / "
-                        f"{int(m.prompt_tokens_total):,} prompt tokens",
-                        style="dim",
-                    ),
-                ]
-            )
+            avg_line = format_avg_line(history, METRICS_POLL_INTERVAL)
+            if avg_line is None:
+                avg_line = Text("avg —", style="dim")
+                if live.stage == "prefill":
+                    avg_line.append("  (waiting on generate)", style="dim")
+            throughput.append(avg_line)
         else:
             throughput.append(
                 Text("Metrics unavailable", style="dim")
@@ -1303,7 +1286,7 @@ class LLMServeApp(App):
     }
     #right { layout: vertical; }
     #status {
-        height: 11;
+        height: 13;
         min-height: 9;
         border-bottom: solid $secondary;
         padding: 0 1;
