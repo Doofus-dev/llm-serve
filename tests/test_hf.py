@@ -144,10 +144,27 @@ class SettingsTests(unittest.TestCase):
             loaded = load_settings(path)
             self.assertEqual(loaded.theme, "gruvbox")
             self.assertEqual(loaded.hf_authors, ["bartowski"])
+            self.assertEqual(loaded.log_verbosity, 4)
 
             self.assertTrue(remember_hf_author(loaded, "unsloth"))
             self.assertFalse(remember_hf_author(loaded, "unsloth"))
             self.assertEqual(loaded.hf_authors, ["bartowski", "unsloth"])
+
+    def test_log_verbosity_round_trip_and_cycle(self) -> None:
+        from tui.data.settings import cycle_log_verbosity, DEFAULT_LOG_VERBOSITY
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tui-settings.json"
+            settings = TUISettings(log_verbosity=5)
+            save_settings(path, settings)
+            loaded = load_settings(path)
+            self.assertEqual(loaded.log_verbosity, 5)
+
+        self.assertEqual(DEFAULT_LOG_VERBOSITY, 4)
+        self.assertEqual(cycle_log_verbosity(3), 4)
+        self.assertEqual(cycle_log_verbosity(4), 5)
+        self.assertEqual(cycle_log_verbosity(5), 3)
+        self.assertEqual(cycle_log_verbosity(99), 4)
 
 
 class ModelJsonTests(unittest.TestCase):

@@ -425,6 +425,7 @@ MODEL_FILE="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" '
 [[ -z "$MODEL_FILE" ]] && die "quant '${ACTIVE_QUANT}' for '${REQUESTED}' does not exist."
 MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/${MODEL_FILE}}"
 
+LOG_VERBOSITY="${LOG_VERBOSITY:-4}"
 HOST="${HOST:-$(m_get "${MODEL}" host 127.0.0.1)}"
 PORT="${PORT:-$(m_get "${MODEL}" port 8081)}"
 CONTEXT_SIZE="${CONTEXT_SIZE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ctx 65536)}"
@@ -570,6 +571,9 @@ _append_server_arg SERVER_ARGS --reasoning-budget "${REASONING_BUDGET}"
 # Metrics endpoint
 _append_server_bool SERVER_ARGS --metrics --no-metrics "${METRICS}"
 
+# llama.cpp log verbosity: 3=info 4=trace 5=debug
+_append_server_arg SERVER_ARGS -lv "${LOG_VERBOSITY}"
+
 case "${THINKING}" in
     off) SERVER_ARGS+=(--reasoning off) ;;
     on)  SERVER_ARGS+=(--reasoning on) ;;
@@ -600,6 +604,7 @@ fi
 [[ -n "${UBATCH}" ]]       && echo "  UBatch:       ${UBATCH}"
 [[ -n "${N_PREDICT}" ]]    && echo "  Max response: ${N_PREDICT} tokens"
 echo "  Sampling:     temp=${TEMP} top_p=${TOP_P} top_k=${TOP_K} seed=${SEED}"
+echo "  Log level:    ${LOG_VERBOSITY}  (3=info  4=trace  5=debug)"
 if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
     echo "  Checkpoints:  min-step=${CHECKPOINT_EVERY} tokens"
 else

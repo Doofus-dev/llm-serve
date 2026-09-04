@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import time
 from datetime import timedelta
@@ -77,7 +78,12 @@ from tui.data.presets import (
     next_free_slot,
     list_presets_for_quant,
 )
-from tui.data.settings import load_settings, save_settings
+from tui.data.settings import (
+    load_settings,
+    save_settings,
+    cycle_log_verbosity,
+    log_verbosity_label,
+)
 from tui.screens.hub import HubScreen
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.data.downloads import DownloadManager, DownloadJob
@@ -101,6 +107,7 @@ from tui.data.throughput_history import (
     render_tps_sparkline,
     sample_tps_for_history,
 )
+from tui.data.server_log import LogEvent, LogTailer, render_event
 
 METRICS_POLL_INTERVAL = 0.5
 METRICS_HISTORY_SAMPLES = 120  # ~60s window at 0.5s polling
@@ -533,6 +540,7 @@ class StatusPanel(Static):
     model_display: reactive[str | None] = reactive(None)
     preset_display: reactive[str | None] = reactive(None)
     next_remote: reactive[bool] = reactive(False)
+    next_log_verbosity: reactive[int] = reactive(4)
     metrics: reactive[Metrics | None] = reactive(None)
     live_throughput: reactive[LiveThroughput | None] = reactive(None)
     gen_tps_history: reactive[list[float]] = reactive([])
@@ -558,6 +566,7 @@ class StatusPanel(Static):
             launch_flag.append("[REMOTE]", style="bold magenta")
         else:
             launch_flag.append("[LOCAL]", style="bold green")
+        launch_flag.append(f"  [LOG {log_verbosity_label(self.next_log_verbosity)}]", style="bold cyan")
 
         header = Table.grid(expand=True)
         header.add_column(ratio=1)
@@ -772,20 +781,76 @@ class ConfigPanel(Static):
             return Group(title, Text("Select a model in the tree", style="dim"))
 
 
-class LogPanel(RichLog):
-    """Tail of logs/llm-serve.log."""
+MAX_LOG_EVENTS = 200
 
-    def tail_file(self, path: Path, n: int = 200) -> None:
-        if not path.exists():
-            self.write("[dim]no log file yet[/]")
-            return
+
+class LogPanel(RichLog):
+    """Translated llama.cpp events plus consecutive-run counters for leftover lines."""
+
+    def __init__(self, **kwargs):
+        super().__init__(markup=True, wrap=True, highlight=False, max_lines=400, **kwargs)
+        self._tailer = LogTailer()
+        self._events: list[LogEvent] = []
+        self._show_raw = False
+        self._empty_shown = False
+
+    def poll_file(self, path: Path) -> None:
         try:
-            out = subprocess.run(["tail", "-n", str(n), str(path)],
-                                 capture_output=True, text=True, timeout=5).stdout
+            exists = path.exists()
+            new_events, full_reload = self._tailer.poll(path)
+        except OSError as e:
+            self._tailer.reset()
+            self._events.clear()
             self.clear()
-            self.write(out.rstrip())
-        except Exception as e:
             self.write(f"[$error]log read error: {e}[/]")
+            self._empty_shown = False
+            return
+
+        if not exists:
+            if not self._empty_shown:
+                self.clear()
+                self._events.clear()
+                self.write("[dim]no log file yet[/]")
+                self._empty_shown = True
+            return
+
+        if full_reload:
+            self._events = list(new_events[-MAX_LOG_EVENTS:])
+            self._rerender()
+            return
+
+        if not new_events:
+            if not self._events and not self._empty_shown:
+                self._show_empty()
+            return
+
+        for event in new_events:
+            if event.replace_last and self._events:
+                self._events[-1] = event
+            else:
+                self._events.append(event)
+        if len(self._events) > MAX_LOG_EVENTS:
+            self._events = self._events[-MAX_LOG_EVENTS:]
+        self._rerender()
+
+    def _show_empty(self) -> None:
+        self.clear()
+        self.write("[dim]no events yet — press L to launch[/]")
+        self._empty_shown = True
+
+    def _rerender(self) -> None:
+        self.clear()
+        if not self._events:
+            self._show_empty()
+            return
+        self._empty_shown = False
+        for event in self._events:
+            self.write(render_event(event, show_raw=self._show_raw))
+
+    def toggle_raw(self) -> bool:
+        self._show_raw = not self._show_raw
+        self._rerender()
+        return self._show_raw
 
 
 class ConfirmDialog(ModalScreen[bool]):
@@ -1098,9 +1163,10 @@ class LLMServeApp(App):
         layout: vertical;
     }
 
-    #main { height: 1fr; }
+    #main { height: 1fr; width: 1fr; }
     #left {
         width: 40;
+        height: 1fr;
         border-right: solid $primary;
         background: $surface-darken-1;
     }
@@ -1146,7 +1212,7 @@ class LLMServeApp(App):
         color: $foreground;
         text-style: none;
     }
-    #right { layout: vertical; }
+    #right { layout: vertical; height: 1fr; width: 1fr; }
     #status {
         height: 13;
         min-height: 9;
@@ -1161,7 +1227,9 @@ class LLMServeApp(App):
     #logs {
         height: 10;
         min-height: 6;
+        width: 1fr;
         border-top: solid $secondary;
+        padding: 0 1;
     }
     #editor-scroll { height: 1fr; padding: 0 1; }
     #editor-scroll > Label {
@@ -1344,11 +1412,13 @@ class LLMServeApp(App):
         Binding("h", "open_hub", "Hub"),
         Binding("p", "pick_quant", "Quant"),
         Binding("r", "toggle_remote", "Remote OFF"),
+        Binding("v", "cycle_log_verbosity", "Log TRACE"),
         Binding("1", "activate_preset(1)", "Preset 1", show=False),
         Binding("2", "activate_preset(2)", "Preset 2", show=False),
         Binding("3", "activate_preset(3)", "Preset 3", show=False),
         Binding("4", "activate_preset(4)", "Preset 4", show=False),
         Binding("5", "activate_preset(5)", "Preset 5", show=False),
+        Binding("o", "toggle_log_source", "Original"),
         Binding("f1", "help", "Help"),
     ]
 
@@ -1360,8 +1430,8 @@ class LLMServeApp(App):
         self.download_manager = DownloadManager()
         self.client: ServerClient | None = None
         self.remote_launch: bool = False
+        self.log_verbosity: int = self.settings.log_verbosity
         self._launch_time: float | None = None
-        self._log_size: int = 0
         self._editor_mode: bool = False
         self._editor_widget: ProfileEditor | PresetEditor | None = None
         self._help_panel: ParamHelpPanel | None = None
@@ -1383,7 +1453,7 @@ class LLMServeApp(App):
                 with Vertical(id="right"):
                     yield StatusPanel(id="status")
                     yield ConfigPanel(id="config")
-                    yield LogPanel(id="logs")
+            yield LogPanel(id="logs")
         yield Footer()
 
     def _update_footer(self) -> None:
@@ -1408,11 +1478,17 @@ class LLMServeApp(App):
                     "toggle_remote",
                     "Remote ON" if self.remote_launch else "Remote OFF",
                 ),
+                Binding(
+                    "v",
+                    "cycle_log_verbosity",
+                    f"Log {log_verbosity_label(self.log_verbosity)}",
+                ),
                 Binding("1", "activate_preset(1)", "Preset 1", show=False),
                 Binding("2", "activate_preset(2)", "Preset 2", show=False),
                 Binding("3", "activate_preset(3)", "Preset 3", show=False),
                 Binding("4", "activate_preset(4)", "Preset 4", show=False),
                 Binding("5", "activate_preset(5)", "Preset 5", show=False),
+                Binding("o", "toggle_log_source", self._original_log_label()),
                 Binding("f1", "help", "Help"),
             ]
         self.query_one(Footer).refresh()
@@ -1433,7 +1509,8 @@ class LLMServeApp(App):
         self.set_interval(METRICS_POLL_INTERVAL, self._poll_metrics)
         self.set_interval(5.0, self._poll_gpu)
         self.set_interval(3.0, self._poll_log)
-        self.query_one(LogPanel).tail_file(LOG_FILE)
+        self.query_one(LogPanel).poll_file(LOG_FILE)
+        self.query_one(StatusPanel).next_log_verbosity = self.log_verbosity
         self._update_footer()
         self.download_manager.subscribe(self._on_download_state)
         self._reload_registry(notify_gguf=True)
@@ -1685,13 +1762,7 @@ class LLMServeApp(App):
             pass
 
     def _poll_log(self) -> None:
-        try:
-            size = LOG_FILE.stat().st_size
-        except OSError:
-            return
-        if size != self._log_size:
-            self._log_size = size
-            self.query_one(LogPanel).tail_file(LOG_FILE)
+        self.query_one(LogPanel).poll_file(LOG_FILE)
 
     def _effective_model_params(self, model_name: str) -> dict | None:
         if model_name not in self.registry.models:
@@ -1875,12 +1946,15 @@ class LLMServeApp(App):
             command = [str(REPO_ROOT / "llm-serve"), launch_name]
             if self.remote_launch:
                 command.append("--remote")
+            env = os.environ.copy()
+            env["LOG_VERBOSITY"] = str(self.log_verbosity)
             r = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 timeout=60,
                 cwd=REPO_ROOT,
+                env=env,
             )
             if r.returncode == 0:
                 self.notify(f"Launched {launch_name}")
@@ -1892,10 +1966,33 @@ class LLMServeApp(App):
             self.notify(f"Launch error: {e}", severity="error")
         self._refresh_pid()
 
+    def _original_log_label(self) -> str:
+        try:
+            showing = self.query_one(LogPanel)._show_raw
+        except Exception:
+            showing = False
+        return "Original ON" if showing else "Original"
+
+    def action_toggle_log_source(self) -> None:
+        if self._editor_mode:
+            return
+        self.query_one(LogPanel).toggle_raw()
+        self._update_footer()
+
     def action_toggle_remote(self) -> None:
         """Toggle Meshnet/LAN binding for the next launch."""
         self.remote_launch = not self.remote_launch
         self.query_one(StatusPanel).next_remote = self.remote_launch
+        self._update_footer()
+
+    def action_cycle_log_verbosity(self) -> None:
+        """Cycle llama.cpp log verbosity for the next launch (info/trace/debug)."""
+        if self._editor_mode:
+            return
+        self.log_verbosity = cycle_log_verbosity(self.log_verbosity)
+        self.settings.log_verbosity = self.log_verbosity
+        save_settings(TUI_SETTINGS_JSON, self.settings)
+        self.query_one(StatusPanel).next_log_verbosity = self.log_verbosity
         self._update_footer()
 
     def action_stop(self) -> None:
@@ -2284,7 +2381,7 @@ class LLMServeApp(App):
 
     def action_help(self) -> None:
         self.notify(
-            "Tab: switch pane | ↑↓: navigate | P/Enter: quant | L: launch | S: stop | E: edit | N: new preset | D: delete | A: apply preset | H: Hub | T: theme | Q: quit",
+            "Tab: switch pane | ↑↓: navigate | P/Enter: quant | L: launch | S: stop | E: edit | N: new preset | D: delete | A: apply preset | H: Hub | V: log level | O: original log | T: theme | Q: quit",
             title="Help",
             timeout=10,
         )

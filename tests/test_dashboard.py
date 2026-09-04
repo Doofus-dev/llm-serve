@@ -152,11 +152,14 @@ class DashboardTests(unittest.TestCase):
 
     def test_status_panel_shows_next_launch_remote_toggle(self) -> None:
         panel = StatusPanel()
-        self.assertIn("NEXT LAUNCH [LOCAL]", render_text(panel.render()))
+        self.assertIn("NEXT LAUNCH [LOCAL]  [LOG TRACE]", render_text(panel.render()))
 
         panel.next_remote = True
+        panel.next_log_verbosity = 3
 
-        self.assertIn("NEXT LAUNCH [REMOTE]", render_text(panel.render()))
+        rendered = render_text(panel.render())
+        self.assertIn("NEXT LAUNCH [REMOTE]", rendered)
+        self.assertIn("[LOG INFO]", rendered)
 
 
 if __name__ == "__main__":
