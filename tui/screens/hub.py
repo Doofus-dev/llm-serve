@@ -10,6 +10,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import QueryError
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
@@ -37,11 +38,17 @@ from tui.data.gguf import read_gguf_architecture
 from tui.data.models_json import (
     Registry,
     create_downloaded_model,
+    downloaded_repo_ids,
     find_model_by_repo,
     load_registry,
 )
 from tui.data.quant import family_display
-from tui.data.quant_table import build_quant_file_rows
+from tui.data.quant_table import (
+    QuantFileRow,
+    build_quant_file_rows,
+    fmt_downloaded_cell,
+    quant_file_row_cells,
+)
 from tui.data.settings import TUISettings, remember_hf_author, save_settings
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.vram import fmt_memory_mb
@@ -298,6 +305,7 @@ class HubScreen(Screen):
         self.auth_status = AuthStatus(logged_in=False)
         self.repos: list[HubRepo] = []
         self.files: list[HubFile] = []
+        self._rows: list[QuantFileRow] = []
         self.selected_repo: HubRepo | None = None
         self.mode = "repos"
         self._downloading = False
@@ -351,7 +359,7 @@ class HubScreen(Screen):
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
-                "Act. after a local run · "
+                "● on disk · — download on select · Act. after a local run · "
                 "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="hub-help",
             )
@@ -371,7 +379,10 @@ class HubScreen(Screen):
         select.set_options(options)
 
     def _set_status(self, message: str) -> None:
-        self.query_one("#hub-status", Static).update(message)
+        try:
+            self.query_one("#hub-status", Static).update(message)
+        except QueryError:
+            pass
 
     def _set_status_if_mounted(self, message: str) -> None:
         """Update Hub status only while this screen is still in the DOM."""
@@ -476,16 +487,30 @@ class HubScreen(Screen):
         if self.mode == "files":
             self._render_file_table()
 
+    def _refresh_visible_table(self) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            if self.mode == "files":
+                self._render_file_table()
+            else:
+                self._render_repo_table()
+        except QueryError:
+            pass
+
     def _render_repo_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
+        table.add_column("Disk", width=4, key="disk")
         table.add_column("Repo / author", width=34, key="repo")
         table.add_column("Context", width=9, key="context")
         table.add_column("Size", width=11, key="size")
         table.add_column("Downloads", width=12, key="downloads")
+        on_disk = downloaded_repo_ids(self.registry, self.models_dir)
         for repo in self.repos:
             ctx = self._fmt_context(repo.context_length) if repo.context_length else "?"
             table.add_row(
+                fmt_downloaded_cell(repo.id in on_disk),
                 repo.id,
                 ctx,
                 fmt_size(repo.size),
@@ -496,13 +521,14 @@ class HubScreen(Screen):
     def _render_file_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
+        table.add_column("Disk", width=4, key="disk")
         table.add_column("Quant / file", width=24, key="file")
         table.add_column("File size", width=9, key="size")
         table.add_column("Est. VRAM", width=16, key="vram")
         table.add_column("Act. VRAM", width=9, key="act_vram")
         table.add_column("Est. t/s", width=9, key="speed")
         table.add_column("Act. t/s", width=8, key="act_speed")
-        rows = build_quant_file_rows(
+        self._rows = build_quant_file_rows(
             self.files,
             gpu=self.gpu,
             context_tokens=self.context_tokens,
@@ -511,16 +537,8 @@ class HubScreen(Screen):
             models_dir=self.models_dir,
             author=self.selected_repo.author if self.selected_repo else "",
         )
-        for row in rows:
-            table.add_row(
-                row.path,
-                fmt_size(row.size),
-                row.vram_cell,
-                row.act_vram,
-                row.est_tps,
-                row.act_tps,
-                key=row.path,
-            )
+        for row in self._rows:
+            table.add_row(*quant_file_row_cells(row), key=row.path)
 
     def _log(self, message: str) -> None:
         if self._downloading:
@@ -638,15 +656,20 @@ class HubScreen(Screen):
 
         self.app.push_screen(HFLoginDialog(), handle_result)
 
+    def _selected_row_key(self) -> str | None:
+        table = self.query_one("#hub-table", DataTable)
+        if table.cursor_row is None or table.row_count == 0:
+            return None
+        return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+
     def _handle_select(self) -> None:
         if self._downloading:
             self.notify("A download is already running", severity="warning")
             return
-        table = self.query_one("#hub-table", DataTable)
-        if table.cursor_row is None:
+        row_key = self._selected_row_key()
+        if row_key is None:
             self.notify("Select a row first", severity="warning")
             return
-        row_key = table.get_row_at(table.cursor_row)[0]
         if self.mode == "repos":
             repo = next((r for r in self.repos if r.id == row_key), None)
             if repo is None:
@@ -658,7 +681,11 @@ class HubScreen(Screen):
         if not self.selected_repo:
             self.notify("No repo selected", severity="error")
             return
-        filename = str(row_key)
+        filename = row_key
+        picked = next((row for row in self._rows if row.path == filename), None)
+        if picked and picked.downloaded:
+            self.notify(f"{filename} is already on disk")
+            return
         existing = find_model_by_repo(self.registry, self.selected_repo.id)
         if existing:
             cfg = self.registry.models[existing]
@@ -701,6 +728,7 @@ class HubScreen(Screen):
                 self._set_status_if_mounted(
                     f"[bold $success]Registered[/] {filename}"
                 )
+                self._refresh_visible_table()
                 if self.on_complete:
                     self.on_complete()
 
@@ -831,6 +859,7 @@ class HubScreen(Screen):
             self._set_status(
                 f"[bold $success]Registered {profile_name}[/]  file={plan.relative_file}{extra}"
             )
+            self._refresh_visible_table()
             if self.on_complete:
                 self.on_complete()
         except Exception as exc:

@@ -15,7 +15,7 @@ from tui.data.context_length import context_length_options, fmt_ctx_compact, res
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.hf import HubFile, list_repo_ggufs
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
-from tui.data.quant_table import QuantFileRow, build_quant_file_rows, fmt_downloaded, fmt_size
+from tui.data.quant_table import QuantFileRow, build_quant_file_rows, quant_file_row_cells
 from tui.data.vram import fmt_memory_mb
 
 
@@ -236,17 +236,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         active = self.cfg.active_quant
         cursor_row = 0
         for idx, row in enumerate(self._rows):
-            disk = fmt_downloaded(row.downloaded)
-            if row.downloaded:
-                disk = f"[green]{disk}[/]"
             table.add_row(
-                disk,
-                row.path,
-                fmt_size(row.size),
-                row.vram_cell,
-                row.act_vram,
-                row.est_tps,
-                row.act_tps,
+                *quant_file_row_cells(row),
                 # Repos may contain multiple files with the same inferred
                 # quant (for example the main Q8_0 and an MTP Q8_0 draft).
                 # The path is the unique identity of a selectable row.

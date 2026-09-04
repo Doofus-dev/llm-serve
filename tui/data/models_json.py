@@ -337,6 +337,16 @@ def find_model_by_repo(reg: Registry, repo_id: str) -> str | None:
     return None
 
 
+def downloaded_repo_ids(reg: Registry, models_dir: Path) -> set[str]:
+    """Hub repo ids that have at least one GGUF present on disk."""
+    ids: set[str] = set()
+    for cfg in reg.models.values():
+        repo = _repo_id(cfg.params)
+        if repo and model_file_paths(cfg, models_dir):
+            ids.add(repo)
+    return ids
+
+
 def get_quant_entries(cfg: ModelConfig, models_dir: Path) -> list[QuantEntry]:
     quants = cfg.params.get("quants") or {}
     entries: list[QuantEntry] = []

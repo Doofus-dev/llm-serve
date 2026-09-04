@@ -110,10 +110,30 @@ def fmt_downloaded(downloaded: bool) -> str:
     return "●" if downloaded else "—"
 
 
+def fmt_downloaded_cell(downloaded: bool) -> str:
+    mark = fmt_downloaded(downloaded)
+    return f"[green]{mark}[/]" if downloaded else mark
+
+
+def quant_file_row_cells(row: QuantFileRow) -> tuple:
+    """Cell values for the shared Disk + estimate file table."""
+    return (
+        fmt_downloaded_cell(row.downloaded),
+        row.path,
+        fmt_size(row.size),
+        row.vram_cell,
+        row.act_vram,
+        row.est_tps,
+        row.act_tps,
+    )
+
+
 __all__ = [
     "QuantFileRow",
     "build_quant_file_rows",
     "fmt_downloaded",
+    "fmt_downloaded_cell",
     "fmt_size",
     "local_file_size",
+    "quant_file_row_cells",
 ]
