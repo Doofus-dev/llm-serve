@@ -91,6 +91,18 @@ from tui.data.gguf import apply_architecture_from_gguf
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.pidfile import PidInfo, read_pid_file
 from tui.data.stats import Metrics, ServerClient
+from tui.data.throughput_history import (
+    LiveThroughput,
+    SPARKLINE_WIDTH,
+    ThroughputHistory,
+    ThroughputReader,
+    live_tps_from_metrics,
+    render_tps_sparkline,
+    sample_tps_for_history,
+)
+
+METRICS_POLL_INTERVAL = 0.5
+METRICS_HISTORY_SAMPLES = 120  # ~60s window at 0.5s polling
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODELS_JSON = REPO_ROOT / "models.json"
@@ -572,6 +584,8 @@ class StatusPanel(Static):
     preset_display: reactive[str | None] = reactive(None)
     next_remote: reactive[bool] = reactive(False)
     metrics: reactive[Metrics | None] = reactive(None)
+    live_throughput: reactive[LiveThroughput | None] = reactive(None)
+    gen_tps_history: reactive[list[float]] = reactive([])
     gpu: reactive[GPUStats | None] = reactive(None)
     props: reactive[dict | None] = reactive(None)
     uptime: reactive[float] = reactive(0.0)
@@ -618,24 +632,47 @@ class StatusPanel(Static):
         throughput: list[Text] = []
         m = self.metrics
         if m:
-            gen = m.predicted_tokens_seconds or m.gen_tps_derived
-            prompt = m.prompt_tokens_seconds or m.prompt_tps_derived
-            gen_label, gen_style = generation_health(gen)
+            live = self.live_throughput or live_tps_from_metrics(m)
+            gen = live.gen_tps
+            prompt = live.prompt_tps
+            history = self.gen_tps_history
             speed = Text()
-            speed.append(f"{gen:.1f} tok/s", style=gen_style)
-            speed.append(" generation ", style="dim")
-            speed.append(gen_label, style=gen_style)
-            speed.append("  •  ", style="dim")
-            speed.append(f"{prompt:.1f}", style="bold cyan")
-            speed.append(" prompt", style="dim")
+            if live.phase == "prompt":
+                prompt_label, prompt_style = generation_health(prompt)
+                speed.append(f"{prompt:.1f} tok/s", style="bold cyan")
+                speed.append(" prefill ", style="dim")
+                speed.append(prompt_label, style=prompt_style)
+                speed.append("  [PREFILL]", style="bold magenta")
+                if gen > 0:
+                    speed.append("  •  ", style="dim")
+                    speed.append(f"{gen:.1f} gen", style="dim")
+            else:
+                gen_label, gen_style = generation_health(gen)
+                speed.append(f"{gen:.1f} tok/s", style=gen_style)
+                speed.append(" generation ", style="dim")
+                speed.append(gen_label, style=gen_style)
+                if prompt > 0:
+                    speed.append("  •  ", style="dim")
+                    speed.append(f"{prompt:.1f} prompt", style="bold cyan")
+            avg_line = Text()
+            if history and any(s > 0 for s in history):
+                avg = sum(history) / len(history)
+                window_s = len(history) * METRICS_POLL_INTERVAL
+                avg_line.append(f"avg {avg:.1f} tok/s", style="bold cyan")
+                avg_line.append(f"  ({window_s:.0f}s rolling)", style="dim")
+            latency = Text(
+                f"{(1000.0 / gen):.1f} ms/token" if gen > 0 else "latency unavailable"
+            )
+            if live.phase == "prompt" and prompt > 0:
+                latency = Text(f"{(1000.0 / prompt):.1f} ms/prompt token")
             throughput.extend(
                 [
                     speed,
-                    Text(
-                        f"{(1000.0 / gen):.1f} ms/token"
-                        if gen > 0
-                        else "latency unavailable"
-                    ),
+                    latency,
+                    render_tps_sparkline(history, width=SPARKLINE_WIDTH)
+                    if history
+                    else Text(" " * SPARKLINE_WIDTH, style="dim", no_wrap=True),
+                    avg_line if (history and any(s > 0 for s in history)) else Text("avg —", style="dim"),
                     Text(
                         f"{int(m.requests_processing)} active  •  "
                         f"{int(m.requests_deferred)} queued"
@@ -1266,8 +1303,8 @@ class LLMServeApp(App):
     }
     #right { layout: vertical; }
     #status {
-        height: 9;
-        min-height: 7;
+        height: 11;
+        min-height: 9;
         border-bottom: solid $secondary;
         padding: 0 1;
     }
@@ -1491,6 +1528,8 @@ class LLMServeApp(App):
         self._focused_param: str | None = None
         self._alias_editor_mode: bool = False
         self._alias_editor_widget: AliasEditor | None = None
+        self._gen_history = ThroughputHistory(max_samples=METRICS_HISTORY_SAMPLES)
+        self._throughput_reader = ThroughputReader()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1552,7 +1591,7 @@ class LLMServeApp(App):
             cfg.registry = self.registry
             cfg.preset_store = self.preset_store
         self._refresh_pid()
-        self.set_interval(2.0, self._poll_metrics)
+        self.set_interval(METRICS_POLL_INTERVAL, self._poll_metrics)
         self.set_interval(5.0, self._poll_gpu)
         self.set_interval(3.0, self._poll_log)
         self.query_one(LogPanel).tail_file(LOG_FILE)
@@ -1735,6 +1774,11 @@ class LLMServeApp(App):
         panel = self.query_one(StatusPanel)
         was_alive = panel.pid_info.alive if panel.pid_info else False
         alive = info.alive if info else False
+        if not alive:
+            self._gen_history.clear()
+            self._throughput_reader.clear()
+            panel.gen_tps_history = []
+            panel.live_throughput = None
         panel.pid_info = info if alive else None
         running_key = None
         if alive and info:
@@ -1777,7 +1821,16 @@ class LLMServeApp(App):
         self._refresh_pid()
         panel = self.query_one(StatusPanel)
         if self.client and panel.pid_info:
-            panel.metrics = await self.client.metrics()
+            metrics, slots = await asyncio.gather(
+                self.client.metrics(),
+                self.client.slots(),
+            )
+            panel.metrics = metrics
+            if metrics:
+                live = self._throughput_reader.update(metrics, slots)
+                panel.live_throughput = live
+                self._gen_history.push(sample_tps_for_history(live))
+                panel.gen_tps_history = self._gen_history.samples
             if panel.props is None:
                 panel.props = await self.client.props()
             try:

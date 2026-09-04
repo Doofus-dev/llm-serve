@@ -18,6 +18,7 @@ from tui.app import (
 from tui.data.gpu import GPUStats
 from tui.data.pidfile import PidInfo
 from tui.data.stats import Metrics
+from tui.data.throughput_history import LiveThroughput
 
 
 def render_text(renderable) -> str:
@@ -40,12 +41,33 @@ class DashboardTests(unittest.TestCase):
             predicted_tokens_seconds=49.5,
             requests_processing=1,
         )
+        panel.live_throughput = LiveThroughput(
+            gen_tps=49.5,
+            prompt_tps=120.5,
+            source="metrics_gauge",
+            phase="generating",
+        )
 
         rendered = render_text(panel.render())
 
         self.assertIn("3,732 gen / 59,916 prompt tokens", rendered)
         self.assertIn("49.5 tok/s generation", rendered)
         self.assertIn("1 active", rendered)
+
+    def test_status_panel_shows_prefill_phase(self) -> None:
+        panel = StatusPanel()
+        panel.metrics = Metrics(requests_processing=1, prompt_tokens_seconds=80.0)
+        panel.live_throughput = LiveThroughput(
+            gen_tps=0.0,
+            prompt_tps=80.0,
+            source="slots",
+            phase="prompt",
+        )
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("[PREFILL]", rendered)
+        self.assertIn("80.0 tok/s prefill", rendered)
 
     def test_status_panel_prefers_friendly_model_name(self) -> None:
         panel = StatusPanel()
@@ -90,6 +112,17 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("(94%) CRITICAL", rendered)
         self.assertIn("87°C HOT", rendered)
+
+    def test_status_panel_renders_throughput_graph(self) -> None:
+        panel = StatusPanel()
+        panel.metrics = Metrics(predicted_tokens_seconds=25.0)
+        panel.live_throughput = LiveThroughput(gen_tps=25.0, source="metrics_gauge")
+        panel.gen_tps_history = [10.0, 20.0, 25.0, 30.0]
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("avg 21.2 tok/s", rendered)
+        self.assertTrue(any(ch in rendered for ch in "▁▂▃▄▅▆▇█"))
 
     def test_status_panel_shows_next_launch_remote_toggle(self) -> None:
         panel = StatusPanel()
