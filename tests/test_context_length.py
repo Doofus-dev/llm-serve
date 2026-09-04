@@ -15,6 +15,7 @@ from tui.data.context_length import (
     clamp_preset_params,
     context_length_options,
     fmt_ctx_range,
+    hub_min_context_options,
 )
 from tui.data.gguf import UINT32, apply_architecture_from_gguf
 from tui.data.hf import HubRepo
@@ -38,6 +39,11 @@ class ContextLengthTests(unittest.TestCase):
     def test_context_length_options_caps_at_model_max(self) -> None:
         self.assertEqual(context_length_options(40_960), [32_768, 40_960])
         self.assertEqual(context_length_options(32_768), [32_768])
+
+    def test_hub_min_context_options_are_or_above(self) -> None:
+        options = hub_min_context_options()
+        self.assertIn(("32k+", 32_768), options)
+        self.assertIn(("256k+", 262_144), options)
 
     def test_clamp_preset_params(self) -> None:
         capped = clamp_preset_params({"ctx": 65_000, "gpu_layers": 99}, 40_960)

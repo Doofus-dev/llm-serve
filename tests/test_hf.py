@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.hf import (
     HF_INSTALL_HINT,
+    HUB_FILTER_FETCH_LIMIT,
+    HUB_LIST_LIMIT,
     HUB_REPO_EXPAND,
     AuthStatus,
     DownloadPlan,
@@ -23,6 +25,7 @@ from tui.data.hf import (
     build_download_plan,
     build_source_metadata,
     download_files,
+    filter_hub_repos,
     fmt_size,
     fmt_count,
     hf_available,
@@ -231,6 +234,51 @@ class HFCliTests(unittest.TestCase):
         self.assertEqual(repos[0].likes, 2)
         expand_idx = mock_run.call_args.args[0].index("--expand")
         self.assertEqual(mock_run.call_args.args[0][expand_idx + 1], HUB_REPO_EXPAND)
+        limit_idx = mock_run.call_args.args[0].index("--limit")
+        self.assertEqual(mock_run.call_args.args[0][limit_idx + 1], str(HUB_LIST_LIMIT))
+        self.assertEqual(HUB_LIST_LIMIT, 50)
+
+    @patch("tui.data.hf._run_hf")
+    def test_list_gguf_repos_filters_min_context(self, mock_run) -> None:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = json.dumps([
+            {
+                "id": "bartowski/Small-GGUF",
+                "downloads": 1,
+                "likes": 0,
+                "gguf": {"context_length": 32768},
+            },
+            {
+                "id": "bartowski/Long-GGUF",
+                "downloads": 2,
+                "likes": 0,
+                "gguf": {"context_length": 131072},
+            },
+            {
+                "id": "bartowski/Unknown-GGUF",
+                "downloads": 3,
+                "likes": 0,
+            },
+        ])
+        with patch("tui.data.hf.hf_available", return_value=True):
+            repos, error = list_gguf_repos(min_context=65_536)
+        self.assertIsNone(error)
+        self.assertEqual([repo.id for repo in repos], ["bartowski/Long-GGUF"])
+        limit_idx = mock_run.call_args.args[0].index("--limit")
+        self.assertEqual(mock_run.call_args.args[0][limit_idx + 1], str(HUB_FILTER_FETCH_LIMIT))
+
+    def test_filter_hub_repos_keeps_context_at_or_above(self) -> None:
+        short = HubRepo(id="a/short", author="a", downloads=0, likes=0, context_length=32_768)
+        long = HubRepo(id="a/long", author="a", downloads=0, likes=0, context_length=131_072)
+        unknown = HubRepo(id="a/unknown", author="a", downloads=0, likes=0)
+        self.assertEqual(
+            filter_hub_repos([short, long, unknown], min_context=65_536),
+            [long],
+        )
+        self.assertEqual(
+            filter_hub_repos([short, long, unknown], min_context=None),
+            [short, long, unknown],
+        )
 
 
 class VRAMEstimateTests(unittest.TestCase):

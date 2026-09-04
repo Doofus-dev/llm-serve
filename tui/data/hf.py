@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 HF_INSTALL_HINT = "Install: curl -LsSf https://hf.co/cli/install.sh | bash -s"
 HUB_REPO_EXPAND = "downloads,likes,gguf"
+HUB_LIST_LIMIT = 50
+HUB_FILTER_FETCH_LIMIT = 150
 
 SHARD_RE = re.compile(r"^(?P<prefix>.+)-(?P<part>\d+)-of-(?P<total>\d+)\.gguf$", re.IGNORECASE)
 
@@ -241,21 +243,41 @@ def auth_login(token: str) -> tuple[bool, str]:
     return False, message
 
 
+def filter_hub_repos(
+    repos: list[HubRepo],
+    *,
+    min_context: int | None = None,
+) -> list[HubRepo]:
+    """Keep repos that meet Hub browse filters. Unknown context fails a min-context cut."""
+    if min_context is not None and min_context > 0:
+        repos = [
+            repo
+            for repo in repos
+            if repo.context_length is not None and repo.context_length >= min_context
+        ]
+    return repos
+
+
 def list_gguf_repos(
     *,
     author: str = "",
     search: str = "",
-    limit: int = 30,
+    min_context: int | None = None,
+    limit: int = HUB_LIST_LIMIT,
     sort: str = "trending_score",
 ) -> tuple[list[HubRepo], str | None]:
     if not hf_available():
         return [], f"hf CLI not found. {HF_INSTALL_HINT}"
 
+    fetch_limit = limit
+    if min_context is not None and min_context > 0:
+        fetch_limit = max(limit, HUB_FILTER_FETCH_LIMIT)
+
     args = [
         "models", "list",
         "--filter", "gguf",
         "--sort", sort,
-        "--limit", str(limit),
+        "--limit", str(fetch_limit),
         "--expand", HUB_REPO_EXPAND,
         "--format", "json",
     ]
@@ -278,7 +300,8 @@ def list_gguf_repos(
         return [], "Unexpected response from hf models list"
 
     repos = [HubRepo.from_json(item) for item in data if isinstance(item, dict) and item.get("id")]
-    return repos, None
+    repos = filter_hub_repos(repos, min_context=min_context)
+    return repos[:limit], None
 
 
 def list_repo_ggufs(repo_id: str, *, revision: str = "main") -> tuple[list[HubFile], str | None]:

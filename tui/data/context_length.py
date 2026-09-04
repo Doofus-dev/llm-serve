@@ -61,6 +61,11 @@ def context_length_options(model_max: int | None) -> list[int]:
     return options
 
 
+def hub_min_context_options() -> list[tuple[str, int]]:
+    """Hub browse choices: native context at least this large."""
+    return [(f"{fmt_ctx_compact(value)}+", value) for value in CONTEXT_LENGTH_STOPS]
+
+
 def cap_context_value(ctx: int, max_ctx: int | None) -> int:
     if max_ctx is None or max_ctx <= 0:
         return ctx

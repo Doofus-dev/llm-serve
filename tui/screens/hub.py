@@ -15,7 +15,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
-from tui.data.context_length import context_length_options, fmt_ctx_compact
+from tui.data.context_length import context_length_options, fmt_ctx_compact, hub_min_context_options
 from tui.data.hf import (
     HF_INSTALL_HINT,
     AuthStatus,
@@ -251,19 +251,58 @@ class HubScreen(Screen):
         min-height: 1;
     }
 
-    #hub-filters Input {
+    #hub-filters Input,
+    #hub-filters Select {
         height: 3;
+        margin: 0 1 0 0;
+        border: none;
+        background: transparent;
+        color: $foreground;
+    }
+
+    #hub-filters Input {
         min-width: 12;
         width: 1fr;
         border: round $accent;
+        padding: 0 1;
     }
 
     #hub-filters Select {
-        height: 3;
         width: 26;
-        border: none;
-        background: transparent;
+        padding: 0;
+    }
+
+    #hub-filters Select > SelectCurrent {
+        height: 3;
+        width: 1fr;
+        padding: 0 1;
+        border: round $accent;
+        background: $surface;
+        color: $foreground;
+    }
+
+    #hub-filters Select:focus > SelectCurrent {
+        border: round $accent;
+        background-tint: $foreground 15%;
+    }
+
+    #hub-filters Select SelectCurrent Static#label {
+        color: $foreground 50%;
+    }
+
+    #hub-filters Select SelectCurrent.-has-value Static#label {
+        color: $foreground;
+    }
+
+    #hub-filters Select:focus SelectCurrent Static#label,
+    #hub-filters Select:focus SelectCurrent.-has-value Static#label,
+    #hub-filters Select SelectCurrent .arrow {
         color: $accent;
+    }
+
+    #hub-filters #min_context {
+        width: 14;
+        min-width: 12;
     }
 
     #hub-filters .field-label {
@@ -317,6 +356,7 @@ class HubScreen(Screen):
         self.offload_ratio = 1.0
         self.offload_options = [0.0, 0.25, 0.5, 0.75, 1.0]
         self._syncing_controls = False
+        self._filters_ready = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
@@ -332,6 +372,12 @@ class HubScreen(Screen):
                     yield Select([], prompt="Previous authors", id="author_preset", allow_blank=True)
                     yield Input(placeholder="Author (e.g. bartowski)", id="author_filter")
                     yield Input(placeholder="Model name (e.g. Qwen3.6)", id="search_filter")
+                    yield Select(
+                        hub_min_context_options(),
+                        prompt="Min ctx",
+                        id="min_context",
+                        allow_blank=True,
+                    )
                 with Horizontal():
                     yield Button("Search", variant="primary", id="search")
                     yield Button("Login", id="login")
@@ -371,7 +417,8 @@ class HubScreen(Screen):
         self._update_context_options()
         self.query_one("#context-controls").display = False
         self.query_one("#hub-table", DataTable).focus()
-        self._request_repos("", "")
+        self._search_from_filters()
+        self._filters_ready = True
 
     def _refresh_author_preset_options(self) -> None:
         select = self.query_one("#author_preset", Select)
@@ -545,21 +592,50 @@ class HubScreen(Screen):
             return
         self._set_status(message)
 
-    def _request_repos(self, author: str, search: str) -> None:
+    def _current_filters(self) -> tuple[str, str, int | None]:
+        author = self.query_one("#author_filter", Input).value.strip()
+        search = self.query_one("#search_filter", Input).value.strip()
+        raw = self.query_one("#min_context", Select).value
+        try:
+            min_context = int(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            min_context = None
+        return author, search, min_context
+
+    def _search_from_filters(self) -> None:
+        author, search, min_context = self._current_filters()
+        self._request_repos(author, search, min_context)
+
+    def _request_repos(self, author: str, search: str, min_context: int | None = None) -> None:
         if self._downloading:
             self.notify("Wait for the download to finish", severity="warning")
             return
         self._repo_load_id += 1
-        self._set_status("[dim]Loading GGUF repos…[/]")
-        self._load_repos(author, search, self._repo_load_id)
+        if min_context:
+            self._set_status(
+                f"[dim]Loading GGUF repos (≥{self._fmt_context(min_context)} context)…[/]"
+            )
+        else:
+            self._set_status("[dim]Loading GGUF repos…[/]")
+        self._load_repos(author, search, min_context, self._repo_load_id)
 
     @work(thread=True)
-    def _load_repos(self, author: str, search: str, load_id: int) -> None:
-        repos, error = list_gguf_repos(author=author, search=search)
-        self.app.call_from_thread(self._finish_load_repos, load_id, repos, error)
+    def _load_repos(
+        self, author: str, search: str, min_context: int | None, load_id: int
+    ) -> None:
+        repos, error = list_gguf_repos(
+            author=author, search=search, min_context=min_context
+        )
+        self.app.call_from_thread(
+            self._finish_load_repos, load_id, repos, error, min_context
+        )
 
     def _finish_load_repos(
-        self, load_id: int, repos: list[HubRepo], error: str | None
+        self,
+        load_id: int,
+        repos: list[HubRepo],
+        error: str | None,
+        min_context: int | None = None,
     ) -> None:
         if load_id != self._repo_load_id or self._downloading:
             return
@@ -568,7 +644,8 @@ class HubScreen(Screen):
             return
         self.repos = repos
         self._set_mode_repos()
-        self._log(f"Loaded {len(repos)} GGUF repos")
+        extra = f" (≥{self._fmt_context(min_context)} context)" if min_context else ""
+        self._log(f"Loaded {len(repos)} GGUF repos{extra}")
 
     @work(thread=True)
     def _load_files(self, repo: HubRepo, load_id: int) -> None:
@@ -595,10 +672,7 @@ class HubScreen(Screen):
         if event.button.id == "close":
             self.action_close()
         elif event.button.id == "search":
-            self._request_repos(
-                self.query_one("#author_filter", Input).value.strip(),
-                self.query_one("#search_filter", Input).value.strip(),
-            )
+            self._search_from_filters()
         elif event.button.id == "login":
             self._prompt_login()
         elif event.button.id == "back":
@@ -621,22 +695,20 @@ class HubScreen(Screen):
                 if self.mode == "files":
                     self._render_file_table()
             return
+        if event.select.id == "min_context":
+            if self._filters_ready:
+                self._search_from_filters()
+            return
         if event.select.id != "author_preset":
             return
         value = event.value
         if value not in (None, Select.BLANK):
             self.query_one("#author_filter", Input).value = str(value)
-            self._request_repos(
-                str(value),
-                self.query_one("#search_filter", Input).value.strip(),
-            )
+            self._search_from_filters()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id in {"author_filter", "search_filter"}:
-            self._request_repos(
-                self.query_one("#author_filter", Input).value.strip(),
-                self.query_one("#search_filter", Input).value.strip(),
-            )
+            self._search_from_filters()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter on the focused list row advances to the next step."""
@@ -883,10 +955,7 @@ class HubScreen(Screen):
             self.notify("Wait for the download to finish", severity="warning")
             return
         if self.mode == "repos":
-            self._request_repos(
-                self.query_one("#author_filter", Input).value.strip(),
-                self.query_one("#search_filter", Input).value.strip(),
-            )
+            self._search_from_filters()
         elif self.selected_repo:
             self._file_load_id += 1
             self._load_files(self.selected_repo, self._file_load_id)

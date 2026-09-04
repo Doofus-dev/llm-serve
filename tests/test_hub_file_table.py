@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Select
 
 from tui.app import LLMServeApp
 from tui.data.hf import HubFile, HubRepo
@@ -119,6 +119,7 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(labels[0], "Disk")
                     self.assertIn("●", str(table.get_row_at(0)[0]))
                     self.assertEqual(str(table.get_row_at(1)[0]), "—")
+                    self.assertIsInstance(screen.query_one("#min_context", Select), Select)
 
                     table.move_cursor(row=0)
                     screen._handle_select()
