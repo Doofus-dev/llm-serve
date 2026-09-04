@@ -14,7 +14,7 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Focus
 from textual.reactive import reactive
@@ -473,6 +473,13 @@ class ModelNav(OptionList):
                 if self._option_data.get(option.id or "") == selected:
                     self.highlighted = index
                     break
+        elif self.option_count:
+            for index in range(self.option_count):
+                option = self.get_option_at_index(index)
+                data = self._option_data.get(option.id or "")
+                if data and data[0] == "model":
+                    self.highlighted = index
+                    break
 
 
 class AliasNav(OptionList):
@@ -529,6 +536,13 @@ class AliasNav(OptionList):
             for index in range(self.option_count):
                 option = self.get_option_at_index(index)
                 if self._option_data.get(option.id or "") == selected:
+                    self.highlighted = index
+                    break
+        elif self.registry.aliases:
+            for index in range(self.option_count):
+                option = self.get_option_at_index(index)
+                data = self._option_data.get(option.id or "")
+                if data and data[0] == "alias":
                     self.highlighted = index
                     break
 
@@ -1151,6 +1165,99 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
             self.dismiss((name, target))
 
 
+_PRESET_HOTKEYS = (
+    Binding("1", "activate_preset(1)", "Preset 1", show=False),
+    Binding("2", "activate_preset(2)", "Preset 2", show=False),
+    Binding("3", "activate_preset(3)", "Preset 3", show=False),
+    Binding("4", "activate_preset(4)", "Preset 4", show=False),
+    Binding("5", "activate_preset(5)", "Preset 5", show=False),
+)
+
+
+def build_app_bindings(
+    *,
+    remote_on: bool = False,
+    log_label: str = "TRACE",
+    original_label: str = "Original",
+) -> list[Binding]:
+    """Dashboard footer bindings grouped by function."""
+    return [
+        # Run server
+        Binding("l", "launch", "Launch"),
+        Binding("s", "stop", "Stop"),
+        # Selected model / preset / alias
+        Binding("e", "edit", "Edit"),
+        Binding("p", "pick_quant", "Quant"),
+        Binding("n", "new", "New"),
+        Binding("d", "delete", "Delete"),
+        # Next launch + log panel
+        Binding("r", "toggle_remote", "Remote ON" if remote_on else "Remote OFF"),
+        Binding("v", "cycle_log_verbosity", f"Log {log_label}"),
+        Binding("o", "toggle_log_source", original_label),
+        # App
+        Binding("h", "open_hub", "Hub"),
+        Binding("t", "change_theme", "Theme"),
+        Binding("f1", "help", "Help"),
+        Binding("q", "quit", "Quit"),
+        *_PRESET_HOTKEYS,
+    ]
+
+
+SELECTION_ACTIONS = frozenset({"launch", "edit", "pick_quant", "new", "delete"})
+
+
+def selection_supports_action(
+    action: str,
+    kind: str | None,
+    *,
+    models_section: bool = False,
+    log_section: bool = False,
+) -> bool:
+    """Whether a selection-scoped footer action applies to the highlighted item."""
+    if log_section and action in SELECTION_ACTIONS:
+        return False
+    if action == "edit":
+        return kind in {"model", "preset"}
+    if action == "pick_quant":
+        return models_section and kind in {"model", "preset"}
+    if action == "launch":
+        return kind in {"model", "preset", "alias"}
+    return True
+
+
+HELP_TEXT = """\
+Navigation
+  Tab       Models ↔ Aliases
+  ↑↓        move selection
+  1-5       pin preset on alias
+
+Run (models or aliases pane)
+  L         launch
+  S         stop
+
+Models pane (model or preset selected)
+  E         edit profile / preset
+  P         pick quant
+  N         new preset
+  D         delete
+
+Aliases pane
+  N         new alias
+  D         delete alias
+  ←→        change target model
+
+Logs pane
+  R         remote on/off
+  V         log verbosity
+  O         original log on/off
+
+App
+  H         Hub
+  T         theme
+  Q         quit
+"""
+
+
 class LLMServeApp(App):
     TITLE = "llm-serve"
     CSS = """
@@ -1401,26 +1508,7 @@ class LLMServeApp(App):
         padding: 0;
     }
     """
-    BINDINGS = [
-        Binding("q", "quit", "Quit"),
-        Binding("l", "launch", "Launch"),
-        Binding("s", "stop", "Stop"),
-        Binding("e", "edit", "Edit"),
-        Binding("n", "new", "New"),
-        Binding("d", "delete", "Delete"),
-        Binding("t", "change_theme", "Theme"),
-        Binding("h", "open_hub", "Hub"),
-        Binding("p", "pick_quant", "Quant"),
-        Binding("r", "toggle_remote", "Remote OFF"),
-        Binding("v", "cycle_log_verbosity", "Log TRACE"),
-        Binding("1", "activate_preset(1)", "Preset 1", show=False),
-        Binding("2", "activate_preset(2)", "Preset 2", show=False),
-        Binding("3", "activate_preset(3)", "Preset 3", show=False),
-        Binding("4", "activate_preset(4)", "Preset 4", show=False),
-        Binding("5", "activate_preset(5)", "Preset 5", show=False),
-        Binding("o", "toggle_log_source", "Original"),
-        Binding("f1", "help", "Help"),
-    ]
+    BINDINGS = build_app_bindings()
 
     def __init__(self):
         super().__init__()
@@ -1456,42 +1544,63 @@ class LLMServeApp(App):
             yield LogPanel(id="logs")
         yield Footer()
 
+    def _selection_kind(self) -> str | None:
+        data = self._selected_data()
+        return data[0] if data else None
+
+    def _models_section_focused(self) -> bool:
+        return isinstance(self.focused, ModelNav)
+
+    def _log_panel_focused(self) -> bool:
+        return isinstance(self.focused, LogPanel)
+
+    def _action_available(self, action: str) -> bool:
+        if not self.is_mounted:
+            return False
+        try:
+            return selection_supports_action(
+                action,
+                self._selection_kind(),
+                models_section=self._models_section_focused(),
+                log_section=self._log_panel_focused(),
+            )
+        except Exception:
+            return False
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in SELECTION_ACTIONS:
+            return False if self._editor_mode else self._action_available(action)
+        return True
+
+    def on_focus(self, event: Focus) -> None:
+        if isinstance(event.widget, (ModelNav, AliasNav, LogPanel)):
+            self.refresh_bindings()
+
     def _update_footer(self) -> None:
-        """Update footer bindings based on mode."""
+        """Refresh footer bindings for editor mode, labels, and selection."""
         if self._editor_mode:
-            bindings = [Binding("ctrl+s", "save_edit", "Save")]
-            bindings.append(Binding("escape", "cancel_edit", "Cancel"))
-            self.bindings = bindings
+            self._bindings = BindingsMap(
+                [
+                    Binding("ctrl+s", "save_edit", "Save"),
+                    Binding("escape", "cancel_edit", "Cancel"),
+                ]
+            )
         else:
-            self.bindings = [
-                Binding("q", "quit", "Quit"),
-                Binding("l", "launch", "Launch"),
-                Binding("s", "stop", "Stop"),
-                Binding("e", "edit", "Edit"),
-                Binding("n", "new", "New"),
-                Binding("d", "delete", "Delete"),
-                Binding("t", "change_theme", "Theme"),
-                Binding("h", "open_hub", "Hub"),
-                Binding("p", "pick_quant", "Quant"),
-                Binding(
-                    "r",
-                    "toggle_remote",
-                    "Remote ON" if self.remote_launch else "Remote OFF",
-                ),
-                Binding(
-                    "v",
-                    "cycle_log_verbosity",
-                    f"Log {log_verbosity_label(self.log_verbosity)}",
-                ),
-                Binding("1", "activate_preset(1)", "Preset 1", show=False),
-                Binding("2", "activate_preset(2)", "Preset 2", show=False),
-                Binding("3", "activate_preset(3)", "Preset 3", show=False),
-                Binding("4", "activate_preset(4)", "Preset 4", show=False),
-                Binding("5", "activate_preset(5)", "Preset 5", show=False),
-                Binding("o", "toggle_log_source", self._original_log_label()),
-                Binding("f1", "help", "Help"),
-            ]
-        self.query_one(Footer).refresh()
+            original = "Original"
+            if self.is_mounted:
+                try:
+                    original = self._original_log_label()
+                except Exception:
+                    pass
+            self._bindings = BindingsMap(
+                build_app_bindings(
+                    remote_on=self.remote_launch,
+                    log_label=log_verbosity_label(self.log_verbosity),
+                    original_label=original,
+                )
+            )
+        if self.is_mounted:
+            self.refresh_bindings()
 
     def on_mount(self) -> None:
         saved_theme = self.settings.theme
@@ -1867,6 +1976,7 @@ class LLMServeApp(App):
             )
             extra = f" (+{len(clamped) - 3} more)" if len(clamped) > 3 else ""
             self.notify(f"Capped preset context: {bits}{extra}", severity="warning")
+        self._update_footer()
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if not isinstance(event.option_list, (ModelNav, AliasNav)):
@@ -1880,6 +1990,7 @@ class LLMServeApp(App):
             cfg.selected = target.model if target else None
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
+        self._update_footer()
 
     def _selected_model(self) -> str | None:
         data = self._selected_data()
@@ -2380,11 +2491,7 @@ class LLMServeApp(App):
         )
 
     def action_help(self) -> None:
-        self.notify(
-            "Tab: switch pane | ↑↓: navigate | P/Enter: quant | L: launch | S: stop | E: edit | N: new preset | D: delete | A: apply preset | H: Hub | V: log level | O: original log | T: theme | Q: quit",
-            title="Help",
-            timeout=10,
-        )
+        self.notify(HELP_TEXT, title="Help", timeout=15)
 
     def notify(self, message: str, *, title: str = "", severity: str = "information",
                timeout: float | None = None, **kwargs):
