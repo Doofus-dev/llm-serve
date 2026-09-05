@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# llm-serve — unified llama-server launcher (JSON config)
+# llm-serve — llama-server launcher
 #
 # Usage:
 #   llm-serve                         launch the interactive TUI
@@ -9,22 +9,18 @@
 #   llm-serve <model> --remote        bind 0.0.0.0 for LAN/Meshnet access
 #   llm-serve list                    list models, commands, and flags
 #   llm-serve status                  show running model info
-#   llm-serve stop                    stop all running servers
+#   llm-serve stop                    stop the tracked server
 #   llm-serve stop <model>            stop a specific model
 #   llm-serve update                  pull + rebuild llama.cpp (interactive)
 #   llm-serve update --yes            pull + rebuild without confirmation
 #
-# Config is read from models.json + presets.json (TUI-managed). Requires jq.
-#
-# Any default can be overridden with an env var:
-#   PORT=9000 llm-serve "Qwen 3.8"
-#   CONTEXT_SIZE=32768 GPU_LAYERS=60 llm-serve qwen36-uncensored
+# Launch/stop/status/list are implemented in Python (tui.cli) so the TUI and
+# CLI share one argv builder. This script only handles the venv, TUI entry,
+# and llama.cpp rebuilds.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-MODELS_JSON="${SCRIPT_DIR}/models.json"
-PRESETS_JSON="${SCRIPT_DIR}/presets.json"
 LLAMA_DIR="${LLAMA_DIR:-${SCRIPT_DIR}/llama.cpp}"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
 
@@ -33,284 +29,9 @@ source "${SCRIPT_DIR}/lib/llama-build.sh"
 # shellcheck source=lib/tui-venv.sh
 source "${SCRIPT_DIR}/lib/tui-venv.sh"
 
-# Model files directory
-MODEL_DIR="${MODEL_DIR:-${SCRIPT_DIR}/models}"
-
-# Log/PID paths
-LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs}"
-LOG_FILE="${LOG_FILE:-${LOG_DIR}/llm-serve.log}"
-PID_FILE="${PID_FILE:-${LOG_DIR}/.llm-serve.pid}"
-
-# ── JSON helpers ────────────────────────────────────────────────────────────
-
-# Check jq is available
-command -v jq >/dev/null 2>&1 || {
-    echo "Error: jq is required but not installed." >&2
-    echo "Install: sudo pacman -S jq (Arch) or sudo apt install jq (Debian/Ubuntu)" >&2
-    exit 1
-}
-
-# Check models.json exists
-[[ -f "$MODELS_JSON" ]] || {
-    echo "Error: models.json not found at ${MODELS_JSON}" >&2
-    echo "Run ./setup.sh to create models.json from models.json.example" >&2
-    exit 1
-}
-
-# Resolve alias → model name
-resolve_alias() {
-    local name="$1"
-    jq -r --arg n "$name" '
-        .aliases[$n] as $alias |
-        if ($alias | type) == "object" then ($alias.model // $n)
-        else ($alias // $n)
-        end
-    ' "$MODELS_JSON"
-}
-
-alias_get() {
-    local alias="$1" key="$2"
-    jq -r --arg a "$alias" --arg k "$key" '
-        .aliases[$a] as $alias |
-        if ($alias | type) == "object" then ($alias[$k] // empty)
-        else empty
-        end
-    ' "$MODELS_JSON"
-}
-
-# Resolve user input to internal model slug (alias, slug, or display name)
-resolve_model() {
-    local requested="$1"
-    local name
-    name="$(resolve_alias "$requested")"
-    if model_exists "$name"; then
-        echo "$name"
-        return 0
-    fi
-    local by_display
-    by_display="$(jq -r --arg d "$requested" '.models | to_entries[] | select(.value.display == $d) | .key' "$MODELS_JSON" | head -n 1)"
-    if [[ -n "$by_display" ]]; then
-        echo "$by_display"
-        return 0
-    fi
-    by_display="$(jq -r --arg d "$name" '.models | to_entries[] | select(.value.display == $d) | .key' "$MODELS_JSON" | head -n 1)"
-    if [[ -n "$by_display" ]]; then
-        echo "$by_display"
-        return 0
-    fi
-    echo "$name"
-}
-
-# Get a model identity parameter from models.json
-m_get() {
-    local model="$1" key="$2" default="${3:-}"
-    jq -r --arg m "$model" --arg k "$key" --arg d "$default" \
-        '.models[$m][$k] // $d' "$MODELS_JSON"
-}
-
-# Get active preset slot for model+quant
-preset_active_slot() {
-    local model="$1" quant="$2"
-    jq -r --arg m "$model" --arg q "$quant" '._active[$m][$q] // empty' "$PRESETS_JSON"
-}
-
-# Get a runtime parameter from the active preset
-p_get() {
-    local model="$1" quant="$2" key="$3" default="${4:-}"
-    local slot="${PRESET_SLOT:-}"
-    if [[ -z "$slot" ]]; then
-        slot="$(preset_active_slot "$model" "$quant")"
-    fi
-    if [[ -z "$slot" ]]; then
-        echo "$default"
-        return 0
-    fi
-    jq -r --arg m "$model" --arg q "$quant" --arg s "$slot" --arg k "$key" --arg d "$default" \
-        '.[$m][$q][$s].params[$k] // .[$m][$q][$s].overrides[$k] // $d' "$PRESETS_JSON"
-}
-
-# Check if a model exists
-model_exists() {
-    local model="$1"
-    jq -e --arg m "$model" '.models[$m]' "$MODELS_JSON" >/dev/null 2>&1
-}
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
 die() { echo "Error: $*" >&2; exit 1; }
 
-check_pid() {
-    local pid="$1"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
-}
-
-# Rotate log file
-rotate_log() {
-    local MAX_LOG_LINES=1000
-    [[ -f "$LOG_FILE" ]] || return 0
-    local line_count
-    line_count=$(wc -l < "$LOG_FILE")
-    if (( line_count > MAX_LOG_LINES )); then
-        tail -n "$((MAX_LOG_LINES / 2))" "$LOG_FILE" > "${LOG_FILE}.tmp"
-        mv "${LOG_FILE}.tmp" "$LOG_FILE"
-    fi
-}
-
-# Write PID file
-write_pid() {
-    local pid="$1" model="$2" port="$3" quant="$4" preset_slot="$5" remote="$6"
-    echo "$pid $model $port $(date +%s) $quant $preset_slot $remote" > "$PID_FILE"
-}
-
-# ── Subcommands ─────────────────────────────────────────────────────────────
-
-do_status() {
-    if [[ ! -f "$PID_FILE" ]]; then
-        echo "No model running"
-        return 0
-    fi
-
-    local pid model port ts quant preset_slot remote
-    read -r pid model port ts quant preset_slot remote < "$PID_FILE"
-
-    if ! check_pid "$pid"; then
-        echo "Stale PID file (PID $pid not running)"
-        rm -f "$PID_FILE"
-        return 1
-    fi
-
-    local uptime=$(( $(date +%s) - ts ))
-    local uptime_str
-    printf -v uptime_str '%dh %dm %ds' $((uptime/3600)) $(( (uptime%3600)/60 )) $((uptime%60))
-
-    echo "Running: $model"
-    echo "  PID:    $pid"
-    echo "  Port:   $port"
-    echo "  Access: $([[ "${remote:-0}" == "1" ]] && echo "Remote (0.0.0.0)" || echo "Local")"
-    echo "  Uptime: $uptime_str"
-    echo ""
-    echo "Last log lines:"
-    tail -10 "$LOG_FILE" 2>/dev/null || echo "  (no log file)"
-}
-
-do_stop() {
-    local model="${1:-}"
-
-    if [[ -z "$model" ]]; then
-        # Stop ALL running servers
-        local pids
-        pids=$(pgrep -x llama-server 2>/dev/null || true)
-        # Fallback: PID file
-        if [[ -z "$pids" && -f "$PID_FILE" ]]; then
-            local fpid
-            read -r fpid _ < "$PID_FILE"
-            if check_pid "$fpid"; then
-                echo "Stopping PID $fpid (from PID file)..."
-                kill -TERM "$fpid" 2>/dev/null || true
-                sleep 2
-                check_pid "$fpid" && kill -9 "$fpid" 2>/dev/null || true
-                echo "Server stopped"
-            fi
-            rm -f "$PID_FILE"
-            return 0
-        fi
-        if [[ -z "$pids" ]]; then
-            echo "No llama-server processes running"
-            rm -f "$PID_FILE"
-            return 0
-        fi
-        echo "Stopping all llama-server processes..."
-        echo "$pids" | xargs kill -TERM 2>/dev/null || true
-        sleep 2
-        pids=$(pgrep -x llama-server 2>/dev/null || true)
-        [[ -n "$pids" ]] && echo "$pids" | xargs kill -9 2>/dev/null || true
-        echo "All servers stopped"
-        rm -f "$PID_FILE"
-    else
-        # Stop specific model
-        local resolved_model
-        resolved_model="$(resolve_model "$model")"
-        model_exists "$resolved_model" || die "unknown model '$model'"
-
-        if [[ ! -f "$PID_FILE" ]]; then
-            echo "No model running"
-            return 0
-        fi
-
-        local pid running_model port ts quant preset_slot remote
-        read -r pid running_model port ts quant preset_slot remote < "$PID_FILE"
-
-        if [[ "$running_model" != "$resolved_model" ]]; then
-            echo "Model '$resolved_model' is not running (currently running: $running_model)"
-            return 1
-        fi
-
-        if ! check_pid "$pid"; then
-            echo "Stale PID file (PID $pid not running)"
-            rm -f "$PID_FILE"
-            return 1
-        fi
-
-        echo "Stopping $resolved_model (PID: $pid)..."
-        kill -TERM "$pid" 2>/dev/null || true
-        sleep 2
-        check_pid "$pid" && kill -9 "$pid" 2>/dev/null || true
-        rm -f "$PID_FILE"
-        echo "Stopped"
-    fi
-}
-
-list_models() {
-    echo "Available models:"
-    echo ""
-    jq -r '.models | to_entries[] | "\(.value.display // .key)|\(.value.notes // "")"' "$MODELS_JSON" | \
-        while IFS='|' read -r name notes; do
-            printf "  %-22s %s\n" "$name" "$notes"
-        done
-
-    local aliases
-    aliases=$(jq -r '
-        .aliases | to_entries[] |
-        .value as $target |
-        if ($target | type) == "object" then
-            "  \(.key) -> \($target.model)" +
-            (if $target.preset then " [\($target.quant)/\($target.preset)]" else "" end)
-        else "  \(.key) -> \($target)"
-        end
-    ' "$MODELS_JSON" 2>/dev/null || true)
-    if [[ -n "$aliases" ]]; then
-        echo ""
-        echo "Aliases:"
-        echo ""
-        echo "$aliases"
-    fi
-
-    echo ""
-    echo "Commands:"
-    echo "  llm-serve                      Open the interactive TUI"
-    echo "  llm-serve --help               Show this model and command reference"
-    echo "  llm-serve <model>              Start model in background"
-    echo "  llm-serve <model> --live      Start model in foreground (live logs)"
-    echo "  llm-serve status              Show running model info"
-    echo "  llm-serve stop                Stop all servers"
-    echo "  llm-serve stop <model>        Stop specific model"
-    echo "  llm-serve update              Pull + rebuild llama.cpp"
-    echo "  llm-serve uninstall           Remove build artifacts (keep models/)"
-    echo ""
-    echo "Env overrides:"
-    echo "  PORT=           HOST=           CONTEXT_SIZE=   GPU_LAYERS="
-    echo "  THREADS=        UBATCH=         PARALLEL=       N_PREDICT="
-    echo "  CACHE_TYPE_K=   CACHE_TYPE_V=   BATCH_SIZE=     DEFRAG_THOLD="
-    echo "  TEMP=           TOP_P=          SEED=           ENABLE_MTP=0"
-    echo "  N_CPU_MOE=      MODEL_PATH=     MODEL_DIR="
-    echo ""
-    echo "Flags:"
-    echo "  --live                Start in foreground with live logs"
-    echo "  --remote              Bind 0.0.0.0 for LAN/Meshnet access"
-    echo "  --dry-run             Show the command that would be run (no launch)"
-}
-
-launch_tui() {
+ensure_python() {
     if ! command -v python3 &>/dev/null; then
         die "python3 not found. Run ./setup.sh to install Python and TUI dependencies."
     fi
@@ -325,352 +46,46 @@ launch_tui() {
     if ! tui_ensure_runtime "${SCRIPT_DIR}"; then
         die "Failed to set up the TUI Python environment. Re-run ./setup.sh."
     fi
-    # `python -m tui` searches cwd first. The package lives in the repo and is
-    # not installed into the venv, so launch from $HOME (or anywhere else)
-    # fails with "No module named tui" unless we enter SCRIPT_DIR first.
-    cd "${SCRIPT_DIR}" || die "could not enter ${SCRIPT_DIR}"
-    exec "$(tui_venv_dir "${SCRIPT_DIR}")/bin/python" -m tui
 }
 
-# ── Parse flags ─────────────────────────────────────────────────────────────
-SKIP_GATEWAY_RESTART=0
-LIVE="${LIVE:-0}"
-DRY_RUN="${DRY_RUN:-0}"
-REMOTE="${REMOTE:-0}"
-SHOW_HELP=0
-ARGS=()
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help) SHOW_HELP=1 ;;
-        --live) LIVE=1 ;;
-        --dry-run) DRY_RUN=1 ;;
-        --remote) REMOTE=1 ;;
-        *) ARGS+=("$arg") ;;
-    esac
-done
+run_python() {
+    ensure_python
+    exec "$(tui_venv_dir "${SCRIPT_DIR}")/bin/python" "$@"
+}
 
-# ── Handle subcommands ──────────────────────────────────────────────────────
+do_update() {
+    local yes="${1:-0}"
+    llama_read_stamp
+    local build_type="${_LLAMA_STAMP_TYPE:-}"
+    if [[ -z "$build_type" ]]; then
+        if ! llama_resolve_build_type ""; then
+            exit 1
+        fi
+        build_type="$_LLAMA_BUILD_TYPE"
+    fi
+    if [[ "$yes" != "1" ]]; then
+        echo "Rebuild llama.cpp ($build_type) from ${LLAMA_DIR}?"
+        read -r -p "Continue? [y/N] " answer
+        [[ "$answer" =~ ^[Yy]$ ]] || { echo "Cancelled"; return 0; }
+    fi
+    llama_do_update "$build_type"
+}
 
-if [[ "$SHOW_HELP" == "1" ]]; then
-    list_models
+if [[ $# -eq 0 ]]; then
+    run_python -m tui
+fi
+
+if [[ "${1:-}" == "update" ]]; then
+    yes=0
+    [[ "${2:-}" == "--yes" || "${2:-}" == "-y" ]] && yes=1
+    do_update "$yes"
     exit 0
 fi
 
-[[ "${ARGS[0]:-}" == "status" ]] && { do_status; exit 0; }
-
-if [[ "${ARGS[0]:-}" == "stop" ]]; then
-    if [[ ${#ARGS[@]} -gt 1 ]]; then
-        stop_target=("${ARGS[@]:1}")
-        do_stop "${stop_target[*]}"
-    else
-        do_stop ""
-    fi
-    exit 0
-fi
-
-if [[ ${#ARGS[@]} -eq 0 ]]; then
-    launch_tui
-fi
-
-if [[ "${ARGS[0]:-}" == "list" ]]; then
-    list_models
-    exit 0
-fi
-
-# ── Launch a model ──────────────────────────────────────────────────────────
-# Join args so display names like "Qwen 3.8" work without quoting.
-REQUESTED="${ARGS[*]}"
-
-[[ -f "$PRESETS_JSON" ]] || die "presets.json not found at ${PRESETS_JSON}"
-
-# Resolve aliases and display names
-MODEL="$(resolve_model "${REQUESTED}")"
-[[ "$MODEL" != "$REQUESTED" ]] && echo "Resolved: ${REQUESTED} -> ${MODEL}"
-
-# Validate
-model_exists "$MODEL" || die "unknown model '${REQUESTED}'. Run 'llm-serve' to see available models."
-
-ALIAS_QUANT="$(alias_get "${REQUESTED}" quant)"
-ALIAS_PRESET_SLOT="$(alias_get "${REQUESTED}" preset)"
-ACTIVE_QUANT="${ALIAS_QUANT:-$(m_get "${MODEL}" active_quant "")}"
-[[ -z "$ACTIVE_QUANT" ]] && die "model '${REQUESTED}' has no active quant configured."
-
-PRESET_SLOT="${ALIAS_PRESET_SLOT:-$(preset_active_slot "$MODEL" "$ACTIVE_QUANT")}"
-[[ -z "$PRESET_SLOT" ]] && die "model '${REQUESTED}' (${ACTIVE_QUANT}) has no active preset. Create one in the TUI."
-
-PRESET_NAME="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" --arg s "$PRESET_SLOT" \
-    '.[$m][$q][$s].name // empty' "$PRESETS_JSON")"
-[[ -z "$PRESET_NAME" ]] && die "preset [${PRESET_SLOT}] for '${REQUESTED}' (${ACTIVE_QUANT}) does not exist."
-echo "Preset: [${PRESET_SLOT}] ${PRESET_NAME} (${ACTIVE_QUANT})"
-
-# Best-effort version check
-llama_warn_if_outdated
-
-# Check if model is already running
-if [[ -f "$PID_FILE" ]]; then
-    read -r old_pid old_model old_port old_ts old_quant old_preset_slot old_remote < "$PID_FILE"
-    if check_pid "$old_pid"; then
-        die "Model '$old_model' is already running (PID: $old_pid). Stop it first with 'llm-serve stop'."
-    else
-        echo "Cleaning up stale PID file for '$old_model'..."
-        rm -f "$PID_FILE"
-    fi
-fi
-
-# ── Remote mode (--remote): bind all interfaces ──
-if [[ "$REMOTE" == "1" ]]; then
-    HOST="${HOST:-0.0.0.0}"
-fi
-
-# Resolve config with env overrides
-MODEL_FILE="$(jq -r --arg m "$MODEL" --arg q "$ACTIVE_QUANT" '
-    .models[$m].quants[$q].file // .models[$m].file // empty
-' "$MODELS_JSON")"
-[[ -z "$MODEL_FILE" ]] && die "quant '${ACTIVE_QUANT}' for '${REQUESTED}' does not exist."
-MODEL_PATH="${MODEL_PATH:-${MODEL_DIR}/${MODEL_FILE}}"
-
-LOG_VERBOSITY="${LOG_VERBOSITY:-4}"
-HOST="${HOST:-$(m_get "${MODEL}" host 127.0.0.1)}"
-PORT="${PORT:-$(m_get "${MODEL}" port 8081)}"
-CONTEXT_SIZE="${CONTEXT_SIZE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ctx 65536)}"
-GPU_LAYERS="${GPU_LAYERS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" gpu_layers 99)}"
-CACHE_TYPE_K="${CACHE_TYPE_K:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_k q4_0)}"
-CACHE_TYPE_V="${CACHE_TYPE_V:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_v q4_0)}"
-THREADS="${THREADS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" threads 8)}"
-PARALLEL="${PARALLEL:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" parallel 1)}"
-
-BATCH_SIZE="${BATCH_SIZE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" batch "")}"
-UBATCH="${UBATCH:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ubatch "")}"
-N_PREDICT="${N_PREDICT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" n_predict "")}"
-DEFRAG_THOLD="${DEFRAG_THOLD:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" defrag "")}"
-
-FLASH_ATTN="${FLASH_ATTN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" flash_attn on)}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" checkpoint_every -1)}"
-JINJA="${JINJA:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" jinja on)}"
-THREADS_BATCH="${THREADS_BATCH:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" threads_batch "")}"
-SERVER_TIMEOUT="${SERVER_TIMEOUT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" timeout 600)}"
-CACHE_PROMPT="${CACHE_PROMPT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_prompt on)}"
-CACHE_REUSE="${CACHE_REUSE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cache_reuse 0)}"
-CONT_BATCHING="${CONT_BATCHING:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" cont_batching on)}"
-CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" ctx_checkpoints "")}"
-
-TEMP="${TEMP:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" temp 0.8)}"
-TOP_P="${TOP_P:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" top_p 0.95)}"
-TOP_K="${TOP_K:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" top_k 40)}"
-MIN_P="${MIN_P:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" min_p 0.05)}"
-SEED="${SEED:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" seed -1)}"
-REPEAT_PENALTY="${REPEAT_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" repeat_penalty 1.0)}"
-REPEAT_LAST_N="${REPEAT_LAST_N:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" repeat_last_n 64)}"
-PRESENCE_PENALTY="${PRESENCE_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" presence_penalty 0.0)}"
-FREQUENCY_PENALTY="${FREQUENCY_PENALTY:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" frequency_penalty 0.0)}"
-
-REASONING_FORMAT="${REASONING_FORMAT:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" reasoning_format "")}"
-REASONING_BUDGET="${REASONING_BUDGET:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" reasoning_budget "")}"
-
-ENABLE_MTP="${ENABLE_MTP:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" mtp 0)}"
-SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" spec_draft_n_max 2)}"
-SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" spec_draft_n_min 0)}"
-
-N_CPU_MOE="${N_CPU_MOE:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" n_cpu_moe "")}"
-
-TOTAL_LAYERS="$(m_get "${MODEL}" total_layers 0)"
-THINKING="${THINKING:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" thinking "")}"
-PER_SLOT_MIN="${PER_SLOT_MIN:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" per_slot_min 0)}"
-METRICS="${METRICS:-$(p_get "${MODEL}" "${ACTIVE_QUANT}" metrics on)}"
-
-# CUDA / ROCm paths
-[[ -d /usr/local/cuda/bin ]] && export PATH="/usr/local/cuda/bin:${PATH}"
-[[ -d /usr/local/cuda/lib64 ]] && export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-[[ -d /opt/cuda/bin ]] && export PATH="/opt/cuda/bin:${PATH}"
-[[ -d /opt/cuda/lib64 ]] && export LD_LIBRARY_PATH="/opt/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-[[ -d /opt/rocm/bin ]] && export PATH="/opt/rocm/bin:${PATH}"
-[[ -d /opt/rocm/lib ]] && export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
-# Validate binary and model file
-[[ -x "${LLAMA_SERVER}" ]] || die "llama-server not found at ${LLAMA_SERVER}"
-[[ -f "${MODEL_PATH}" ]]   || die "model not found at ${MODEL_PATH}"
-
-# Per-slot context floor
-PER_SLOT_CTX=$(( CONTEXT_SIZE / PARALLEL ))
-MODEL_MAX_CTX="$(m_get "${MODEL}" context_length "")"
-if [[ -n "${MODEL_MAX_CTX}" && "${MODEL_MAX_CTX}" =~ ^[0-9]+$ && "${CONTEXT_SIZE}" -gt "${MODEL_MAX_CTX}" ]]; then
-    echo "Warning: preset context ${CONTEXT_SIZE} exceeds model max ${MODEL_MAX_CTX} — llama-server will cap it." >&2
-fi
-if (( PER_SLOT_MIN > 0 && PER_SLOT_CTX < PER_SLOT_MIN )); then
-    echo "Error: per-slot context is ${PER_SLOT_CTX} (${CONTEXT_SIZE} / ${PARALLEL}), " >&2
-    echo "       below the ${PER_SLOT_MIN}-token floor for '${MODEL}'." >&2
-    echo "       Lower PARALLEL or raise CONTEXT_SIZE so CONTEXT_SIZE/PARALLEL >= ${PER_SLOT_MIN}." >&2
-    exit 1
-fi
-
-# CPU offload count
-if (( TOTAL_LAYERS > 0 && GPU_LAYERS < TOTAL_LAYERS )); then
-    CPU_LAYERS=$(( TOTAL_LAYERS - GPU_LAYERS ))
-else
-    CPU_LAYERS=0
-fi
-
-# Build args
-SERVER_ARGS=(
-    -m  "${MODEL_PATH}"
-    --host "${HOST}"
-    --port "${PORT}"
-    -ngl   "${GPU_LAYERS}"
-    -c     "${CONTEXT_SIZE}"
-    -fa    "${FLASH_ATTN}"
-    -t     "${THREADS}"
-    --parallel     "${PARALLEL}"
-    --cache-type-k "${CACHE_TYPE_K}"
-    --cache-type-v "${CACHE_TYPE_V}"
-)
-
-_append_server_arg() {
-    local -n _args=$1
-    local flag="$2" val="${3:-}"
-    if [[ -n "$val" ]]; then
-        _args+=("$flag" "$val")
-    fi
-}
-
-_append_server_bool() {
-    local -n _args=$1
-    local on_flag="$2" off_flag="$3" val="${4:-}"
-    case "$val" in
-        on|true|1|yes)  _args+=("$on_flag") ;;
-        off|false|0|no) _args+=("$off_flag") ;;
-    esac
-}
-
-_append_server_arg SERVER_ARGS --n-cpu-moe "${N_CPU_MOE}"
-_append_server_arg SERVER_ARGS -b "${BATCH_SIZE}"
-_append_server_arg SERVER_ARGS --ubatch-size "${UBATCH}"
-_append_server_arg SERVER_ARGS --defrag-thold "${DEFRAG_THOLD}"
-_append_server_arg SERVER_ARGS --n-predict "${N_PREDICT}"
-_append_server_arg SERVER_ARGS -tb "${THREADS_BATCH}"
-_append_server_arg SERVER_ARGS --timeout "${SERVER_TIMEOUT}"
-_append_server_arg SERVER_ARGS --cache-reuse "${CACHE_REUSE}"
-
-if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
-    _append_server_arg SERVER_ARGS --checkpoint-min-step "${CHECKPOINT_EVERY}"
-fi
-_append_server_arg SERVER_ARGS --ctx-checkpoints "${CTX_CHECKPOINTS}"
-
-_append_server_bool SERVER_ARGS --jinja --no-jinja "${JINJA}"
-_append_server_bool SERVER_ARGS --cache-prompt --no-cache-prompt "${CACHE_PROMPT}"
-_append_server_bool SERVER_ARGS --cont-batching --no-cont-batching "${CONT_BATCHING}"
-
-_append_server_arg SERVER_ARGS --temp "${TEMP}"
-_append_server_arg SERVER_ARGS --top-p "${TOP_P}"
-_append_server_arg SERVER_ARGS --top-k "${TOP_K}"
-_append_server_arg SERVER_ARGS --min-p "${MIN_P}"
-_append_server_arg SERVER_ARGS --seed "${SEED}"
-_append_server_arg SERVER_ARGS --repeat-penalty "${REPEAT_PENALTY}"
-_append_server_arg SERVER_ARGS --repeat-last-n "${REPEAT_LAST_N}"
-_append_server_arg SERVER_ARGS --presence-penalty "${PRESENCE_PENALTY}"
-_append_server_arg SERVER_ARGS --frequency-penalty "${FREQUENCY_PENALTY}"
-
-_append_server_arg SERVER_ARGS --reasoning-format "${REASONING_FORMAT}"
-_append_server_arg SERVER_ARGS --reasoning-budget "${REASONING_BUDGET}"
-
-# Metrics endpoint
-_append_server_bool SERVER_ARGS --metrics --no-metrics "${METRICS}"
-
-# llama.cpp log verbosity: 3=info 4=trace 5=debug
-_append_server_arg SERVER_ARGS -lv "${LOG_VERBOSITY}"
-
-case "${THINKING}" in
-    off) SERVER_ARGS+=(--reasoning off) ;;
-    on)  SERVER_ARGS+=(--reasoning on) ;;
+# Best-effort stale-binary warning before a model launch (not for status/stop/list/help).
+case "${1:-}" in
+    status|stop|list|-h|--help) ;;
+    *) llama_warn_if_outdated ;;
 esac
 
-if [[ "${ENABLE_MTP}" == "1" ]]; then
-    SERVER_ARGS+=(--spec-type draft-mtp)
-    _append_server_arg SERVER_ARGS --spec-draft-n-max "${SPEC_DRAFT_N_MAX}"
-    _append_server_arg SERVER_ARGS --spec-draft-n-min "${SPEC_DRAFT_N_MIN}"
-fi
-
-# Banner
-echo "Starting llama-server: ${MODEL}"
-echo "  File:         ${MODEL_FILE}"
-echo "  URL:          http://${HOST}:${PORT}/v1"
-echo "  Context:      ${CONTEXT_SIZE} tokens  (${PARALLEL} slot(s), ${PER_SLOT_CTX} per slot)"
-if [[ -n "${MODEL_MAX_CTX}" && "${MODEL_MAX_CTX}" =~ ^[0-9]+$ ]]; then
-    echo "  Model max:    ${MODEL_MAX_CTX} tokens"
-fi
-echo "  KV cache:     K=${CACHE_TYPE_K}  V=${CACHE_TYPE_V}"
-if (( TOTAL_LAYERS > 0 )); then
-    echo "  GPU layers:   ${GPU_LAYERS} / ${TOTAL_LAYERS}  (${CPU_LAYERS} on CPU)"
-else
-    echo "  GPU layers:   ${GPU_LAYERS}"
-fi
-[[ -n "${N_CPU_MOE}" ]]    && echo "  MoE offload:  experts of ${N_CPU_MOE} layer(s) on CPU (--n-cpu-moe)"
-[[ -n "${BATCH_SIZE}" ]]   && echo "  Batch size:   ${BATCH_SIZE}"
-[[ -n "${UBATCH}" ]]       && echo "  UBatch:       ${UBATCH}"
-[[ -n "${N_PREDICT}" ]]    && echo "  Max response: ${N_PREDICT} tokens"
-echo "  Sampling:     temp=${TEMP} top_p=${TOP_P} top_k=${TOP_K} seed=${SEED}"
-echo "  Log level:    ${LOG_VERBOSITY}  (3=info  4=trace  5=debug)"
-if [[ -n "${CHECKPOINT_EVERY}" && "${CHECKPOINT_EVERY}" != "-1" && "${CHECKPOINT_EVERY}" -gt 0 ]]; then
-    echo "  Checkpoints:  min-step=${CHECKPOINT_EVERY} tokens"
-else
-    echo "  Checkpoints:  llama-server default (min-step not overridden)"
-fi
-[[ "${THINKING}" == "off" ]] && echo "  Thinking:     disabled (--reasoning off)"
-[[ "${THINKING}" == "on"  ]] && echo "  Thinking:     enabled (--reasoning on)"
-[[ -z "${THINKING}"       ]] && echo "  Thinking:     auto (llama-server default)"
-if [[ "${ENABLE_MTP}" == "1" ]]; then
-    echo "  MTP:          enabled (draft-mtp, n-max ${SPEC_DRAFT_N_MAX})"
-fi
-echo "  Notes:        $(m_get "${MODEL}" notes)"
-if [[ "$REMOTE" == "1" ]]; then
-    echo "  Remote mode:  bound to 0.0.0.0 — reachable from other devices at:"
-    if command -v ip >/dev/null 2>&1; then
-        _REMOTE_IPS="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u || true)"
-    else
-        _REMOTE_IPS="$(hostname -I 2>/dev/null | tr ' ' $'\n' | sort -u | grep -vE '^$' || true)"
-    fi
-    while IFS= read -r _REMOTE_IP; do
-        [[ -z "$_REMOTE_IP" ]] && continue
-        echo "      http://${_REMOTE_IP}:${PORT}/v1"
-    done <<< "$_REMOTE_IPS"
-    echo "      (Meshnet devices use the 100.x.x.x address; LAN devices use your local IP.)"
-fi
-echo
-
-# ── Dry-run mode ────────────────────────────────────────────────────────────
-if [[ "$DRY_RUN" == "1" ]]; then
-    echo "Dry-run command:"
-    echo "  ${LLAMA_SERVER} ${SERVER_ARGS[*]}"
-    exit 0
-fi
-
-# ── Launch: foreground (--live) or background (default) ─────────────────────
-if [[ "$LIVE" == "1" ]]; then
-    exec "${LLAMA_SERVER}" "${SERVER_ARGS[@]}"
-else
-    mkdir -p "$LOG_DIR"
-    rotate_log
-
-    nohup "${LLAMA_SERVER}" "${SERVER_ARGS[@]}" >> "$LOG_FILE" 2>&1 &
-    bg_pid=$!
-
-    echo "── $(date '+%Y-%m-%d %H:%M:%S') launch: ${MODEL} (PID ${bg_pid}) ──" >> "$LOG_FILE"
-
-    write_pid "$bg_pid" "$MODEL" "$PORT" "$ACTIVE_QUANT" "$PRESET_SLOT" "$REMOTE"
-
-    # Fail fast if llama-server dies during model load
-    sleep 1
-    if ! check_pid "$bg_pid"; then
-        echo "Error: llama-server exited immediately (PID: $bg_pid)." >&2
-        echo "Last log lines:" >&2
-        tail -10 "$LOG_FILE" >&2 || true
-        rm -f "$PID_FILE"
-        exit 1
-    fi
-
-    echo "Started $MODEL in background (PID: $bg_pid)"
-    echo "Logs:   $LOG_FILE"
-    echo
-    echo "Use 'llm-serve status' to check"
-    echo "Use 'llm-serve stop' to stop all"
-    echo "Use 'llm-serve stop $MODEL' to stop this model"
-fi
+run_python -m tui.cli "$@"

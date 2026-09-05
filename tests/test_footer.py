@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from tui.app import (
-    AliasNav,
-    LLMServeApp,
-    LogPanel,
-    ModelNav,
-    build_app_bindings,
-    selection_supports_action,
-)
+from tui.app import LLMServeApp
+from tui.bindings import build_app_bindings, selection_supports_action
+from tui.widgets.log_panel import LogPanel
+from tui.widgets.nav import AliasNav, ModelNav
+from tests.support import Harness
 
 
 def shown_actions(app: LLMServeApp) -> set[str]:
@@ -72,8 +69,14 @@ class FooterBindingTests(unittest.TestCase):
 
 
 class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.harness = Harness()
+
+    def tearDown(self) -> None:
+        self.harness.cleanup()
+
     async def test_model_actions_follow_selection(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             app.query_one(ModelNav).focus()
@@ -92,7 +95,7 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_alias)
 
     async def test_log_panel_hides_selection_actions(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause(0.3)
             logs = app.query_one(LogPanel)

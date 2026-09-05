@@ -21,8 +21,8 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 
 - **Linux** — setup.sh currently requires a Linux distro with pacman, apt, dnf, or zypper (for auto-installing missing packages)
 - **Bash 4.4+** — Required for associative arrays. Most modern Linux distributions include this.
-- **Python 3.9+** — Required for the TUI. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and TUI packages into a project `.venv`
-- **jq** — Required by the launcher to read `models.json`
+- **Python 3.9+** — Required for the TUI and launcher. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and the TUI package into a project `.venv`
+- **Python 3.9+** — Required for the TUI and launcher. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and the TUI package into a project `.venv`
 - **NVIDIA GPU** — Detected automatically via `nvidia-smi`; setup installs CUDA toolkit and builds with GPU support
 - **AMD GPU** — Detected automatically via `lspci`; setup installs ROCm HIP SDK and builds with `-DGGML_HIP=ON`
 - **Overrides** — `./setup.sh --cpu`, `--cuda`, or `--rocm` to force a build type

@@ -6,14 +6,22 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tui.app import AliasNav, EditAliasDialog, LLMServeApp, ModelNav
 from tui.data.hf import HubFile
 from tui.data.presets import get_active_slot, set_preset
+from tui.screens.editors import EditAliasDialog
 from tui.screens.quant_picker import QuantPickerScreen
+from tui.widgets.nav import AliasNav, ModelNav
+from tests.support import Harness
 from textual.widgets import Input
 
 
 class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.harness = Harness()
+
+    def tearDown(self) -> None:
+        self.harness.cleanup()
+
     @staticmethod
     def _select_model(nav: ModelNav, model_name: str) -> None:
         for index in range(nav.option_count):
@@ -33,7 +41,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
         raise AssertionError(f"alias not found: {alias_name}")
 
     async def test_quant_action_on_model_card_opens_quant_picker(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
             async with app.run_test(size=(120, 45)) as pilot:
                 nav = app.query_one(ModelNav)
@@ -47,7 +55,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.screen.context_options)
 
     async def test_duplicate_quant_ids_have_unique_file_rows(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
             async with app.run_test(size=(120, 45)) as pilot:
                 nav = app.query_one(ModelNav)
@@ -66,7 +74,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(screen.query_one("#quant-table").row_count, 2)
 
     async def test_number_key_activates_matching_preset_on_model_card(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(ModelNav)
             model_name = next(iter(app.registry.models))
@@ -91,7 +99,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(get_active_slot(app.preset_store, model_name, quant), 5)
 
     async def test_arrow_key_immediately_cycles_alias_target(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -113,7 +121,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             save.assert_called_once()
 
     async def test_number_key_pins_and_unpins_alias_preset(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -150,7 +158,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("  5  ←/→", str(selected_option.prompt))
 
     async def test_tab_moves_focus_from_models_to_aliases(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             self.assertIsInstance(app.focused, ModelNav)
 
@@ -159,7 +167,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(app.focused, AliasNav)
 
     async def test_e_key_opens_alias_rename_dialog(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -173,7 +181,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(name_input.value, alias_name)
 
     async def test_alias_rename_persists_new_name(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -197,7 +205,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             save.assert_called_once()
 
     async def test_escape_closes_alias_rename_dialog(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -214,7 +222,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIsInstance(app.screen, EditAliasDialog)
 
     async def test_escape_cancels_profile_editor(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(ModelNav)
             model_name = next(iter(app.registry.models))
@@ -231,7 +239,7 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._editor_mode)
 
     async def test_launch_from_pinned_alias_preserves_alias_name(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(AliasNav)
             alias_name = next(iter(app.registry.aliases))
@@ -246,20 +254,19 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with (
-                patch(
-                    "tui.app.subprocess.run",
-                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
-                ) as run,
+                patch("tui.app.prepare_launch") as prep,
+                patch("tui.app.launch_background"),
                 patch.object(app, "_reload_registry"),
                 patch.object(app, "_refresh_pid"),
             ):
+                prep.return_value = SimpleNamespace()
                 await pilot.press("l")
-                await pilot.pause()
+                await pilot.pause(0.4)
 
-            self.assertEqual(run.call_args.args[0][1], alias_name)
+            self.assertEqual(prep.call_args.args[0], alias_name)
 
     async def test_remote_hotkey_adds_flag_to_next_launch(self) -> None:
-        app = LLMServeApp()
+        app = self.harness.app()
         app.remote_launch = False
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(ModelNav)
@@ -271,18 +278,16 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.remote_launch)
 
             with (
-                patch(
-                    "tui.app.subprocess.run",
-                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
-                ) as run,
+                patch("tui.app.prepare_launch") as prep,
+                patch("tui.app.launch_background"),
                 patch.object(app, "_reload_registry"),
                 patch.object(app, "_refresh_pid"),
             ):
+                prep.return_value = SimpleNamespace()
                 await pilot.press("l")
-                await pilot.pause()
+                await pilot.pause(0.4)
 
-            command = run.call_args.args[0]
-            self.assertIn("--remote", command)
+            self.assertTrue(prep.call_args.kwargs.get("remote"))
 
 
 if __name__ == "__main__":

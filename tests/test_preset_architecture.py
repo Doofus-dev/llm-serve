@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.models_json import load_registry, validate_display_name
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS, PRESET_PARAM_KEYS
@@ -79,10 +76,13 @@ class PresetArchitectureTests(unittest.TestCase):
             self.assertIn(key, preset.params)
 
     def test_validate_display_name_unique(self) -> None:
-        reg = load_registry(Path(__file__).parent.parent / "models.json")
-        self.assertIsNone(validate_display_name(reg, "Unique Name XYZ"))
-        first = next(iter(reg.models.values()))
-        self.assertIsNotNone(validate_display_name(reg, first.display))
+        from tests.support import DISPLAY, write_harness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_harness(Path(tmp))
+            reg = load_registry(paths.models_json, models_dir=paths.models_dir)
+            self.assertIsNone(validate_display_name(reg, "Unique Name XYZ"))
+            self.assertIsNotNone(validate_display_name(reg, DISPLAY))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ Thumbs.db
 .vscode/
 *.pyc
 __pycache__/
+*.egg-info/
 .venv/
 /llama.cpp/
 presets.json

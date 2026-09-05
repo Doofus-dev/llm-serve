@@ -8,13 +8,9 @@ import unittest
 
 from rich.console import Console
 
-from tui.app import (
-    ConfigPanel,
-    StatusPanel,
-    generation_health,
-    temperature_health,
-    vram_health,
-)
+from tui.widgets.config import ConfigPanel
+from tui.widgets.health import generation_health, temperature_health, vram_health
+from tui.widgets.status import StatusPanel
 from tui.data.gpu import GPUStats
 from tui.data.pidfile import PidInfo
 from tui.data.stats import Metrics

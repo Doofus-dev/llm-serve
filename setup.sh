@@ -351,9 +351,9 @@ else
     ok ".venv already exists"
 fi
 
-info "Installing TUI packages (textual, httpx)..."
+info "Installing TUI package (textual, httpx)..."
 tui_pip_install "${SCRIPT_DIR}" || fail "pip install failed. Check network access to PyPI."
-tui_deps_ok "${TUI_VENV}" || fail "TUI modules failed to import after install (textual/httpx)."
+tui_deps_ok "${TUI_VENV}" || fail "TUI modules failed to import after install (textual/httpx/tui)."
 ok "TUI Python packages installed"
 
 # GPU / build type (auto-detect by default)

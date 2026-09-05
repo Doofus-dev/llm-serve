@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.baselines import RunBaseline, load_baselines, lookup_baseline, record_baseline
 from tui.data.vram import fmt_tps

@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tui.data.presets import (
     MAX_PRESETS_PER_MODEL,

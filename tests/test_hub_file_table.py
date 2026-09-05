@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests.support import Harness
 from textual.widgets import DataTable, Select
 
-from tui.app import LLMServeApp
 from tui.data.hf import HubFile, HubRepo
 from tui.data.models_json import ModelConfig, Registry, downloaded_repo_ids
 from tui.data.settings import TUISettings
@@ -67,6 +67,12 @@ class DownloadedRepoIdTests(unittest.TestCase):
 
 
 class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.harness = Harness()
+
+    def tearDown(self) -> None:
+        self.harness.cleanup()
+
     async def test_repo_table_marks_downloaded_repos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -92,7 +98,7 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     )
                 }
             )
-            app = LLMServeApp()
+            app = self.harness.app()
             screen = HubScreen(
                 registry=registry,
                 settings=TUISettings(),
@@ -134,7 +140,7 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
             author_dir.mkdir(parents=True)
             (author_dir / "Model-Q4_K_M.gguf").write_bytes(b"gguf")
 
-            app = LLMServeApp()
+            app = self.harness.app()
             screen = HubScreen(
                 registry=Registry(),
                 settings=TUISettings(),

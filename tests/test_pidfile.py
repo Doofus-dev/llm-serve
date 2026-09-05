@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tui.data.pidfile import read_pid_file
+from tui.data.pidfile import read_pid_file, write_pid_file
 
 
 class PidFileTests(unittest.TestCase):
@@ -31,6 +31,29 @@ class PidFileTests(unittest.TestCase):
         self.assertIsNone(info.quant)
         self.assertIsNone(info.preset_slot)
         self.assertFalse(info.remote)
+
+    def test_write_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "server.pid"
+            write_pid_file(
+                path,
+                pid=99,
+                model="demo-model",
+                port=8081,
+                quant="Q4_K_M",
+                preset_slot=2,
+                remote=True,
+                started_at=1000,
+            )
+            info = read_pid_file(path)
+            self.assertIsNotNone(info)
+            self.assertEqual(info.pid, 99)
+            self.assertEqual(info.model, "demo-model")
+            self.assertEqual(info.port, 8081)
+            self.assertEqual(info.ts, "1000")
+            self.assertEqual(info.quant, "Q4_K_M")
+            self.assertEqual(info.preset_slot, 2)
+            self.assertTrue(info.remote)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-"""Read the PID file written by the llm-serve bash launcher."""
+"""Read and write the PID file for the managed llama-server process."""
 
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,3 +43,29 @@ def read_pid_file(path: Path) -> PidInfo | None:
         )
     except (OSError, ValueError, IndexError):
         return None
+
+
+def write_pid_file(
+    path: Path,
+    *,
+    pid: int,
+    model: str,
+    port: int,
+    quant: str,
+    preset_slot: int,
+    remote: bool,
+    started_at: int | None = None,
+) -> None:
+    ts = int(time.time() if started_at is None else started_at)
+    remote_flag = "1" if remote else "0"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"{pid} {model} {port} {ts} {quant} {preset_slot} {remote_flag}\n"
+    )
+
+
+def clear_pid_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
