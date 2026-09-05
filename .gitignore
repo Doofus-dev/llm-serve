@@ -1,9 +1,11 @@
 # Runtime artifacts — never commit these
+models.conf
 logs/
 *.pid
 *.log
 
 # Model weights (gigantic, not for version control)
+models/
 *.gguf
 *.bin
 *.safetensors
@@ -26,3 +28,10 @@ Thumbs.db
 *.swp
 *~
 .vscode/
+*.pyc
+__pycache__/
+.venv/
+/llama.cpp/
+presets.json
+tui-settings.json
+tui-baselines.json

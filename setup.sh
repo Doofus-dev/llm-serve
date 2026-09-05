@@ -3,11 +3,12 @@
 # setup.sh — llm-serve environment setup
 #
 # Prepares a fresh clone of the llm-serve repo for first use:
-#   - Checks prerequisites (bash, git, cmake, C++ compiler)
+#   - Checks prerequisites (bash, git, cmake, C++ compiler, Python 3)
 #   - Clones llama.cpp if not present
 #   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
+#   - Creates a Python venv and installs TUI packages (textual, httpx)
 #   - Creates models/ and logs/ directories
-#   - Copies models.conf.example → models.conf (if no config exists)
+#   - Copies models.json.example → models.json (if no config exists)
 #
 # Usage:
 #   ./setup.sh              # Auto-detect GPU
@@ -55,40 +56,79 @@ pkg_hint() {
     local tool="$1"
     if command -v pacman &>/dev/null; then
         case "$tool" in
-            git)   echo "sudo pacman -S git" ;;
-            cmake) echo "sudo pacman -S cmake" ;;
-            g++)   echo "sudo pacman -S gcc" ;;
-            nvcc)  echo "sudo pacman -S cuda" ;;
-            rocm)  echo "sudo pacman -S rocm-hip-sdk" ;;
-            *)     echo "sudo pacman -S $tool" ;;
+            git)      echo "sudo pacman -S git" ;;
+            cmake)    echo "sudo pacman -S cmake" ;;
+            g++)      echo "sudo pacman -S gcc" ;;
+            nvcc)     echo "sudo pacman -S cuda" ;;
+            rocm)     echo "sudo pacman -S rocm-hip-sdk" ;;
+            python3)  echo "sudo pacman -S python" ;;
+            *)        echo "sudo pacman -S $tool" ;;
         esac
     elif command -v apt-get &>/dev/null; then
         case "$tool" in
-            git)   echo "sudo apt-get install git" ;;
-            cmake) echo "sudo apt-get install cmake" ;;
-            g++)   echo "sudo apt-get install g++" ;;
-            nvcc)  echo "sudo apt-get install nvidia-cuda-toolkit" ;;
-            rocm)  echo "sudo apt-get install rocm-hip-sdk" ;;
-            *)     echo "sudo apt-get install $tool" ;;
+            git)      echo "sudo apt-get install git" ;;
+            cmake)    echo "sudo apt-get install cmake" ;;
+            g++)      echo "sudo apt-get install g++" ;;
+            nvcc)     echo "sudo apt-get install nvidia-cuda-toolkit" ;;
+            rocm)     echo "sudo apt-get install rocm-hip-sdk" ;;
+            python3)  echo "sudo apt-get install python3 python3-venv python3-pip" ;;
+            *)        echo "sudo apt-get install $tool" ;;
         esac
     elif command -v dnf &>/dev/null; then
         case "$tool" in
-            git)   echo "sudo dnf install git" ;;
-            cmake) echo "sudo dnf install cmake" ;;
-            g++)   echo "sudo dnf install gcc-c++" ;;
-            nvcc)  echo "sudo dnf install nvidia-cuda-toolkit" ;;
-            *)     echo "sudo dnf install $tool" ;;
+            git)      echo "sudo dnf install git" ;;
+            cmake)    echo "sudo dnf install cmake" ;;
+            g++)      echo "sudo dnf install gcc-c++" ;;
+            nvcc)     echo "sudo dnf install nvidia-cuda-toolkit" ;;
+            python3)  echo "sudo dnf install python3 python3-pip" ;;
+            *)        echo "sudo dnf install $tool" ;;
         esac
     elif command -v zypper &>/dev/null; then
         case "$tool" in
-            git)   echo "sudo zypper install git" ;;
-            cmake) echo "sudo zypper install cmake" ;;
-            g++)   echo "sudo zypper install gcc-c++" ;;
-            nvcc)  echo "sudo zypper install nvidia-cuda-toolkit" ;;
-            *)     echo "sudo zypper install $tool" ;;
+            git)      echo "sudo zypper install git" ;;
+            cmake)    echo "sudo zypper install cmake" ;;
+            g++)      echo "sudo zypper install gcc-c++" ;;
+            nvcc)     echo "sudo zypper install nvidia-cuda-toolkit" ;;
+            python3)  echo "sudo zypper install python3 python3-pip python3-venv" ;;
+            *)        echo "sudo zypper install $tool" ;;
         esac
     else
         echo "your package manager"
+    fi
+}
+
+# Install native distro packages. Names must match the detected package manager.
+install_packages() {
+    [[ $# -gt 0 ]] || return 0
+    if ! command -v sudo &>/dev/null; then
+        fail "Need sudo to install packages: $*. Try: $(pkg_hint "$1")"
+    fi
+    if command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm "$@"
+    elif command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y "$@"
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y "$@"
+    elif command -v zypper &>/dev/null; then
+        sudo zypper install -y "$@"
+    else
+        fail "No supported package manager found. Install manually: $*"
+    fi
+}
+
+# Distro packages needed for python3 + venv + pip (Ubuntu needs python3-venv).
+python_system_packages() {
+    if command -v pacman &>/dev/null; then
+        echo python
+    elif command -v apt-get &>/dev/null; then
+        echo python3 python3-venv python3-pip
+    elif command -v dnf &>/dev/null; then
+        echo python3 python3-pip
+    elif command -v zypper &>/dev/null; then
+        echo python3 python3-pip python3-venv
+    else
+        return 1
     fi
 }
 
@@ -99,6 +139,8 @@ BUILD_FORCE=""   # empty=auto-detect, cpu, cuda, or rocm
 
 # shellcheck source=lib/llama-build.sh
 source "${SCRIPT_DIR}/lib/llama-build.sh"
+# shellcheck source=lib/tui-venv.sh
+source "${SCRIPT_DIR}/lib/tui-venv.sh"
 
 _set_build_force() {
     local val="$1"
@@ -131,9 +173,9 @@ while [[ $# -gt 0 ]]; do
             echo "  ./setup.sh --rocm       Force ROCm build (AMD)"
             echo "  ./setup.sh --help       Show this help"
             echo ""
-            echo "Checks prerequisites, clones & builds llama.cpp,"
-            echo "creates models/ and logs/ directories, and sets up"
-            echo "a default models.conf from the example template."
+            echo "Checks prerequisites, clones & builds llama.cpp, installs"
+            echo "Python and TUI dependencies, creates models/ and logs/"
+            echo "directories, and sets up a default models.json."
             echo ""
             echo "Idempotent — safe to re-run."
             exit 0
@@ -270,6 +312,50 @@ if ! command -v make &>/dev/null; then
 fi
 ok "make $(make --version | head -1 | cut -d' ' -f4)"
 
+# Python 3 + venv (TUI). Ubuntu/Debian need python3-venv for ensurepip.
+echo ""
+info "Checking Python for the TUI..."
+if ! command -v python3 &>/dev/null; then
+    warn "python3 not found. Installing..."
+    pkgs="$(python_system_packages)" || fail "No supported package manager. Install Python 3.9+ manually."
+    # shellcheck disable=SC2086
+    install_packages ${pkgs} || fail "Could not install Python. Try: $(pkg_hint python3)"
+fi
+if ! command -v python3 &>/dev/null; then
+    fail "python3 not found. Install it via your package manager: $(pkg_hint python3)"
+fi
+if ! tui_python_version_ok; then
+    fail "Python $(tui_python_version) is too old. Need Python ${TUI_MIN_PY_MAJOR}.${TUI_MIN_PY_MINOR}+."
+fi
+if ! tui_venv_module_ok; then
+    warn "Python venv support missing (Ubuntu/Debian: python3-venv). Installing..."
+    pkgs="$(python_system_packages)" || fail "No supported package manager. Install python3-venv / equivalent manually."
+    # shellcheck disable=SC2086
+    install_packages ${pkgs} || fail "Could not install Python venv support. Try: $(pkg_hint python3)"
+fi
+if ! tui_venv_module_ok; then
+    fail "Python venv/ensurepip still missing. Install it via your package manager ($(pkg_hint python3)) and re-run."
+fi
+ok "Python $(tui_python_version)"
+
+TUI_VENV="$(tui_venv_dir "${SCRIPT_DIR}")"
+if ! tui_venv_healthy "${TUI_VENV}"; then
+    if [[ -e "${TUI_VENV}" ]]; then
+        warn "Existing .venv is incomplete. Recreating..."
+    else
+        info "Creating Python virtualenv at .venv..."
+    fi
+    tui_recreate_venv "${TUI_VENV}" || fail "Failed to create .venv. On Ubuntu/Debian: sudo apt-get install python3-venv && ./setup.sh"
+    ok "Created .venv"
+else
+    ok ".venv already exists"
+fi
+
+info "Installing TUI packages (textual, httpx)..."
+tui_pip_install "${SCRIPT_DIR}" || fail "pip install failed. Check network access to PyPI."
+tui_deps_ok "${TUI_VENV}" || fail "TUI modules failed to import after install (textual/httpx)."
+ok "TUI Python packages installed"
+
 # GPU / build type (auto-detect by default)
 echo ""
 info "Detecting build type..."
@@ -316,6 +402,9 @@ if [[ -d "${LLAMA_DIR}/.git" ]]; then
 else
     if [[ -d "${LLAMA_DIR}" ]]; then
         warn "Directory ${LLAMA_DIR} exists but is not a git repo. Skipping clone."
+        echo "    llama-server needs the llama.cpp source tree to build."
+        echo "    Remove it and re-run setup:  rm -rf ${LLAMA_DIR} && ./setup.sh"
+        exit 1
     else
         info "Cloning llama.cpp..."
         git clone https://github.com/ggml-org/llama.cpp.git "${LLAMA_DIR}"
@@ -400,23 +489,23 @@ else
 fi
 
 ###############################################################################
-# Phase 5: Set up models.conf (if needed)
+# Phase 5: Set up models.json (if needed)
 ###############################################################################
-CONF="${SCRIPT_DIR}/models.conf"
-CONF_EXAMPLE="${SCRIPT_DIR}/models.conf.example"
+MODELS_JSON="${SCRIPT_DIR}/models.json"
+MODELS_JSON_EXAMPLE="${SCRIPT_DIR}/models.json.example"
 
-if [[ ! -f "${CONF}" ]]; then
-    if [[ -f "${CONF_EXAMPLE}" ]]; then
-        cp "${CONF_EXAMPLE}" "${CONF}"
-        ok "Created models.conf from example template"
+if [[ ! -f "${MODELS_JSON}" ]]; then
+    if [[ -f "${MODELS_JSON_EXAMPLE}" ]]; then
+        cp "${MODELS_JSON_EXAMPLE}" "${MODELS_JSON}"
+        ok "Created models.json from example template"
     else
-        warn "No models.conf.example found. You'll need to create models.conf manually."
+        warn "No models.json.example found. Create models.json manually."
     fi
 else
-    ok "models.conf already exists (skipping)"
+    ok "models.json already exists (skipping)"
 fi
 
-# Make llm-serve executable
+# Make launcher executable
 chmod +x "${SCRIPT_DIR}/llm-serve"
 
 ###############################################################################
@@ -424,40 +513,45 @@ chmod +x "${SCRIPT_DIR}/llm-serve"
 ###############################################################################
 echo ""
 LOCAL_BIN="${HOME}/.local/bin"
-LLM_SERVE_LINK="${LOCAL_BIN}/llm-serve"
+mkdir -p "${LOCAL_BIN}"
 
-if [[ -L "${LLM_SERVE_LINK}" ]]; then
-    CURRENT_TARGET="$(readlink "${LLM_SERVE_LINK}")"
-    EXPECTED_TARGET="${SCRIPT_DIR}/llm-serve"
-    if [[ "$CURRENT_TARGET" == "$EXPECTED_TARGET" ]]; then
-        ok "llm-serve already linked: ${LLM_SERVE_LINK} -> ${CURRENT_TARGET}"
+link_into_local_bin() {
+    local name="$1"
+    local src="${SCRIPT_DIR}/${name}"
+    local dest="${LOCAL_BIN}/${name}"
+    local current
+
+    if [[ -L "${dest}" ]]; then
+        current="$(readlink "${dest}")"
+        if [[ "$current" == "$src" ]]; then
+            ok "${name} already linked: ${dest} -> ${current}"
+        else
+            warn "${name} symlink points to a different location."
+            echo "       Current: ${dest} -> ${current}"
+            echo "       New:     ${dest} -> ${src}"
+            info "Updating symlink..."
+            rm -f "${dest}"
+            ln -s "${src}" "${dest}"
+            ok "Symlink updated."
+        fi
+    elif [[ -e "${dest}" ]]; then
+        warn "${dest} exists but is not a symlink (skipping)"
     else
-        warn "llm-serve symlink points to a different location."
-        echo "       Current: ${LLM_SERVE_LINK} -> ${CURRENT_TARGET}"
-        echo "       New:     ${LLM_SERVE_LINK} -> ${EXPECTED_TARGET}"
-        echo ""
-        info "Updating symlink..."
-        rm -f "${LLM_SERVE_LINK}"
-        ln -s "${EXPECTED_TARGET}" "${LLM_SERVE_LINK}"
-        ok "Symlink updated."
+        ln -s "${src}" "${dest}"
+        ok "Linked ${name} -> ${dest}"
     fi
-elif [[ -e "${LLM_SERVE_LINK}" ]]; then
-    warn "${LLM_SERVE_LINK} exists but is not a symlink (skipping)"
-else
-    mkdir -p "${LOCAL_BIN}"
-    ln -s "${SCRIPT_DIR}/llm-serve" "${LLM_SERVE_LINK}"
-    ok "Linked llm-serve -> ${LOCAL_BIN}/llm-serve"
+}
 
-    # If ~/.local/bin isn't on PATH, hint about it
-    if ! echo "${PATH}" | tr ':' '\n' | grep -qxF "${LOCAL_BIN}"; then
-        warn "~/.local/bin is not on your PATH."
-        echo ""
-        echo "  Add this to your ~/.bashrc or ~/.zshrc:"
-        echo "    export PATH=\"\${HOME}/.local/bin:\${PATH}\""
-        echo ""
-        echo "  Then restart your shell or run: source ~/.bashrc"
-        echo ""
-    fi
+link_into_local_bin llm-serve
+
+if ! echo "${PATH}" | tr ':' '\n' | grep -qxF "${LOCAL_BIN}"; then
+    warn "~/.local/bin is not on your PATH."
+    echo ""
+    echo "  Add this to your ~/.bashrc or ~/.zshrc:"
+    echo "    export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+    echo ""
+    echo "  Then restart your shell or run: source ~/.bashrc"
+    echo ""
 fi
 
 ###############################################################################
@@ -470,23 +564,20 @@ ok "Setup complete!"
 echo ""
 echo "Next steps:"
 echo ""
-echo "  1. Download a .gguf model and put it in: ${MODELS_DIR}/"
+echo "  1. Launch the TUI from any directory (Python env is already set up):"
+echo "     llm-serve"
+echo "     # or: ${SCRIPT_DIR}/llm-serve"
 echo ""
-echo "  2. Edit ${CONF}:"
-echo "     - Set MODEL_DIR=${MODELS_DIR}  (or leave empty for default)"
-echo "     - Add a register_model entry for your model:"
-echo "       register_model \"my-model\" \\"
-echo "           file=\"my-model.gguf\" \\"
-echo "           gpu_layers=99 \\"
-echo "           ctx=32768 \\"
-echo "           ... (see models.conf.example for all parameters)"
+echo "  2. Download a .gguf model and put it in: ${MODELS_DIR}/"
+echo "     (or press H in the TUI to browse/download from Hugging Face; optional: install hf CLI)"
 echo ""
-echo "  3. Test it:"
-echo "     cd ${SCRIPT_DIR}"
+echo "  3. Add or edit models in ${MODELS_JSON} (or use the TUI editor):"
+echo "     - Set file paths under ${MODELS_DIR}/"
+echo "     - Tune gpu_layers, ctx, cache types, and sampling per quant/preset"
+echo "     - Press F1 in the editor for parameter help (from param-help.conf)"
+echo ""
+echo "  4. Test it:"
 echo "     ./llm-serve --dry-run my-model     # verify config without starting"
 echo "     ./llm-serve my-model                # start the server"
-echo ""
-echo "  4. Launch Hermes with the local model:"
-echo "     LLAMA_PORT=8081 hermes config set provider local"
 echo ""
 echo "─────────────────────────────────────────────────────────────────────"
