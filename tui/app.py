@@ -1595,7 +1595,7 @@ class LLMServeApp(App):
         self.settings = load_settings(TUI_SETTINGS_JSON)
         self.download_manager = DownloadManager()
         self.client: ServerClient | None = None
-        self.remote_launch: bool = False
+        self.remote_launch: bool = self.settings.remote_launch
         self.log_verbosity: int = self.settings.log_verbosity
         self._launch_time: float | None = None
         self._editor_mode: bool = False
@@ -1697,6 +1697,7 @@ class LLMServeApp(App):
         self.set_interval(5.0, self._poll_gpu)
         self.set_interval(3.0, self._poll_log)
         self.query_one(LogPanel).poll_file(LOG_FILE)
+        self.query_one(StatusPanel).next_remote = self.remote_launch
         self.query_one(StatusPanel).next_log_verbosity = self.log_verbosity
         self._update_footer()
         self.download_manager.subscribe(self._on_download_state)
@@ -2171,6 +2172,8 @@ class LLMServeApp(App):
     def action_toggle_remote(self) -> None:
         """Toggle Meshnet/LAN binding for the next launch."""
         self.remote_launch = not self.remote_launch
+        self.settings.remote_launch = self.remote_launch
+        save_settings(TUI_SETTINGS_JSON, self.settings)
         self.query_one(StatusPanel).next_remote = self.remote_launch
         self._update_footer()
 

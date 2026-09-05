@@ -65,7 +65,10 @@ async def main():
         assert "GPU" in r2 and ("AMD" in r2 or "RAM" in r2)
         print("gpu section OK")
 
-        await pilot.press("r")
+        from unittest.mock import patch
+
+        with patch("tui.app.save_settings"):
+            await pilot.press("r")
         await pilot.pause(0.2)
         print("smoke test PASSED")
 

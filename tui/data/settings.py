@@ -18,6 +18,7 @@ class TUISettings:
     theme: str | None = None
     hf_authors: list[str] = field(default_factory=lambda: list(DEFAULT_HF_AUTHORS))
     log_verbosity: int = DEFAULT_LOG_VERBOSITY
+    remote_launch: bool = False
 
 
 def clamp_log_verbosity(value: object, default: int = DEFAULT_LOG_VERBOSITY) -> int:
@@ -42,6 +43,20 @@ def log_verbosity_label(level: int) -> str:
     return LOG_VERBOSITY_LABELS.get(level, str(level))
 
 
+def coerce_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    return default
+
+
 def load_settings(path: Path) -> TUISettings:
     if not path.exists():
         return TUISettings()
@@ -58,6 +73,7 @@ def load_settings(path: Path) -> TUISettings:
         theme=theme if isinstance(theme, str) and theme else None,
         hf_authors=hf_authors,
         log_verbosity=clamp_log_verbosity(data.get("log_verbosity", DEFAULT_LOG_VERBOSITY)),
+        remote_launch=coerce_bool(data.get("remote_launch", False)),
     )
 
 
@@ -68,6 +84,7 @@ def save_settings(path: Path, settings: TUISettings) -> None:
     if settings.hf_authors:
         data["hf_authors"] = list(settings.hf_authors)
     data["log_verbosity"] = clamp_log_verbosity(settings.log_verbosity)
+    data["remote_launch"] = bool(settings.remote_launch)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 

@@ -187,12 +187,14 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_remote_hotkey_adds_flag_to_next_launch(self) -> None:
         app = LLMServeApp()
+        app.remote_launch = False
         async with app.run_test(size=(120, 45)) as pilot:
             nav = app.query_one(ModelNav)
             self._select_model(nav, next(iter(app.registry.models)))
             nav.focus()
 
-            await pilot.press("r")
+            with patch("tui.app.save_settings"):
+                await pilot.press("r")
             self.assertTrue(app.remote_launch)
 
             with (

@@ -148,6 +148,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(loaded.theme, "gruvbox")
             self.assertEqual(loaded.hf_authors, ["bartowski"])
             self.assertEqual(loaded.log_verbosity, 4)
+            self.assertFalse(loaded.remote_launch)
 
             self.assertTrue(remember_hf_author(loaded, "unsloth"))
             self.assertFalse(remember_hf_author(loaded, "unsloth"))
@@ -168,6 +169,18 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(cycle_log_verbosity(4), 5)
         self.assertEqual(cycle_log_verbosity(5), 3)
         self.assertEqual(cycle_log_verbosity(99), 4)
+
+    def test_remote_launch_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tui-settings.json"
+            settings = TUISettings(remote_launch=True)
+            save_settings(path, settings)
+            loaded = load_settings(path)
+            self.assertTrue(loaded.remote_launch)
+
+            loaded.remote_launch = False
+            save_settings(path, loaded)
+            self.assertFalse(load_settings(path).remote_launch)
 
 
 class ModelJsonTests(unittest.TestCase):
