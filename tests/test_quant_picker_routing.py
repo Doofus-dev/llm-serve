@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tui.app import AliasNav, LLMServeApp, ModelNav
+from tui.app import AliasNav, EditAliasDialog, LLMServeApp, ModelNav
 from tui.data.hf import HubFile
 from tui.data.presets import get_active_slot, set_preset
 from tui.screens.quant_picker import QuantPickerScreen
@@ -195,6 +195,40 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(alias_name, app.registry.aliases)
             self.assertIn(new_name, app.registry.aliases)
             save.assert_called_once()
+
+    async def test_escape_closes_alias_rename_dialog(self) -> None:
+        app = LLMServeApp()
+        async with app.run_test(size=(120, 45)) as pilot:
+            nav = app.query_one(AliasNav)
+            alias_name = next(iter(app.registry.aliases))
+            self._select_alias(nav, alias_name)
+            nav.focus()
+
+            await pilot.press("e")
+            await pilot.pause()
+            self.assertTrue(hasattr(app.screen, "action_cancel"))
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertNotIsInstance(app.screen, EditAliasDialog)
+
+    async def test_escape_cancels_profile_editor(self) -> None:
+        app = LLMServeApp()
+        async with app.run_test(size=(120, 45)) as pilot:
+            nav = app.query_one(ModelNav)
+            model_name = next(iter(app.registry.models))
+            self._select_model(nav, model_name)
+            nav.focus()
+
+            await pilot.press("e")
+            await pilot.pause()
+            self.assertTrue(app._editor_mode)
+
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertFalse(app._editor_mode)
 
     async def test_launch_from_pinned_alias_preserves_alias_name(self) -> None:
         app = LLMServeApp()

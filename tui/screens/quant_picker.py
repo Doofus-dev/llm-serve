@@ -17,6 +17,7 @@ from tui.data.hf import HubFile, list_repo_ggufs
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
 from tui.data.quant_table import QuantFileRow, build_quant_file_rows, quant_file_row_cells
 from tui.data.vram import fmt_memory_mb
+from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
 
 
 class QuantPickerScreen(ModalScreen[str | None]):
@@ -34,7 +35,9 @@ class QuantPickerScreen(ModalScreen[str | None]):
     QuantPickerScreen {
         align: center middle;
     }
-
+"""
+    CSS += ACTION_BUTTON_CSS
+    CSS += """
     #quant-picker {
         width: 100%;
         height: 100%;
@@ -85,10 +88,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
         height: 3;
         layout: horizontal;
         align: left middle;
-    }
-
-    #quant-picker-actions Button {
-        margin-right: 1;
     }
 
     #quant-picker-help {
@@ -153,7 +152,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="quant-picker-help",
             )
-            with Horizontal(id="quant-picker-actions"):
+            with ActionBar(id="quant-picker-actions"):
                 yield Button("Select", variant="primary", id="select")
                 yield Button("Cancel", id="cancel")
 

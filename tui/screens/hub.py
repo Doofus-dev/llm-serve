@@ -15,6 +15,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
+from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
 from tui.data.context_length import context_length_options, fmt_ctx_compact, hub_min_context_options
 from tui.data.hf import (
     HF_INSTALL_HINT,
@@ -54,17 +55,27 @@ from tui.data.gpu import GPUStats, query_gpu
 from tui.data.vram import fmt_memory_mb
 
 
+MODAL_CANCEL_BINDINGS = [
+    Binding("escape", "cancel", "Cancel"),
+]
+
+
 class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
     """Prompt for a Hugging Face token."""
+
+    BINDINGS = MODAL_CANCEL_BINDINGS
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-login-dialog"):
             yield Label("[bold]Hugging Face Login[/bold]")
             yield Label("Paste a token from huggingface.co/settings/tokens")
             yield Input(password=True, placeholder="hf_...", id="token")
-            with Horizontal():
+            with ActionBar():
                 yield Button("Login", variant="success", id="login")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Cancel", id="cancel")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -77,6 +88,8 @@ class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
 
 class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
     """Name + clone-from for a downloaded model profile."""
+
+    BINDINGS = MODAL_CANCEL_BINDINGS
 
     def __init__(self, registry: Registry, default_name: str):
         super().__init__()
@@ -91,9 +104,12 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
             yield Input(value=self.default_name, placeholder="Qwen 3.8", id="name")
             yield Label("Clone server params from:")
             yield Select(options, id="clone_from", value=options[0][1] if options else Select.BLANK)
-            with Horizontal():
+            with ActionBar():
                 yield Button("Create", variant="success", id="create")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Cancel", id="cancel")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -146,7 +162,9 @@ class HubScreen(Screen):
     HubScreen {
         align: center middle;
     }
-
+"""
+    CSS += ACTION_BUTTON_CSS
+    CSS += """
     #hub-panel {
         width: 100%;
         max-width: 120;
@@ -175,32 +193,6 @@ class HubScreen(Screen):
     #hub-filters {
         height: 6;
         min-height: 6;
-    }
-
-    #hub-filters Button {
-        height: 3;
-        min-width: 0;
-        width: auto;
-        padding: 0 1;
-        margin: 0 1 0 0;
-        border: round $primary;
-        background: transparent;
-        color: $text;
-    }
-
-    #hub-filters Button:hover,
-    #hub-filters Button:focus {
-        background: transparent;
-    }
-
-    #hub-filters Button.-success {
-        border: round $success;
-        color: $success;
-    }
-
-    #hub-filters Button.-primary {
-        border: round $primary;
-        color: $primary;
     }
 
     #hub-filters #select {
@@ -378,7 +370,7 @@ class HubScreen(Screen):
                         id="min_context",
                         allow_blank=True,
                     )
-                with Horizontal():
+                with ActionBar():
                     yield Button("Search", variant="primary", id="search")
                     yield Button("Login", id="login")
                     yield Button("Back", id="back")

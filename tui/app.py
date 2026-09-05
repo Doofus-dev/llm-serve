@@ -87,6 +87,7 @@ from tui.data.settings import (
 )
 from tui.screens.hub import HubScreen
 from tui.screens.quant_picker import QuantPickerScreen
+from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
 from tui.data.downloads import DownloadManager, DownloadJob
 from tui.data.quant import quant_from_filename
 from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
@@ -140,6 +141,10 @@ EDITOR_BINDINGS = [
     Binding("f2", "toggle_param_help", "Param Help"),
     Binding("ctrl+s", "save_editor", "Save"),
     Binding("escape", "cancel_editor", "Cancel"),
+]
+
+MODAL_CANCEL_BINDINGS = [
+    Binding("escape", "cancel", "Cancel"),
 ]
 
 
@@ -948,6 +953,8 @@ class LogPanel(RichLog):
 class ConfirmDialog(ModalScreen[bool]):
     """Yes/No confirmation dialog."""
 
+    BINDINGS = MODAL_CANCEL_BINDINGS
+
     def __init__(self, message: str):
         super().__init__()
         self.message = message
@@ -955,9 +962,12 @@ class ConfirmDialog(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
             yield Label(self.message)
-            with Horizontal():
+            with ActionBar():
                 yield Button("Yes", variant="error", id="yes")
                 yield Button("No", variant="primary", id="no")
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
@@ -1028,9 +1038,9 @@ class ProfileEditor(VerticalScroll):
         yield Label("Notes:", classes="field-label")
         self.notes_input = EditorInput(value=str(self.params.get("notes", "")), id="profile_notes")
         yield self.notes_input
-        with Horizontal():
+        with ActionBar():
             yield Button("Save", variant="success", id="save")
-            yield Button("Cancel", variant="default", id="cancel")
+            yield Button("Cancel", id="cancel")
 
     def save(self) -> None:
         display = self.display_input.value.strip() if self.display_input else ""
@@ -1148,9 +1158,9 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
                             with Vertical(classes="param-field"):
                                 yield from self._yield_param_controls(param, value)
 
-        with Horizontal():
+        with ActionBar():
             yield Button("Save", variant="success", id="save")
-            yield Button("Cancel", variant="default", id="cancel")
+            yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -1209,6 +1219,8 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
 class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
     """Dialog to create a new alias."""
 
+    BINDINGS = MODAL_CANCEL_BINDINGS
+
     def __init__(self, registry: Registry):
         super().__init__()
         self.registry = registry
@@ -1224,9 +1236,12 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
             options = [(name, name) for name in self.registry.models.keys()]
             yield Select(options, id="target", value=options[0][1] if options else None)
             yield Label("")
-            with Horizontal():
+            with ActionBar():
                 yield Button("Create", variant="success", id="create")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Cancel", id="cancel")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -1246,6 +1261,8 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
 class EditAliasDialog(ModalScreen[str | None]):
     """Dialog to rename an existing alias."""
 
+    BINDINGS = MODAL_CANCEL_BINDINGS
+
     def __init__(self, registry: Registry, alias_name: str):
         super().__init__()
         self.registry = registry
@@ -1258,14 +1275,17 @@ class EditAliasDialog(ModalScreen[str | None]):
             yield Label("Alias name:")
             yield Input(value=self.alias_name, placeholder="fast", id="name")
             yield Label("")
-            with Horizontal():
+            with ActionBar():
                 yield Button("Save", variant="success", id="save")
-                yield Button("Cancel", variant="default", id="cancel")
+                yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
         name_input = self.query_one("#name", Input)
         name_input.focus()
         name_input.action_select_all()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
@@ -1362,6 +1382,7 @@ Models pane (model or preset selected)
 
 Aliases pane
   E         rename alias
+  Esc       cancel rename dialog
   N         new alias
   D         delete alias
   ←→        change target model
@@ -1384,7 +1405,9 @@ class LLMServeApp(App):
     Screen {
         background: $surface;
     }
-
+"""
+    CSS += ACTION_BUTTON_CSS
+    CSS += """
     #app-body {
         height: 1fr;
         layout: vertical;
@@ -1600,7 +1623,7 @@ class LLMServeApp(App):
         width: 60;
         height: auto;
         background: $surface;
-        border: thick $error;
+        border: round $error;
         padding: 1 2;
         align: center middle;
     }
@@ -1609,12 +1632,11 @@ class LLMServeApp(App):
         width: 60;
         height: auto;
         background: $surface;
-        border: thick $primary;
+        border: round $primary;
         padding: 1 2;
         align: center middle;
     }
-    
-    Button { margin: 0 1; }
+
     Input { margin: 0; }
 
     .param-label {
