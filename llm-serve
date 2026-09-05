@@ -325,6 +325,10 @@ launch_tui() {
     if ! tui_ensure_runtime "${SCRIPT_DIR}"; then
         die "Failed to set up the TUI Python environment. Re-run ./setup.sh."
     fi
+    # `python -m tui` searches cwd first. The package lives in the repo and is
+    # not installed into the venv, so launch from $HOME (or anywhere else)
+    # fails with "No module named tui" unless we enter SCRIPT_DIR first.
+    cd "${SCRIPT_DIR}" || die "could not enter ${SCRIPT_DIR}"
     exec "$(tui_venv_dir "${SCRIPT_DIR}")/bin/python" -m tui
 }
 

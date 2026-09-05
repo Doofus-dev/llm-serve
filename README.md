@@ -15,7 +15,7 @@ A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) th
 - **Status management** — `llm-serve status` and `llm-serve stop` for running servers
 - **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, installs Python and TUI dependencies, creates directories
 - **Clean uninstall** — `llm-serve uninstall` removes build artifacts while preserving models and config
-- **PATH integration** — Automatically symlinks `llm-serve` into `~/.local/bin/` for global access
+- **PATH integration** — Automatically symlinks `llm-serve` into `~/.local/bin/` so you can launch the TUI or a model from any directory
 
 ## Prerequisites
 
@@ -43,9 +43,11 @@ cd llm-serve
 
 # Edit models.json to register your model (or use the TUI editor)
 
-# Open the TUI, or launch a model directly
+# Open the TUI, or launch a model directly (works from any directory after setup)
 ./llm-serve
 ./llm-serve my-model
+# or, once ~/.local/bin is on PATH:
+# llm-serve
 
 # Show configured models and CLI commands
 ./llm-serve --help
