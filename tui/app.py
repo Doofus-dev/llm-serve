@@ -1243,6 +1243,47 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
             self.dismiss((name, target))
 
 
+class EditAliasDialog(ModalScreen[str | None]):
+    """Dialog to rename an existing alias."""
+
+    def __init__(self, registry: Registry, alias_name: str):
+        super().__init__()
+        self.registry = registry
+        self.alias_name = alias_name
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="create-dialog"):
+            yield Label(f"[bold]Rename Alias: {self.alias_name}[/bold]")
+            yield Label("")
+            yield Label("Alias name:")
+            yield Input(value=self.alias_name, placeholder="fast", id="name")
+            yield Label("")
+            with Horizontal():
+                yield Button("Save", variant="success", id="save")
+                yield Button("Cancel", variant="default", id="cancel")
+
+    def on_mount(self) -> None:
+        name_input = self.query_one("#name", Input)
+        name_input.focus()
+        name_input.action_select_all()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            name = self.query_one("#name", Input).value.strip()
+            if not name:
+                self.app.notify("Name cannot be empty", severity="error")
+                return
+            if name == self.alias_name:
+                self.dismiss(None)
+                return
+            if name in self.registry.aliases:
+                self.app.notify(f"Alias '{name}' already exists", severity="error")
+                return
+            self.dismiss(name)
+
+
 _PRESET_HOTKEYS = (
     Binding("1", "activate_preset(1)", "Preset 1", show=False),
     Binding("2", "activate_preset(2)", "Preset 2", show=False),
@@ -1295,7 +1336,7 @@ def selection_supports_action(
     if log_section and action in SELECTION_ACTIONS:
         return False
     if action == "edit":
-        return kind in {"model", "preset"}
+        return kind in {"model", "preset", "alias"}
     if action == "pick_quant":
         return models_section and kind in {"model", "preset"}
     if action == "launch":
@@ -1320,6 +1361,7 @@ Models pane (model or preset selected)
   D         delete
 
 Aliases pane
+  E         rename alias
   N         new alias
   D         delete alias
   ←→        change target model
@@ -2266,7 +2308,25 @@ class LLMServeApp(App):
         
         # Check if it's an alias
         if data[0] == "alias":
-            self.notify("Use ←/→ to change this alias target")
+            alias_name = data[1]
+
+            def handle_rename(new_name: str | None) -> None:
+                if not new_name or new_name == alias_name:
+                    return
+                target = self.registry.aliases.pop(alias_name)
+                self.registry.aliases[new_name] = target
+                save_registry(MODELS_JSON, self.registry)
+                self._reload_registry()
+                nav = self.query_one(AliasNav)
+                nav.focus()
+                for index in range(nav.option_count):
+                    option = nav.get_option_at_index(index)
+                    if nav._option_data.get(option.id or "") == ("alias", new_name):
+                        nav.highlighted = index
+                        break
+                self.notify(f"Renamed alias {alias_name} → {new_name}")
+
+            self.push_screen(EditAliasDialog(self.registry, alias_name), handle_rename)
             return
         
         # Otherwise it's a model

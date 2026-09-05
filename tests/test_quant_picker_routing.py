@@ -10,6 +10,7 @@ from tui.app import AliasNav, LLMServeApp, ModelNav
 from tui.data.hf import HubFile
 from tui.data.presets import get_active_slot, set_preset
 from tui.screens.quant_picker import QuantPickerScreen
+from textual.widgets import Input
 
 
 class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -156,6 +157,44 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("tab")
 
             self.assertIsInstance(app.focused, AliasNav)
+
+    async def test_e_key_opens_alias_rename_dialog(self) -> None:
+        app = LLMServeApp()
+        async with app.run_test(size=(120, 45)) as pilot:
+            nav = app.query_one(AliasNav)
+            alias_name = next(iter(app.registry.aliases))
+            self._select_alias(nav, alias_name)
+            nav.focus()
+
+            await pilot.press("e")
+            await pilot.pause()
+
+            name_input = app.screen.query_one("#name", Input)
+            self.assertEqual(name_input.value, alias_name)
+
+    async def test_alias_rename_persists_new_name(self) -> None:
+        app = LLMServeApp()
+        async with app.run_test(size=(120, 45)) as pilot:
+            nav = app.query_one(AliasNav)
+            alias_name = next(iter(app.registry.aliases))
+            self._select_alias(nav, alias_name)
+            nav.focus()
+            new_name = f"{alias_name}-renamed"
+
+            with (
+                patch("tui.app.save_registry") as save,
+                patch.object(app, "_reload_registry"),
+            ):
+                await pilot.press("e")
+                await pilot.pause()
+                name_input = app.screen.query_one("#name", Input)
+                name_input.value = new_name
+                await pilot.click("#save")
+                await pilot.pause()
+
+            self.assertNotIn(alias_name, app.registry.aliases)
+            self.assertIn(new_name, app.registry.aliases)
+            save.assert_called_once()
 
     async def test_launch_from_pinned_alias_preserves_alias_name(self) -> None:
         app = LLMServeApp()

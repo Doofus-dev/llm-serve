@@ -26,7 +26,7 @@ class FooterBindingTests(unittest.TestCase):
     def test_selection_kinds_that_enable_model_actions(self) -> None:
         self.assertTrue(selection_supports_action("edit", "model"))
         self.assertTrue(selection_supports_action("edit", "preset"))
-        self.assertFalse(selection_supports_action("edit", "alias"))
+        self.assertTrue(selection_supports_action("edit", "alias"))
         self.assertFalse(selection_supports_action("launch", None))
         self.assertTrue(selection_supports_action("launch", "alias"))
         self.assertTrue(selection_supports_action("pick_quant", "model", models_section=True))
@@ -88,7 +88,7 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             on_alias = shown_actions(app)
             self.assertIn("launch", on_alias)
             self.assertNotIn("pick_quant", on_alias)
-            self.assertNotIn("edit", on_alias)
+            self.assertIn("edit", on_alias)
             self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_alias)
 
     async def test_log_panel_hides_selection_actions(self) -> None:
