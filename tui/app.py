@@ -25,16 +25,17 @@ from tui.data.models_json import (
     clamp_preset_contexts,
     delete_model,
     load_registry,
+    remap_alias_preset_slots,
     save_registry,
     set_active_quant,
     sync_gguf_architecture,
     unshared_model_file_paths,
     update_model,
 )
-from tui.data.pidfile import read_pid_file
+from tui.data.pidfile import read_pid_file, remap_pid_preset_slots
 from tui.data.presets import (
     MAX_PRESETS_PER_MODEL,
-    clear_active_preset,
+    compact_preset_slots,
     delete_all_presets_for_model,
     delete_preset,
     get_active_slot,
@@ -959,12 +960,38 @@ class LLMServeApp(App):
             return
         self._new_preset_for_model(model)
 
+    def _apply_slot_remaps(
+        self,
+        model_name: str,
+        quant: str,
+        mapping: dict[int, int],
+        *,
+        deleted_slot: int | None = None,
+    ) -> None:
+        """Keep alias pins and the running pidfile aligned after slots are compacted."""
+        aliases_changed = remap_alias_preset_slots(
+            self.registry.aliases,
+            model_name,
+            quant,
+            mapping,
+            deleted_slot=deleted_slot,
+        )
+        if aliases_changed:
+            save_registry(self.paths.models_json, self.registry)
+        if deleted_slot is not None or any(old != new for old, new in mapping.items()):
+            remap_pid_preset_slots(self.paths.pid_file, {(model_name, quant): mapping})
+
     def _new_preset_for_model(self, model_name: str) -> None:
         """Open the preset editor on the next free slot for this model's active quant."""
         if model_name not in self.registry.models:
             self.notify(f"Model '{model_name}' not found", severity="error")
             return
         quant = self._model_active_quant(model_name)
+        mapping = compact_preset_slots(self.preset_store, model_name, quant)
+        if any(old != new for old, new in mapping.items()):
+            self._apply_slot_remaps(model_name, quant, mapping)
+            save_presets(self.paths.presets_json, self.preset_store)
+            self._reload_registry()
         slot = next_free_slot(self.preset_store, model_name, quant)
         if slot is None:
             self.notify(
@@ -998,9 +1025,10 @@ class LLMServeApp(App):
 
             def handle_preset_confirm(confirmed: bool) -> None:
                 if confirmed:
-                    delete_preset(self.preset_store, model_name, quant, slot)
-                    if get_active_slot(self.preset_store, model_name, quant) == slot:
-                        clear_active_preset(self.preset_store, model_name, quant)
+                    mapping = delete_preset(self.preset_store, model_name, quant, slot)
+                    self._apply_slot_remaps(
+                        model_name, quant, mapping, deleted_slot=slot
+                    )
                     save_presets(self.paths.presets_json, self.preset_store)
                     self._reload_registry()
                     self.notify(f"Deleted preset {model_name}/{quant} [{slot}]")

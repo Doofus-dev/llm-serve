@@ -18,6 +18,7 @@ from tui.data.preset_template import (
 )
 from tui.data.presets import (
     PresetStore,
+    compact_all_preset_slots,
     load_presets,
     migrate_preset_params,
     save_presets,
@@ -92,6 +93,35 @@ class AliasTarget:
             result["quant"] = self.quant
             result["preset"] = self.preset_slot
         return result
+
+
+def remap_alias_preset_slots(
+    aliases: dict[str, AliasTarget],
+    model: str,
+    quant: str,
+    mapping: dict[int, int],
+    *,
+    deleted_slot: int | None = None,
+) -> bool:
+    """Rewrite alias pins after preset slots are compacted. Returns True if anything changed."""
+    changed = False
+    for target in aliases.values():
+        if target.model != model or target.quant != quant or target.preset_slot is None:
+            continue
+        if deleted_slot is not None and target.preset_slot == deleted_slot:
+            target.quant = None
+            target.preset_slot = None
+            changed = True
+            continue
+        new_slot = mapping.get(target.preset_slot)
+        if new_slot is None:
+            target.quant = None
+            target.preset_slot = None
+            changed = True
+        elif new_slot != target.preset_slot:
+            target.preset_slot = new_slot
+            changed = True
+    return changed
 
 
 @dataclass
@@ -313,7 +343,27 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
         for alias, raw_target in data.get("aliases", {}).items()
         if (target := AliasTarget.from_raw(raw_target)) is not None
     }
+    if _compact_loaded_preset_slots(presets_path, reg.aliases):
+        save_registry(path, reg)
     return reg
+
+
+def _compact_loaded_preset_slots(
+    presets_path: Path, aliases: dict[str, AliasTarget]
+) -> bool:
+    """Renumber gapped presets on disk and remap alias pins. Returns True if aliases changed."""
+    if not presets_path.exists():
+        return False
+    store = load_presets(presets_path)
+    remaps = compact_all_preset_slots(store)
+    if not remaps:
+        return False
+    save_presets(presets_path, store)
+    aliases_changed = False
+    for (model, quant), mapping in remaps.items():
+        if remap_alias_preset_slots(aliases, model, quant, mapping):
+            aliases_changed = True
+    return aliases_changed
 
 
 def save_registry(path: Path, reg: Registry) -> None:
