@@ -13,8 +13,8 @@ from tui.data.hf import HubFile, fmt_size
 from tui.data.quant import quant_from_filename
 from tui.data.vram import (
     classify_vram,
-    estimate_gen_tps,
-    estimate_vram_mb,
+    estimate_gen_tps_calibrated,
+    estimate_vram_calibrated,
     fmt_memory_mb,
     fmt_tps,
     status_symbol,
@@ -65,10 +65,24 @@ def build_quant_file_rows(
                 size = local_size
 
         estimate = classify_vram(
-            estimate_vram_mb(size, context_tokens, offload_ratio),
+            estimate_vram_calibrated(
+                size,
+                context_tokens,
+                offload_ratio,
+                runs=runs,
+                gpu_name=gpu.name,
+                filename=item.path,
+            ),
             gpu,
         )
-        tps = estimate_gen_tps(size, context_tokens, gpu, offload_ratio)
+        tps = estimate_gen_tps_calibrated(
+            size,
+            context_tokens,
+            gpu,
+            offload_ratio,
+            runs=runs,
+            filename=item.path,
+        )
         actual = lookup_baseline(
             runs,
             filename=item.path,

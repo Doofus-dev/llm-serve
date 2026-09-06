@@ -6,7 +6,9 @@ from dataclasses import dataclass
 
 from rich.text import Text
 
-from tui.data.gpu import GPUStats
+from tui.data.baselines import RunBaseline, plausible_vram
+from tui.data.gpu import GPUStats, same_gpu
+from tui.data.quant import family_key, is_sidecar_gguf
 
 # Effective system RAM bandwidth for CPU-offloaded layers. Dual-channel
 # DDR5 is theoretically ~70-80 GB/s; llama.cpp typically sees less.
@@ -14,6 +16,9 @@ RAM_BANDWIDTH_GB_S = 55.0
 
 # llama.cpp decode usually lands well below theoretical HBM/GDDR peaks.
 GPU_BANDWIDTH_EFFICIENCY = 0.55
+
+# CUDA graphs / compute buffers when we only have one measured context.
+DEFAULT_RUNTIME_OVERHEAD_MB = 640.0
 
 # Longest needles first so "7900 xtx" wins over "7900 xt".
 _GPU_BANDWIDTH_GB_S: tuple[tuple[str, float], ...] = tuple(
@@ -96,6 +101,179 @@ def estimate_vram_mb(
     # A rough Q4 KV-cache estimate: at 64K, cache is ~30% of weight size.
     kv_cache_mb = weights_mb * 0.30 * (context_tokens / 65_536) * ratio
     return (gpu_weights_mb + runtime_overhead_mb + kv_cache_mb) * 1.10
+
+
+def _file_mb(file_size: int) -> float:
+    return file_size / 1_000_000
+
+
+def _offload(run: RunBaseline) -> float:
+    return max(0.0, min(1.0, run.offload_ratio))
+
+
+def _usable_runs(
+    runs: list[RunBaseline],
+    gpu_name: str,
+    offload_ratio: float,
+) -> list[RunBaseline]:
+    usable: list[RunBaseline] = []
+    for run in runs:
+        if gpu_name and run.gpu_name and not same_gpu(run.gpu_name, gpu_name):
+            continue
+        if abs(_offload(run) - offload_ratio) > 0.2:
+            continue
+        if is_sidecar_gguf(run.file):
+            continue
+        if run.file_size <= 0 or run.ctx <= 0:
+            continue
+        if not plausible_vram(run.vram_used_mb, run.file_size):
+            continue
+        usable.append(run)
+    return usable
+
+
+def _sibling_runs(runs: list[RunBaseline], filename: str) -> list[RunBaseline]:
+    if is_sidecar_gguf(filename):
+        return []
+    want = family_key(filename)
+    if not want:
+        return []
+    return [run for run in runs if family_key(run.file) == want]
+
+
+@dataclass(frozen=True)
+class MemoryFit:
+    """VRAM ≈ file*offload + (overhead + kv_per_token*ctx) * offload."""
+
+    overhead_mb: float
+    kv_per_token: float
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def fit_memory(runs: list[RunBaseline]) -> MemoryFit | None:
+    """Learn KV + overhead from residuals after subtracting file weights."""
+    points: list[tuple[float, float]] = []
+    for run in runs:
+        ratio = _offload(run)
+        if ratio <= 0:
+            continue
+        residual = run.vram_used_mb - _file_mb(run.file_size) * ratio
+        if residual < 0:
+            residual = 0.0
+        points.append((float(run.ctx), residual / ratio))
+    if not points:
+        return None
+
+    if len({ctx for ctx, _ in points}) == 1:
+        ctx, residual = points[0][0], _median([y for _, y in points])
+        overhead = min(DEFAULT_RUNTIME_OVERHEAD_MB, residual * 0.5)
+        kv = max(0.0, (residual - overhead) / max(ctx, 1.0))
+        return MemoryFit(overhead, kv)
+
+    n = float(len(points))
+    sum_x = sum(ctx for ctx, _ in points)
+    sum_y = sum(residual for _, residual in points)
+    sum_xx = sum(ctx * ctx for ctx, _ in points)
+    sum_xy = sum(ctx * residual for ctx, residual in points)
+    denom = n * sum_xx - sum_x * sum_x
+    if abs(denom) < 1.0:
+        ctx = points[0][0]
+        residual = sum_y / n
+        overhead = min(DEFAULT_RUNTIME_OVERHEAD_MB, residual * 0.5)
+        return MemoryFit(overhead, max(0.0, (residual - overhead) / max(ctx, 1.0)))
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    if slope < 0:
+        intercept = sum_y / n
+        slope = 0.0
+    if intercept < 0:
+        intercept = 0.0
+    return MemoryFit(intercept, slope)
+
+
+def apply_memory_fit(
+    fit: MemoryFit,
+    file_size: int,
+    context_tokens: int,
+    offload_ratio: float,
+) -> float:
+    ratio = max(0.0, min(1.0, offload_ratio))
+    weights = _file_mb(file_size) * ratio
+    return weights + (fit.overhead_mb + fit.kv_per_token * context_tokens) * ratio
+
+
+def _naive_scales(runs: list[RunBaseline]) -> list[float]:
+    scales: list[float] = []
+    for run in runs:
+        estimated = estimate_vram_mb(run.file_size, run.ctx, _offload(run))
+        if estimated > 0:
+            scales.append(run.vram_used_mb / estimated)
+    return scales
+
+
+def estimate_vram_calibrated(
+    file_size: int,
+    context_tokens: int,
+    offload_ratio: float,
+    *,
+    runs: list[RunBaseline] | None = None,
+    gpu_name: str = "",
+    filename: str = "",
+) -> float:
+    """Estimate VRAM, scaled from on-machine runs when we have them.
+
+    Sibling quants of the same model share KV cache and runtime overhead;
+    only the weight blob changes. Other models on this GPU fall back to a
+    median scale of the generic heuristic.
+    """
+    naive = estimate_vram_mb(file_size, context_tokens, offload_ratio)
+    if not runs:
+        return naive
+    usable = _usable_runs(runs, gpu_name, offload_ratio)
+    siblings = _sibling_runs(usable, filename)
+    fit = fit_memory(siblings)
+    if fit is not None:
+        return apply_memory_fit(fit, file_size, context_tokens, offload_ratio)
+    scales = _naive_scales(usable)
+    if scales:
+        return naive * _median(scales)
+    return naive
+
+
+def estimate_gen_tps_calibrated(
+    file_size: int,
+    context_tokens: int,
+    gpu: GPUStats,
+    offload_ratio: float = 1.0,
+    *,
+    runs: list[RunBaseline] | None = None,
+    filename: str = "",
+) -> float | None:
+    """Estimate decode speed, scaled from measured tok/s on this GPU."""
+    naive = estimate_gen_tps(file_size, context_tokens, gpu, offload_ratio)
+    if naive is None or not runs:
+        return naive
+    usable = [
+        run
+        for run in _usable_runs(runs, gpu.name, offload_ratio)
+        if run.gen_tps
+    ]
+    siblings = _sibling_runs(usable, filename) or usable
+    scales: list[float] = []
+    for run in siblings:
+        estimated = estimate_gen_tps(run.file_size, run.ctx, gpu, _offload(run))
+        if estimated and run.gen_tps:
+            scales.append(run.gen_tps / estimated)
+    if not scales:
+        return naive
+    return naive * _median(scales)
 
 
 def gpu_bandwidth_gb_s(gpu: GPUStats) -> float:

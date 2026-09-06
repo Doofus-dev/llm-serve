@@ -38,6 +38,20 @@ def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | No
     return size, variant, quant
 
 
+def family_key(filename: str) -> str:
+    """Stable id for sibling quants of the same GGUF, e.g. Qwen 3.5 9B."""
+    stem = Path(filename).stem.lower()
+    stem = re.sub(r"^mmproj[-_]", "", stem)
+    stem = re.sub(r"[-_]imatrix$", "", stem)
+    stem = QUANT_RE.sub("", stem)
+    return re.sub(r"[-_\.]+", "-", stem).strip("-")
+
+
+def is_sidecar_gguf(filename: str) -> bool:
+    name = Path(filename).name.lower()
+    return name.startswith("mmproj") or "imatrix" in name
+
+
 def quant_from_filename(filename: str) -> str:
     """Quant id for presets/catalog; falls back to stem or LOCAL."""
     _, _, quant = parse_gguf_filename(filename)

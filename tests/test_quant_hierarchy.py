@@ -18,7 +18,7 @@ from tui.data.models_json import (
     unshared_model_file_paths,
 )
 from tui.data.presets import get_active_slot, get_preset, load_presets, set_preset
-from tui.data.quant import family_display, quant_from_filename
+from tui.data.quant import family_display, family_key, is_sidecar_gguf, quant_from_filename
 
 
 class QuantParseTests(unittest.TestCase):
@@ -27,6 +27,17 @@ class QuantParseTests(unittest.TestCase):
         self.assertEqual(quant_from_filename("Qwen3.6-27B-Q4_K_M.gguf"), "Q4_K_M")
         self.assertEqual(quant_from_filename("Qwen_Qwen3.6-27B-Q2_K.gguf"), "Q2_K")
         self.assertEqual(quant_from_filename("Qwen_Qwen3.6-27B-Q6_K.gguf"), "Q6_K")
+
+    def test_family_key_groups_sibling_quants(self) -> None:
+        self.assertEqual(
+            family_key("Qwen_Qwen3.5-9B-Q5_K_L.gguf"),
+            family_key("Qwen_Qwen3.5-9B-Q4_K_M.gguf"),
+        )
+        self.assertNotEqual(
+            family_key("Qwen_Qwen3.5-9B-Q5_K_L.gguf"),
+            family_key("Qwen_Qwen3.6-27B-Q2_K.gguf"),
+        )
+        self.assertTrue(is_sidecar_gguf("mmproj-Qwen_Qwen3.5-9B-f16.gguf"))
 
     def test_family_display(self) -> None:
         self.assertEqual(
