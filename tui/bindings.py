@@ -69,7 +69,7 @@ HELP_TEXT = """\
 Navigation
   Tab       Models ↔ Aliases
   ↑↓        move selection
-  1-5       pin preset on alias
+  1-5       activate preset (or pin it on an alias)
 
 Run (models or aliases pane)
   L         launch
@@ -88,13 +88,14 @@ Aliases pane
   D         delete alias
   ←→        change target model
 
-Logs pane
-  R         remote on/off
-  V         log verbosity
+Next launch / logs
+  R         remote on/off (next launch)
+  V         log verbosity (next launch)
   O         extra info lines on/off
 
 App
   H         Hub
   T         theme
+  F1        this help
   Q         quit
 """

@@ -93,7 +93,7 @@ class ConfigPanel(Static):
                 )
             if not preset:
                 renderables.append(
-                    Text("Select a preset and press A to activate", style="dim")
+                    Text("Select a preset, or press 1-5 to activate one", style="dim")
                 )
                 return Group(*renderables)
 
