@@ -39,6 +39,7 @@ class StatusPanel(Static):
 
     pid_info: reactive[PidInfo | None] = reactive(None)
     model_display: reactive[str | None] = reactive(None)
+    quant_display: reactive[str | None] = reactive(None)
     preset_display: reactive[str | None] = reactive(None)
     next_remote: reactive[bool] = reactive(False)
     next_log_verbosity: reactive[int] = reactive(4)
@@ -54,6 +55,8 @@ class StatusPanel(Static):
         if info and info.alive:
             state = Text("● RUNNING", style="bold green")
             state.append(f"  {self.model_display or info.model}", style="bold cyan")
+            if self.quant_display:
+                state.append(f"  {self.quant_display}", style="bold yellow")
             if self.preset_display:
                 state.append(f"  {self.preset_display}", style="bold yellow")
             if info.remote:

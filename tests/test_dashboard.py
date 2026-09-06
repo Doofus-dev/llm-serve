@@ -101,11 +101,12 @@ class DashboardTests(unittest.TestCase):
             remote=True,
         )
         panel.model_display = "Qwen 3.6"
-        panel.preset_display = "default"
+        panel.quant_display = "Q8_0"
+        panel.preset_display = "[1]"
 
         rendered = render_text(panel.render())
 
-        self.assertIn("RUNNING  Qwen 3.6  default  REMOTE", rendered)
+        self.assertIn("RUNNING  Qwen 3.6  Q8_0  [1]  REMOTE", rendered)
         self.assertNotIn("qwen36-27b-bartowski", rendered)
 
     def test_status_health_thresholds(self) -> None:

@@ -431,16 +431,18 @@ class LLMServeApp(App):
             if running_key in self.registry.models
             else None
         )
+        panel.quant_display = None
         panel.preset_display = None
-        if running_key in self.registry.models:
-            quant = info.quant or self._model_active_quant(running_key)
+        if alive and info:
+            quant = info.quant
             slot = info.preset_slot
-            if slot is None:
-                slot = get_active_slot(self.preset_store, running_key, quant)
+            if running_key in self.registry.models:
+                quant = quant or self._model_active_quant(running_key)
+                if slot is None:
+                    slot = get_active_slot(self.preset_store, running_key, quant)
+            panel.quant_display = quant or None
             if slot is not None:
-                running_preset = get_preset(self.preset_store, running_key, quant, slot)
-                if running_preset:
-                    panel.preset_display = running_preset.name
+                panel.preset_display = f"[{slot}]"
         if alive and not was_alive:
             self._launch_time = time.time()
         if alive and info:
