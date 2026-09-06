@@ -61,6 +61,39 @@ def context_length_options(model_max: int | None) -> list[int]:
     return options
 
 
+def nearest_context_stop(ctx: int, stops: tuple[int, ...] | None = None) -> int:
+    """Snap a runtime ctx (e.g. 65000) onto the nearest estimate stop."""
+    if ctx <= 0:
+        return 0
+    options = stops if stops is not None else CONTEXT_LENGTH_STOPS
+    return min(options, key=lambda stop: (abs(stop - ctx), stop))
+
+
+def default_estimate_context(options: list[int]) -> int:
+    """Hub / quant-picker default: 64k, or the model's max if smaller."""
+    if not options:
+        return DEFAULT_CONTEXT_FALLBACK
+    return min(DEFAULT_CONTEXT_FALLBACK, options[-1])
+
+
+def include_context_option(options: list[int], ctx: int) -> list[int]:
+    """Add a runtime/preset ctx to the estimate dropdown when missing."""
+    if ctx <= 0 or ctx in options:
+        return options
+    return sorted(set(options + [ctx]))
+
+
+def pick_estimate_context(options: list[int], preferred: int | None = None) -> int:
+    """Prefer the model's current/measured ctx, else the 64k default."""
+    if preferred and preferred > 0:
+        if preferred in options:
+            return preferred
+        if options:
+            return min(options, key=lambda stop: (abs(stop - preferred), stop))
+        return preferred
+    return default_estimate_context(options)
+
+
 def hub_min_context_options() -> list[tuple[str, int]]:
     """Hub browse choices: native context at least this large."""
     return [(f"{fmt_ctx_compact(value)}+", value) for value in CONTEXT_LENGTH_STOPS]

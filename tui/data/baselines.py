@@ -1,8 +1,9 @@
 """On-machine measurements from actually running models.
 
 Estimates in the Hub are heuristics. This file stores what the TUI observed
-while llama-server was up — VRAM in use and tok/s after real generation —
-so Hub columns can show estimated vs actual for this GPU.
+while llama-server was up — VRAM in use and the best live generation tok/s —
+so Hub columns can show estimated vs actual for this GPU even after the
+server has been down.
 """
 
 from __future__ import annotations
@@ -12,9 +13,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tui.data.gpu import gpu_match_key, same_gpu
+
 MAX_RUNS = 200
 VRAM_DELTA_MB = 16.0
 TPS_DELTA = 0.5
+MIN_VRAM_MB = 256.0
+MIN_VRAM_FILE_RATIO = 0.10
 
 
 @dataclass
@@ -76,19 +81,26 @@ def _optional_float(value: object) -> float | None:
     return number if number > 0 else None
 
 
-def _norm_gpu(name: str) -> str:
-    return " ".join(name.lower().split())
-
-
 def _filename(path: str) -> str:
     return Path(path).name.lower()
+
+
+def plausible_vram(vram_used_mb: float, file_size: int = 0) -> bool:
+    """Reject idle desktop VRAM and pre-load readings."""
+    if vram_used_mb < MIN_VRAM_MB:
+        return False
+    if file_size > 0:
+        file_mb = file_size / 1_000_000
+        if vram_used_mb < file_mb * MIN_VRAM_FILE_RATIO:
+            return False
+    return True
 
 
 def _identity(run: RunBaseline) -> tuple:
     return (
         run.model,
         _filename(run.file),
-        _norm_gpu(run.gpu_name),
+        gpu_match_key(run.gpu_name) or " ".join(run.gpu_name.lower().split()),
         int(run.ctx),
         int(run.gpu_layers),
         run.cache_k,
@@ -117,7 +129,17 @@ def save_baselines(path: Path, runs: list[RunBaseline]) -> None:
 
 
 def record_baseline(path: Path, observation: RunBaseline) -> bool:
-    """Upsert a live observation. Returns True if the file changed."""
+    """Upsert a live observation. Returns True if the file changed.
+
+    Generation / prompt tok/s are high-water marks: a slower later sample
+    never replaces a faster one, so Hub still shows the best seen speed
+    after the server has been idle or down.
+    """
+    vram_ok = plausible_vram(observation.vram_used_mb, observation.file_size)
+    has_speed = bool(observation.gen_tps or observation.prompt_tps)
+    if not vram_ok and not has_speed:
+        return False
+
     runs = load_baselines(path)
     key = _identity(observation)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -125,24 +147,18 @@ def record_baseline(path: Path, observation: RunBaseline) -> bool:
         if _identity(existing) != key:
             continue
         changed = False
-        if abs(existing.vram_used_mb - observation.vram_used_mb) >= VRAM_DELTA_MB:
+        if vram_ok and abs(existing.vram_used_mb - observation.vram_used_mb) >= VRAM_DELTA_MB:
             existing.vram_used_mb = observation.vram_used_mb
             changed = True
         if observation.gen_tps and (
-            existing.gen_tps is None
-            or observation.tokens_predicted >= existing.tokens_predicted
+            existing.gen_tps is None or observation.gen_tps > existing.gen_tps + TPS_DELTA
         ):
-            if (
-                existing.gen_tps is None
-                or abs(existing.gen_tps - observation.gen_tps) >= TPS_DELTA
-                or observation.tokens_predicted > existing.tokens_predicted
-            ):
-                existing.gen_tps = observation.gen_tps
-                existing.tokens_predicted = observation.tokens_predicted
-                changed = True
+            existing.gen_tps = observation.gen_tps
+            existing.tokens_predicted = observation.tokens_predicted
+            changed = True
         if observation.prompt_tps and (
             existing.prompt_tps is None
-            or abs(existing.prompt_tps - observation.prompt_tps) >= TPS_DELTA
+            or observation.prompt_tps > existing.prompt_tps + TPS_DELTA
         ):
             existing.prompt_tps = observation.prompt_tps
             changed = True
@@ -151,6 +167,8 @@ def record_baseline(path: Path, observation: RunBaseline) -> bool:
             save_baselines(path, runs)
         return changed
 
+    if not vram_ok:
+        return False
     observation.updated_at = now
     runs.append(observation)
     save_baselines(path, runs)
@@ -166,29 +184,59 @@ def lookup_baseline(
     offload_ratio: float,
     gpu_name: str,
 ) -> RunBaseline | None:
-    """Best measurement for a Hub row on this GPU / context / offload."""
+    """Best measurement for a file on this GPU. Closer context scores higher."""
     want_name = _filename(filename)
-    want_gpu = _norm_gpu(gpu_name)
     best: RunBaseline | None = None
     best_score = -1.0
     for run in runs:
-        if want_gpu and _norm_gpu(run.gpu_name) != want_gpu:
-            continue
-        if run.ctx != ctx:
+        if gpu_name and run.gpu_name and not same_gpu(run.gpu_name, gpu_name):
             continue
         if abs(run.offload_ratio - offload_ratio) > 0.2:
             continue
-        name_match = _filename(run.file) == want_name and bool(want_name)
+        run_name = _filename(run.file)
+        name_match = bool(want_name) and run_name == want_name
         size_match = (
             file_size > 0
             and run.file_size > 0
             and abs(run.file_size - file_size) / max(file_size, run.file_size) <= 0.08
         )
-        if not name_match and not size_match:
+        if want_name and run_name:
+            if not name_match:
+                continue
+        elif not size_match:
             continue
+        ctx_span = max(ctx, run.ctx, 1)
         score = 2.0 if name_match else 1.0
         score -= abs(run.offload_ratio - offload_ratio)
+        score -= abs(run.ctx - ctx) / ctx_span
+        if run.gen_tps:
+            score += 2.0
+        if plausible_vram(run.vram_used_mb, run.file_size):
+            score += 1.0
         if score > best_score:
             best = run
             best_score = score
     return best
+
+
+def latest_baseline_ctx(
+    runs: list[RunBaseline],
+    *,
+    filenames: set[str] | list[str],
+    gpu_name: str,
+) -> int | None:
+    """Most recent measured ctx for any of these files on this GPU."""
+    want = {_filename(name) for name in filenames if name}
+    if not want:
+        return None
+    best: RunBaseline | None = None
+    for run in runs:
+        if _filename(run.file) not in want:
+            continue
+        if gpu_name and run.gpu_name and not same_gpu(run.gpu_name, gpu_name):
+            continue
+        if not plausible_vram(run.vram_used_mb, run.file_size) and not run.gen_tps:
+            continue
+        if best is None or run.updated_at > best.updated_at:
+            best = run
+    return best.ctx if best and best.ctx > 0 else None

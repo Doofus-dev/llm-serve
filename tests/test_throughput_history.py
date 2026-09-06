@@ -14,6 +14,7 @@ from tui.data.throughput_history import (
     SPARKLINE_WIDTH,
     ThroughputHistory,
     ThroughputReader,
+    baseline_speed,
     compute_live_tps,
     format_avg_line,
     format_last_request,
@@ -399,6 +400,42 @@ class ThroughputHistoryTests(unittest.TestCase):
         line = render_tps_sparkline([], width=SPARKLINE_WIDTH)
         self.assertEqual(len(line.plain), SPARKLINE_WIDTH)
         self.assertEqual(line.plain.strip(), "")
+
+    def test_baseline_speed_uses_last_request_not_lifetime_average(self) -> None:
+        live = LiveThroughput(
+            gen_tps=0.0,
+            stage="idle",
+            last_request=LastRequest(gen_tokens=80, gen_tps=87.4),
+        )
+        gen, prompt, tokens = baseline_speed(live)
+        self.assertAlmostEqual(gen, 87.4)
+        self.assertIsNone(prompt)
+        self.assertAlmostEqual(tokens, 80.0)
+
+    def test_baseline_speed_uses_live_generate_while_running(self) -> None:
+        live = LiveThroughput(gen_tps=84.0, stage="generating", n_decoded=40)
+        gen, _, tokens = baseline_speed(live)
+        self.assertAlmostEqual(gen, 84.0)
+        self.assertAlmostEqual(tokens, 40.0)
+
+    def test_baseline_speed_keeps_the_higher_bar_reading(self) -> None:
+        live = LiveThroughput(
+            gen_tps=92.0,
+            stage="generating",
+            n_decoded=40,
+            last_request=LastRequest(gen_tokens=80, gen_tps=74.0),
+        )
+        gen, _, _ = baseline_speed(live)
+        self.assertAlmostEqual(gen, 92.0)
+
+    def test_baseline_speed_history_fallback_uses_peak_not_average(self) -> None:
+        gen, _, _ = baseline_speed(None, [40.0, 92.0, 70.0, 55.0])
+        self.assertAlmostEqual(gen, 92.0)
+
+    def test_baseline_speed_ignores_short_blips(self) -> None:
+        live = LiveThroughput(gen_tps=200.0, stage="generating", n_decoded=3)
+        gen, _, _ = baseline_speed(live)
+        self.assertIsNone(gen)
 
 
 if __name__ == "__main__":

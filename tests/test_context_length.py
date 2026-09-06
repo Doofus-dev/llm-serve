@@ -11,8 +11,12 @@ from tui.data.context_length import (
     cap_context_value,
     clamp_preset_params,
     context_length_options,
+    default_estimate_context,
     fmt_ctx_range,
     hub_min_context_options,
+    include_context_option,
+    nearest_context_stop,
+    pick_estimate_context,
 )
 from tui.data.gguf import UINT32, apply_architecture_from_gguf
 from tui.data.hf import HubRepo
@@ -36,6 +40,26 @@ class ContextLengthTests(unittest.TestCase):
     def test_context_length_options_caps_at_model_max(self) -> None:
         self.assertEqual(context_length_options(40_960), [32_768, 40_960])
         self.assertEqual(context_length_options(32_768), [32_768])
+
+    def test_nearest_context_stop_snaps_preset_ctx(self) -> None:
+        self.assertEqual(nearest_context_stop(65_000), 65_536)
+        self.assertEqual(nearest_context_stop(80_000), 65_536)
+        self.assertEqual(nearest_context_stop(32_768), 32_768)
+        self.assertEqual(nearest_context_stop(131_072), 131_072)
+
+    def test_default_estimate_context_is_64k_or_model_max(self) -> None:
+        self.assertEqual(default_estimate_context([32_768, 65_536, 131_072]), 65_536)
+        self.assertEqual(default_estimate_context([32_768, 40_960]), 40_960)
+        self.assertEqual(default_estimate_context([]), 65_536)
+
+    def test_pick_estimate_context_uses_preferred_run_ctx(self) -> None:
+        options = [32_768, 65_536, 131_072, 262_144]
+        self.assertEqual(pick_estimate_context(options, 131_072), 131_072)
+        self.assertEqual(pick_estimate_context(options, None), 65_536)
+        self.assertEqual(
+            include_context_option([32_768, 65_536], 131_072),
+            [32_768, 65_536, 131_072],
+        )
 
     def test_hub_min_context_options_are_or_above(self) -> None:
         options = hub_min_context_options()

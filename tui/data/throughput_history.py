@@ -177,6 +177,43 @@ def _copy_snap(live: LiveThroughput, snap: SlotSnapshot | None) -> None:
     live.n_decoded = snap.n_decoded
 
 
+MIN_BASELINE_GEN_TOKENS = 16
+
+
+def baseline_speed(
+    live: LiveThroughput | None,
+    history: list[float] | None = None,
+) -> tuple[float | None, float | None, float]:
+    """Peak live decode rate from the status bar, for a durable Hub actual.
+
+    Uses the same generation number the bar shows (slot / recent delta),
+    never the process-lifetime average. The store keeps a high-water mark
+    so later slower polls do not pull the saved value down.
+    """
+    prompt: float | None = None
+    candidates: list[tuple[float, float]] = []
+    if live is not None:
+        if live.prompt_tps > 0 and live.stage == "prefill":
+            prompt = live.prompt_tps
+        last = live.last_request
+        if last and last.gen_tps > 0 and last.gen_tokens >= MIN_BASELINE_GEN_TOKENS:
+            candidates.append((last.gen_tps, float(last.gen_tokens)))
+        if (
+            live.stage == "generating"
+            and live.gen_tps > 0
+            and live.n_decoded >= MIN_BASELINE_GEN_TOKENS
+        ):
+            candidates.append((live.gen_tps, float(live.n_decoded)))
+    if not candidates and history:
+        active = [sample for sample in history if sample > 0]
+        if len(active) >= 4:
+            candidates.append((max(active), float(len(active))))
+    if not candidates:
+        return None, prompt, 0.0
+    gen, tokens = max(candidates, key=lambda item: item[0])
+    return gen, prompt, tokens
+
+
 def sample_tps_for_history(live: LiveThroughput) -> float:
     """Pick the generation tok/s sample to record for sparkline / rolling average.
 

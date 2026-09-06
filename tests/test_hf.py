@@ -32,7 +32,7 @@ from tui.data.hf import (
 )
 from tui.data.models_json import create_downloaded_model, load_registry, merge_editor_params, update_model
 from tui.data.settings import TUISettings, load_settings, remember_hf_author, save_settings
-from tui.data.gpu import GPUStats, effective_gpu_memory, parse_rocm_csv
+from tui.data.gpu import GPUStats, effective_gpu_memory, gpu_match_key, parse_rocm_csv, same_gpu
 from tui.data.vram import (
     classify_vram,
     estimate_gen_tps,
@@ -289,6 +289,16 @@ class HFCliTests(unittest.TestCase):
             filter_hub_repos([short, long, unknown], min_context=None),
             [short, long, unknown],
         )
+
+
+class GPUNameTests(unittest.TestCase):
+    def test_nvidia_smi_and_lspci_names_match(self) -> None:
+        smi = "NVIDIA GeForce RTX 5080"
+        pci = "NVIDIA Corporation GB203 [GeForce RTX 5080] (rev a1) (unified)"
+        self.assertEqual(gpu_match_key(smi), "rtx 5080")
+        self.assertEqual(gpu_match_key(pci), "rtx 5080")
+        self.assertTrue(same_gpu(smi, pci))
+        self.assertFalse(same_gpu(smi, "NVIDIA GeForce RTX 4090"))
 
 
 class VRAMEstimateTests(unittest.TestCase):

@@ -16,7 +16,15 @@ from textual.widgets import Button, DataTable, Input, Label, Select, Static
 from textual.worker import Worker, WorkerState
 
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
-from tui.data.context_length import context_length_options, fmt_ctx_compact, hub_min_context_options
+from tui.data.baselines import latest_baseline_ctx, load_baselines
+from tui.data.context_length import (
+    context_length_options,
+    default_estimate_context,
+    fmt_ctx_compact,
+    hub_min_context_options,
+    include_context_option,
+    pick_estimate_context,
+)
 from tui.data.hf import (
     HF_INSTALL_HINT,
     AuthStatus,
@@ -457,6 +465,7 @@ class HubScreen(Screen):
         self._repo_load_id += 1
         self.mode = "files"
         self.selected_repo = repo
+        self.files = []
         self.query_one("#context-controls").display = True
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
@@ -467,10 +476,25 @@ class HubScreen(Screen):
     def _update_context_options(self, model_max: int | None = None) -> None:
         """Set doubling context stops, capped at the model's limit."""
         self.context_options = context_length_options(model_max)
-        self.context_tokens = min(65_536, self.context_options[-1])
+        self.context_tokens = default_estimate_context(self.context_options)
+        self._apply_measured_context()
         self._render_estimate_controls()
         if self.mode == "files":
             self._render_file_table()
+
+    def _apply_measured_context(self) -> None:
+        """Open on the last measured ctx for files in this repo, when we have one."""
+        if not self.baselines_path or not self.files:
+            return
+        preferred = latest_baseline_ctx(
+            load_baselines(self.baselines_path),
+            filenames=[item.path for item in self.files],
+            gpu_name=self.gpu.name,
+        )
+        if not preferred:
+            return
+        self.context_options = include_context_option(self.context_options, preferred)
+        self.context_tokens = pick_estimate_context(self.context_options, preferred)
 
     def _render_estimate_controls(self) -> None:
         self._syncing_controls = True
@@ -654,6 +678,8 @@ class HubScreen(Screen):
             self._log(f"[bold $error]{error}[/]")
             return
         self.files = files
+        self._apply_measured_context()
+        self._render_estimate_controls()
         self._render_file_table()
         max_ctx = self.selected_repo.context_length if self.selected_repo else None
         ctx_note = f" · max context {self._fmt_context(max_ctx)}" if max_ctx else ""

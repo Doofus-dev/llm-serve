@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tui.data.baselines import RunBaseline, record_baseline
 from tui.data.gpu import GPUStats
 from tui.data.hf import HubFile
 from tui.data.quant_table import (
@@ -51,6 +52,66 @@ class QuantTableDownloadTests(unittest.TestCase):
                 "[green]●[/]",
             )
             self.assertEqual(quant_file_row_cells(by_path["Model-Q8_0.gguf"])[0], "—")
+
+    def test_actual_columns_show_128k_run_at_64k(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            record_baseline(
+                path,
+                RunBaseline(
+                    model="qwen35",
+                    file="bartowski/Qwen_Qwen3.5-9B-Q5_K_L.gguf",
+                    file_size=7_739_240_480,
+                    gpu_name="NVIDIA GeForce RTX 5080",
+                    ctx=131_072,
+                    gpu_layers=99,
+                    total_layers=33,
+                    cache_k="q4_0",
+                    cache_v="q4_0",
+                    vram_used_mb=9_631.0,
+                    gen_tps=47.8,
+                ),
+            )
+            rows = build_quant_file_rows(
+                [HubFile(path="Qwen_Qwen3.5-9B-Q5_K_L.gguf", size=7_739_240_480)],
+                gpu=GPUStats(name="NVIDIA GeForce RTX 5080", available=True),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=path,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertNotEqual(rows[0].act_vram, "—")
+            self.assertNotEqual(rows[0].act_tps, "—")
+
+    def test_actual_columns_use_nearby_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            record_baseline(
+                path,
+                RunBaseline(
+                    model="qwen",
+                    file="bartowski/Model-Q4_K_M.gguf",
+                    file_size=1000,
+                    gpu_name="NVIDIA GeForce RTX 5080",
+                    ctx=65_000,
+                    gpu_layers=99,
+                    total_layers=40,
+                    cache_k="q4_0",
+                    cache_v="q4_0",
+                    vram_used_mb=4_096.0,
+                    gen_tps=48.2,
+                ),
+            )
+            rows = build_quant_file_rows(
+                [HubFile(path="Model-Q4_K_M.gguf", size=1000)],
+                gpu=GPUStats(name="NVIDIA GeForce RTX 5080", available=True),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=path,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertNotEqual(rows[0].act_vram, "—")
+            self.assertNotEqual(rows[0].act_tps, "—")
 
 
 if __name__ == "__main__":

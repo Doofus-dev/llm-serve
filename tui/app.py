@@ -54,7 +54,12 @@ from tui.data.settings import (
     save_settings,
 )
 from tui.data.stats import ServerClient
-from tui.data.throughput_history import ThroughputHistory, ThroughputReader, sample_tps_for_history
+from tui.data.throughput_history import (
+    ThroughputHistory,
+    ThroughputReader,
+    baseline_speed,
+    sample_tps_for_history,
+)
 from tui.launch import LaunchError, launch_background, prepare_launch, stop_server
 from tui.paths import METRICS_HISTORY_SAMPLES, METRICS_POLL_INTERVAL, AppPaths, default_paths
 from tui.screens.editors import (
@@ -327,6 +332,15 @@ class LLMServeApp(App):
             if result:
                 self._switch_quant(model_name, result)
 
+        preferred_ctx = None
+        params = self._effective_model_params(model_name) or {}
+        try:
+            ctx = int(float(str(params.get("ctx") or 0)))
+        except (TypeError, ValueError):
+            ctx = 0
+        if ctx > 0:
+            preferred_ctx = ctx
+
         self.push_screen(
             QuantPickerScreen(
                 model_name,
@@ -335,6 +349,7 @@ class LLMServeApp(App):
                 self.paths.models_dir,
                 self.paths.models_json,
                 baselines_path=self.paths.baselines_json,
+                preferred_ctx=preferred_ctx,
                 on_download=on_download,
             ),
             handle,
@@ -377,11 +392,20 @@ class LLMServeApp(App):
             return
         was_alive = panel.pid_info.alive if panel.pid_info else False
         alive = info.alive if info else False
-        if not alive:
+        prev = panel.pid_info
+        switched = bool(
+            alive
+            and info
+            and prev
+            and (info.pid != prev.pid or info.model != prev.model)
+        )
+        if not alive or switched:
             self._gen_history.clear()
             self._throughput_reader.clear()
             panel.gen_tps_history = []
             panel.live_throughput = None
+            panel.metrics = None
+            panel.props = None
         panel.pid_info = info if alive else None
         running_key = None
         if alive and info:
@@ -486,18 +510,13 @@ class LLMServeApp(App):
         except OSError:
             file_size = 0
 
-        gen_tps = None
-        prompt_tps = None
-        tokens = 0.0
+        gen_tps, prompt_tps, tokens = baseline_speed(
+            panel.live_throughput,
+            panel.gen_tps_history,
+        )
         metrics = panel.metrics
-        if metrics:
-            tokens = metrics.tokens_predicted_total
-            if metrics.avg_gen_tps > 0 and tokens >= 16:
-                gen_tps = metrics.avg_gen_tps
-            elif metrics.predicted_tokens_seconds > 0:
-                gen_tps = metrics.predicted_tokens_seconds
-            if metrics.avg_prompt_tps > 0:
-                prompt_tps = metrics.avg_prompt_tps
+        if prompt_tps is None and metrics and metrics.avg_prompt_tps > 0:
+            prompt_tps = metrics.avg_prompt_tps
 
         def as_int(value: object, default: int = 0) -> int:
             try:

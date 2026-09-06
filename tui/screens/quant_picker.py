@@ -11,7 +11,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Select, Static
 
-from tui.data.context_length import context_length_options, fmt_ctx_compact, resolve_context_length
+from tui.data.context_length import (
+    context_length_options,
+    fmt_ctx_compact,
+    include_context_option,
+    pick_estimate_context,
+    resolve_context_length,
+)
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.hf import HubFile, list_repo_ggufs
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
@@ -105,6 +111,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         registry_path: Path,
         *,
         baselines_path: Path | None = None,
+        preferred_ctx: int | None = None,
         on_download: Callable[[str, str, int], None] | None = None,
     ) -> None:
         super().__init__()
@@ -114,6 +121,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self.models_dir = models_dir
         self.registry_path = registry_path
         self.baselines_path = baselines_path
+        self.preferred_ctx = preferred_ctx
         self.on_download = on_download
         self._rows: list[QuantFileRow] = []
         self._files: list[HubFile] = []
@@ -164,7 +172,13 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self.query_one("#quant-picker-title", Label).update(title)
         self.gpu = query_gpu()
         self.context_options = context_length_options(max_ctx)
-        self.context_tokens = self.context_options[-1]
+        if self.preferred_ctx:
+            self.context_options = include_context_option(
+                self.context_options, self.preferred_ctx
+            )
+        self.context_tokens = pick_estimate_context(
+            self.context_options, self.preferred_ctx
+        )
         self._render_estimate_controls()
         self._load_id += 1
         self._fetch_files(self._load_id)

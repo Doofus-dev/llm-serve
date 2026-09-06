@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import csv
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+_GPU_VENDOR_PREFIXES = (
+    "nvidia corporation ",
+    "nvidia geforce ",
+    "nvidia ",
+    "geforce ",
+    "amd radeon ",
+    "amd ",
+    "ati ",
+)
 
 
 @dataclass
@@ -27,6 +38,41 @@ class GPUStats:
     @property
     def memory_label(self) -> str:
         return "GPU RAM (GTT)" if self.unified else "VRAM"
+
+
+def gpu_match_key(name: str) -> str:
+    """Stable marketing name so nvidia-smi and lspci labels compare equal.
+
+    "NVIDIA GeForce RTX 5080" and
+    "NVIDIA Corporation GB203 [GeForce RTX 5080] (rev a1) (unified)"
+    both become "rtx 5080".
+    """
+    text = " ".join(name.lower().split())
+    if not text:
+        return ""
+    bracket = re.search(r"\[([^\]]+)\]", text)
+    if bracket:
+        text = bracket.group(1)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[\[\]]", " ", text)
+    text = " ".join(text.split())
+    for prefix in _GPU_VENDOR_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return " ".join(text.split())
+
+
+def same_gpu(left: str, right: str) -> bool:
+    """True when two GPU labels refer to the same device."""
+    a = " ".join(left.lower().split())
+    b = " ".join(right.lower().split())
+    if a == b:
+        return True
+    key_a, key_b = gpu_match_key(left), gpu_match_key(right)
+    if not key_a or not key_b:
+        return False
+    return key_a == key_b or key_a in key_b or key_b in key_a
 
 
 def _pci_product_name() -> str | None:
