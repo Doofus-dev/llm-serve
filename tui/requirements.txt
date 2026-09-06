@@ -1,0 +1,4 @@
+# Runtime dependencies are declared in pyproject.toml.
+# Prefer: pip install -e .
+textual>=0.86
+httpx>=0.27

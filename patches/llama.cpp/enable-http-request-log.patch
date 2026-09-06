@@ -1,0 +1,50 @@
+diff --git i/tools/server/server-http.cpp w/tools/server/server-http.cpp
+index 2ec137aa0..86c2a4588 100644
+--- i/tools/server/server-http.cpp
++++ w/tools/server/server-http.cpp
+@@ -27,15 +27,28 @@ server_http_context::server_http_context()
+ 
+ server_http_context::~server_http_context() = default;
+ 
++static bool is_loopback_addr(const std::string & addr) {
++    return addr == "127.0.0.1" || addr == "::1" || addr == "localhost";
++}
++
++static bool is_frequent_poll_path(const std::string & path) {
++    return path == "/health"
++        || path == "/v1/health"
++        || path == "/models"
++        || path == "/v1/models"
++        || path == "/props"
++        || path == "/v1/props"
++        || path == "/metrics"
++        || path == "/slots"
++        || path == "/v1/slots";
++}
++
+ static void log_server_request(const httplib::Request & req, const httplib::Response & res) {
+-    // skip logging requests that are regularly sent, to avoid log spam
+-    if (req.path == "/health"
+-        || req.path == "/v1/health"
+-        || req.path == "/models"
+-        || req.path == "/v1/models"
+-        || req.path == "/props"
+-        || req.path == "/metrics"
+-    ) {
++    // skip TUI/dashboard polls and local GET probes; keep real callers
++    if (is_frequent_poll_path(req.path)) {
++        return;
++    }
++    if (is_loopback_addr(req.remote_addr) && req.method == "GET") {
+         return;
+     }
+ 
+@@ -124,7 +137,7 @@ bool server_http_context::init(const common_params & params) {
+ #endif
+ 
+     srv->set_default_headers({{"Server", "llama.cpp"}});
+-    // srv->set_logger(log_server_request); // TODO @ngxson : this is too spamy, no very useful; improve it in the future
++    srv->set_logger(log_server_request);
+     srv->set_exception_handler([](const httplib::Request &, httplib::Response & res, const std::exception_ptr & ep) {
+         // this is fail-safe; exceptions should already handled by `ex_wrapper`
+ 
