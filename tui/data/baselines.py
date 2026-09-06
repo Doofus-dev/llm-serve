@@ -1,9 +1,9 @@
 """On-machine measurements from actually running models.
 
 Estimates in the Hub are heuristics. This file stores what the TUI observed
-while llama-server was up — VRAM in use and the best live generation tok/s —
-so Hub columns can show estimated vs actual for this GPU even after the
-server has been down.
+while llama-server was up — VRAM in use and the best rolling generation
+average — so Hub columns can show estimated vs actual for this GPU even
+after the server has been down.
 """
 
 from __future__ import annotations
@@ -131,9 +131,9 @@ def save_baselines(path: Path, runs: list[RunBaseline]) -> None:
 def record_baseline(path: Path, observation: RunBaseline) -> bool:
     """Upsert a live observation. Returns True if the file changed.
 
-    Generation / prompt tok/s are high-water marks: a slower later sample
-    never replaces a faster one, so Hub still shows the best seen speed
-    after the server has been idle or down.
+    Generation / prompt tok/s are high-water marks of recorded averages:
+    a slower later sample never replaces a faster one, so Hub still shows
+    the best seen speed after the server has been idle or down.
     """
     vram_ok = plausible_vram(observation.vram_used_mb, observation.file_size)
     has_speed = bool(observation.gen_tps or observation.prompt_tps)

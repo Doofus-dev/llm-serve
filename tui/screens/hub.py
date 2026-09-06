@@ -558,6 +558,32 @@ class HubScreen(Screen):
         if self.mode == "files":
             self._render_file_table()
 
+    def refresh_measured_columns(self) -> None:
+        """Reload Act. VRAM / t/s from disk without resetting the cursor."""
+        if not self.is_mounted or self.mode != "files" or not self.files:
+            return
+        try:
+            table = self.query_one("#hub-table", DataTable)
+        except QueryError:
+            return
+        self._rows = build_quant_file_rows(
+            self.files,
+            gpu=self.gpu,
+            context_tokens=self.context_tokens,
+            offload_ratio=self.offload_ratio,
+            baselines_path=self.baselines_path,
+            models_dir=self.models_dir,
+            author=self.selected_repo.author if self.selected_repo else "",
+        )
+        for row in self._rows:
+            try:
+                table.update_cell(row.path, "act_vram", row.act_vram)
+                table.update_cell(row.path, "act_speed", row.act_tps)
+                table.update_cell(row.path, "vram", row.vram_cell)
+                table.update_cell(row.path, "speed", row.est_tps)
+            except Exception:
+                continue
+
     def _refresh_visible_table(self) -> None:
         if not self.is_mounted:
             return

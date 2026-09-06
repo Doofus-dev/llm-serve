@@ -536,7 +536,7 @@ class LLMServeApp(App):
         if ctx <= 0:
             return
         try:
-            record_baseline(
+            changed = record_baseline(
                 self.paths.baselines_json,
                 RunBaseline(
                     model=info.model,
@@ -556,6 +556,15 @@ class LLMServeApp(App):
             )
         except OSError:
             return
+        if changed:
+            self._refresh_measured_columns()
+
+    def _refresh_measured_columns(self) -> None:
+        """Push new Act. VRAM / t/s into an open Hub or quant picker."""
+        for screen in self.screen_stack:
+            refresh = getattr(screen, "refresh_measured_columns", None)
+            if callable(refresh):
+                refresh()
 
     def _reload_registry(self, *, notify_gguf: bool = False) -> None:
         """Reload models.json and presets.json, refresh UI."""

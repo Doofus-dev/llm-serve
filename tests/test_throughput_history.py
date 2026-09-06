@@ -193,8 +193,8 @@ class ThroughputHistoryTests(unittest.TestCase):
         self.assertIsNone(format_avg_line([0.0, 0.0], 0.5))
         line = format_avg_line([0.0, 20.0, 0.0, 40.0], 0.5)
         assert line is not None
-        self.assertIn("avg 15.0 tok/s", line.plain)
-        self.assertIn("2s rolling", line.plain)
+        self.assertIn("avg 30.0 tok/s", line.plain)
+        self.assertIn("1s rolling", line.plain)
 
     def test_history_average_includes_zeros(self) -> None:
         history = ThroughputHistory(max_samples=10)
@@ -401,36 +401,37 @@ class ThroughputHistoryTests(unittest.TestCase):
         self.assertEqual(len(line.plain), SPARKLINE_WIDTH)
         self.assertEqual(line.plain.strip(), "")
 
-    def test_baseline_speed_uses_last_request_not_lifetime_average(self) -> None:
+    def test_baseline_speed_uses_history_average_not_peak(self) -> None:
+        samples = [40.0, 92.0, 70.0, 55.0, 80.0, 78.0, 76.0, 74.0]
         live = LiveThroughput(
-            gen_tps=0.0,
-            stage="idle",
-            last_request=LastRequest(gen_tokens=80, gen_tps=87.4),
+            gen_tps=1000.0,
+            stage="generating",
+            n_decoded=40,
+            last_request=LastRequest(gen_tokens=80, gen_tps=1000.0),
         )
-        gen, prompt, tokens = baseline_speed(live)
-        self.assertAlmostEqual(gen, 87.4)
+        gen, prompt, tokens = baseline_speed(live, samples)
+        self.assertAlmostEqual(gen, sum(samples) / len(samples))
         self.assertIsNone(prompt)
         self.assertAlmostEqual(tokens, 80.0)
 
-    def test_baseline_speed_uses_live_generate_while_running(self) -> None:
-        live = LiveThroughput(gen_tps=84.0, stage="generating", n_decoded=40)
-        gen, _, tokens = baseline_speed(live)
-        self.assertAlmostEqual(gen, 84.0)
-        self.assertAlmostEqual(tokens, 40.0)
+    def test_baseline_speed_uses_recent_window_so_later_faster_stretch_wins(self) -> None:
+        samples = [70.0] * 20 + [90.0] * 16
+        gen, _, _ = baseline_speed(None, samples)
+        self.assertAlmostEqual(gen, 90.0)
 
-    def test_baseline_speed_keeps_the_higher_bar_reading(self) -> None:
-        live = LiveThroughput(
-            gen_tps=92.0,
-            stage="generating",
-            n_decoded=40,
-            last_request=LastRequest(gen_tokens=80, gen_tps=74.0),
-        )
+    def test_baseline_speed_ignores_thousand_token_spikes(self) -> None:
+        samples = [80.0] * 8 + [1000.0]
+        gen, _, _ = baseline_speed(None, samples)
+        self.assertAlmostEqual(gen, 80.0)
+
+    def test_baseline_speed_needs_enough_samples(self) -> None:
+        gen, _, _ = baseline_speed(None, [80.0, 82.0, 79.0])
+        self.assertIsNone(gen)
+
+    def test_baseline_speed_ignores_live_spike_without_history(self) -> None:
+        live = LiveThroughput(gen_tps=1000.0, stage="generating", n_decoded=40)
         gen, _, _ = baseline_speed(live)
-        self.assertAlmostEqual(gen, 92.0)
-
-    def test_baseline_speed_history_fallback_uses_peak_not_average(self) -> None:
-        gen, _, _ = baseline_speed(None, [40.0, 92.0, 70.0, 55.0])
-        self.assertAlmostEqual(gen, 92.0)
+        self.assertIsNone(gen)
 
     def test_baseline_speed_ignores_short_blips(self) -> None:
         live = LiveThroughput(gen_tps=200.0, stage="generating", n_decoded=3)

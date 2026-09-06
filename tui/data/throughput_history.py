@@ -178,39 +178,65 @@ def _copy_snap(live: LiveThroughput, snap: SlotSnapshot | None) -> None:
 
 
 MIN_BASELINE_GEN_TOKENS = 16
+MIN_BASELINE_SAMPLES = 8
+# Last ~8s of generation at METRICS_POLL_INTERVAL=0.5s. A faster stretch
+# must be able to beat the first window or Hub Act. t/s never ticks up.
+ROLLING_AVG_SAMPLES = 16
+# Slot tg_tps sometimes reports a one-tick 1000+ t/s glitch at decode start.
+_SPIKE_MULTIPLE = 2.5
+
+
+def rolling_gen_average(
+    history: list[float] | None,
+    *,
+    min_samples: int = 1,
+) -> float | None:
+    """Mean of the latest generation samples, ignoring idle zeros and spikes."""
+    if not history:
+        return None
+    active = [sample for sample in history if sample > 0]
+    if len(active) < min_samples:
+        return None
+    window = active[-ROLLING_AVG_SAMPLES:]
+    ordered = sorted(window)
+    median = ordered[len(ordered) // 2]
+    if median > 0:
+        typical = [sample for sample in window if sample <= median * _SPIKE_MULTIPLE]
+        if len(typical) >= max(1, len(window) // 2):
+            window = typical
+    return sum(window) / len(window)
+
+
+def _average_gen_tps(history: list[float] | None) -> float | None:
+    return rolling_gen_average(history, min_samples=MIN_BASELINE_SAMPLES)
 
 
 def baseline_speed(
     live: LiveThroughput | None,
     history: list[float] | None = None,
 ) -> tuple[float | None, float | None, float]:
-    """Peak live decode rate from the status bar, for a durable Hub actual.
+    """Recent generation average from the status bar, for a durable Hub actual.
 
-    Uses the same generation number the bar shows (slot / recent delta),
-    never the process-lifetime average. The store keeps a high-water mark
-    so later slower polls do not pull the saved value down.
+    Uses the last few seconds of decode samples, not the whole-session mean
+    (that sticks at the first value) and not live / last-request peaks
+    (those include 1000 t/s decode-start spikes). The store keeps a
+    high-water mark of these window averages.
     """
     prompt: float | None = None
-    candidates: list[tuple[float, float]] = []
+    tokens = 0.0
     if live is not None:
         if live.prompt_tps > 0 and live.stage == "prefill":
             prompt = live.prompt_tps
         last = live.last_request
-        if last and last.gen_tps > 0 and last.gen_tokens >= MIN_BASELINE_GEN_TOKENS:
-            candidates.append((last.gen_tps, float(last.gen_tokens)))
-        if (
-            live.stage == "generating"
-            and live.gen_tps > 0
-            and live.n_decoded >= MIN_BASELINE_GEN_TOKENS
-        ):
-            candidates.append((live.gen_tps, float(live.n_decoded)))
-    if not candidates and history:
-        active = [sample for sample in history if sample > 0]
-        if len(active) >= 4:
-            candidates.append((max(active), float(len(active))))
-    if not candidates:
-        return None, prompt, 0.0
-    gen, tokens = max(candidates, key=lambda item: item[0])
+        if last and last.gen_tokens >= MIN_BASELINE_GEN_TOKENS:
+            tokens = float(last.gen_tokens)
+        elif live.stage == "generating" and live.n_decoded >= MIN_BASELINE_GEN_TOKENS:
+            tokens = float(live.n_decoded)
+    gen = _average_gen_tps(history)
+    if gen is None:
+        return None, prompt, tokens
+    if tokens <= 0:
+        tokens = float(sum(1 for sample in history or () if sample > 0))
     return gen, prompt, tokens
 
 
@@ -413,10 +439,11 @@ class ThroughputHistory:
 
 def format_avg_line(samples: list[float], poll_interval: float) -> Text | None:
     """Format the rolling average line for the status panel."""
-    if not samples or not any(s > 0 for s in samples):
+    avg = rolling_gen_average(samples)
+    if avg is None:
         return None
-    avg = sum(samples) / len(samples)
-    window_s = len(samples) * poll_interval
+    active = sum(1 for sample in samples if sample > 0)
+    window_s = min(active, ROLLING_AVG_SAMPLES) * poll_interval
     line = Text()
     line.append(f"avg {avg:.1f} tok/s", style="bold cyan")
     line.append(f"  ({window_s:.0f}s rolling)", style="dim")

@@ -220,12 +220,14 @@ class QuantPickerScreen(ModalScreen[str | None]):
             summary = "GPU VRAM unavailable"
         self.query_one("#hardware-summary", Static).update(summary)
 
-    def _refresh_table(self) -> None:
-        source = self.cfg.params.get("source")
-        author = ""
-        if isinstance(source, dict):
-            author = str(source.get("author") or "")
-
+    def refresh_measured_columns(self) -> None:
+        """Reload Act. VRAM / t/s from disk without resetting the cursor."""
+        if not self.is_mounted or not self._rows:
+            return
+        try:
+            table = self.query_one("#quant-table", DataTable)
+        except Exception:
+            return
         self._rows = build_quant_file_rows(
             self._files,
             gpu=self.gpu,
@@ -233,7 +235,32 @@ class QuantPickerScreen(ModalScreen[str | None]):
             offload_ratio=self.offload_ratio,
             baselines_path=self.baselines_path,
             models_dir=self.models_dir,
-            author=author,
+            author=self._repo_author(),
+        )
+        for row in self._rows:
+            try:
+                table.update_cell(row.path, "act_vram", row.act_vram)
+                table.update_cell(row.path, "act_speed", row.act_tps)
+                table.update_cell(row.path, "vram", row.vram_cell)
+                table.update_cell(row.path, "speed", row.est_tps)
+            except Exception:
+                continue
+
+    def _repo_author(self) -> str:
+        source = self.cfg.params.get("source")
+        if isinstance(source, dict):
+            return str(source.get("author") or "")
+        return ""
+
+    def _refresh_table(self) -> None:
+        self._rows = build_quant_file_rows(
+            self._files,
+            gpu=self.gpu,
+            context_tokens=self.context_tokens,
+            offload_ratio=self.offload_ratio,
+            baselines_path=self.baselines_path,
+            models_dir=self.models_dir,
+            author=self._repo_author(),
         )
 
         table = self.query_one("#quant-table", DataTable)
