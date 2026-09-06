@@ -324,11 +324,35 @@ llama_needs_rebuild() {
     return 0
 }
 
+llama_serve_root() {
+    cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd
+}
+
+# Re-apply llm-serve patches after llama.cpp pull/rebuild. Idempotent.
+llama_apply_local_patches() {
+    local root patch_dir patch
+    root="$(llama_serve_root)"
+    patch_dir="${root}/patches/llama.cpp"
+    [[ -d "$patch_dir" && -d "${LLAMA_DIR}/.git" ]] || return 0
+    for patch in "$patch_dir"/*.patch; do
+        [[ -f "$patch" ]] || continue
+        if git -C "$LLAMA_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+            continue
+        fi
+        git -C "$LLAMA_DIR" apply "$patch" || {
+            echo "failed to apply $(basename "$patch") to llama.cpp" >&2
+            return 1
+        }
+    done
+}
+
 # Configure, compile, and stamp. Caller should wipe build/ first when refreshing.
 llama_build_server() {
     local build_type="$1"
     local nproc="${2:-$(llama_nproc)}"
     local build_dir head
+
+    llama_apply_local_patches || return 1
 
     build_dir="$(llama_build_dir)"
     mkdir -p "$build_dir"
