@@ -405,7 +405,7 @@ class HubScreen(Screen):
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
-                "● on disk · — download on select · Act. after a local run · "
+                "● on disk · — queue download on select · Act. after a local run · "
                 "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="hub-help",
             )
@@ -435,6 +435,14 @@ class HubScreen(Screen):
         """Update Hub status only while this screen is still in the DOM."""
         if self.is_mounted:
             self._set_status(message)
+
+    def _download_locks_hub(self) -> bool:
+        """True only for the in-screen fallback worker, not the app queue."""
+        from tui.app import LLMServeApp
+
+        if isinstance(self.app, LLMServeApp):
+            return False
+        return self._downloading
 
     def _update_auth_status(self) -> None:
         if self._downloading:
@@ -623,7 +631,7 @@ class HubScreen(Screen):
         self._request_repos(author, search, min_context)
 
     def _request_repos(self, author: str, search: str, min_context: int | None = None) -> None:
-        if self._downloading:
+        if self._download_locks_hub():
             self.notify("Wait for the download to finish", severity="warning")
             return
         self._repo_load_id += 1
@@ -653,7 +661,7 @@ class HubScreen(Screen):
         error: str | None,
         min_context: int | None = None,
     ) -> None:
-        if load_id != self._repo_load_id or self._downloading:
+        if load_id != self._repo_load_id or self._download_locks_hub():
             return
         if error:
             self._log(f"[bold $error]{error}[/]")
@@ -672,7 +680,7 @@ class HubScreen(Screen):
     def _finish_load_files(
         self, load_id: int, files: list[HubFile], error: str | None
     ) -> None:
-        if load_id != self._file_load_id or self._downloading:
+        if load_id != self._file_load_id or self._download_locks_hub():
             return
         if error:
             self._log(f"[bold $error]{error}[/]")
@@ -753,7 +761,7 @@ class HubScreen(Screen):
         return str(table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
 
     def _handle_select(self) -> None:
-        if self._downloading:
+        if self._download_locks_hub():
             self.notify("A download is already running", severity="warning")
             return
         row_key = self._selected_row_key()
@@ -794,7 +802,7 @@ class HubScreen(Screen):
     def _start_download(self, profile: tuple[str, str] | None, filename: str) -> None:
         if profile is None or not self.selected_repo:
             return
-        if self._downloading:
+        if self._download_locks_hub():
             self.notify("A download is already running", severity="warning")
             return
         display_name, clone_from = profile
@@ -813,7 +821,6 @@ class HubScreen(Screen):
         if isinstance(app, LLMServeApp):
 
             def on_done() -> None:
-                self._downloading = False
                 self.registry = load_registry(self.models_json_path, models_dir=self.models_dir)
                 self._set_status_if_mounted(
                     f"[bold $success]Registered[/] {filename}"
@@ -823,7 +830,6 @@ class HubScreen(Screen):
                     self.on_complete()
 
             def on_fail(message: str) -> None:
-                self._downloading = False
                 self._set_status_if_mounted(
                     f"[bold $error]Download failed[/] {message[:140]}"
                 )
@@ -840,11 +846,15 @@ class HubScreen(Screen):
             )
             if not started:
                 return
-            self._downloading = True
-            self._set_status(
-                f"[bold $warning]DOWNLOADING[/] {filename}  — runs in background (close Hub anytime)"
-            )
-            self.notify("Download started in background", timeout=6)
+            waiting = app.download_manager.queue_size
+            if waiting:
+                self._set_status(
+                    f"[bold $warning]QUEUED[/] {filename}  — {waiting} waiting"
+                )
+            else:
+                self._set_status(
+                    f"[bold $warning]DOWNLOADING[/] {filename}  — runs in background (close Hub anytime)"
+                )
             return
 
         self._downloading = True
@@ -969,7 +979,7 @@ class HubScreen(Screen):
                 pass
 
     def action_refresh(self) -> None:
-        if self._downloading:
+        if self._download_locks_hub():
             self.notify("Wait for the download to finish", severity="warning")
             return
         if self.mode == "repos":
@@ -980,7 +990,7 @@ class HubScreen(Screen):
 
     def action_back(self) -> None:
         """Return from the quant list to the repo list."""
-        if self._downloading:
+        if self._download_locks_hub():
             self.notify("Wait for the download to finish — leave Hub open", severity="warning")
             return
         if self.mode == "files":

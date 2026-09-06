@@ -156,7 +156,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             yield DataTable(id="quant-table", cursor_type="row", zebra_stripes=True)
             yield Static(
                 "[dim]←→ context · [ ] offload · Enter select · "
-                "● on disk · — download on select · "
+                "● on disk · — queue download on select · "
                 "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
                 id="quant-picker-help",
             )
@@ -388,6 +388,5 @@ class QuantPickerScreen(ModalScreen[str | None]):
             return
         if self.on_download:
             self.on_download(self.model_name, picked.path, picked.size)
-            self.dismiss(None)
-        else:
-            self.notify("Download handler unavailable", severity="error")
+            return
+        self.notify("Download handler unavailable", severity="error")

@@ -38,7 +38,7 @@ class DownloadBar(Vertical):
 
     def apply_state(self, state) -> None:
         """Update visibility and progress from DownloadState."""
-        if state.running:
+        if state.active:
             self.add_class("visible")
             label = self.query_one("#download-label", Label)
             label.update(state.status_line or f"Downloading {state.filename}…")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 
 from rich.text import Text
@@ -19,6 +20,9 @@ GPU_BANDWIDTH_EFFICIENCY = 0.55
 
 # CUDA graphs / compute buffers when we only have one measured context.
 DEFAULT_RUNTIME_OVERHEAD_MB = 640.0
+# Skip runs whose leftover after weights is just "file landed on the GPU".
+MIN_RESIDUAL_MIB = 384.0
+MIN_RESIDUAL_FILE_RATIO = 0.08
 
 # Longest needles first so "7900 xtx" wins over "7900 xt".
 _GPU_BANDWIDTH_GB_S: tuple[tuple[str, float], ...] = tuple(
@@ -103,8 +107,9 @@ def estimate_vram_mb(
     return (gpu_weights_mb + runtime_overhead_mb + kv_cache_mb) * 1.10
 
 
-def _file_mb(file_size: int) -> float:
-    return file_size / 1_000_000
+def _file_mib(file_size: int) -> float:
+    """Bytes → MiB, matching nvidia-smi memory.used / memory.total."""
+    return file_size / (1024 * 1024)
 
 
 def _offload(run: RunBaseline) -> float:
@@ -157,22 +162,34 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def _residual_mib(run: RunBaseline) -> float | None:
+    """KV + runtime leftover, or None if the run looks like a partial load."""
+    ratio = _offload(run)
+    if ratio <= 0:
+        return None
+    weights = _file_mib(run.file_size) * ratio
+    residual = run.vram_used_mb - weights
+    if residual < MIN_RESIDUAL_MIB:
+        return None
+    if residual < weights * MIN_RESIDUAL_FILE_RATIO:
+        return None
+    return residual / ratio
+
+
 def fit_memory(runs: list[RunBaseline]) -> MemoryFit | None:
     """Learn KV + overhead from residuals after subtracting file weights."""
-    points: list[tuple[float, float]] = []
+    by_ctx: dict[int, list[float]] = defaultdict(list)
     for run in runs:
-        ratio = _offload(run)
-        if ratio <= 0:
+        residual = _residual_mib(run)
+        if residual is None:
             continue
-        residual = run.vram_used_mb - _file_mb(run.file_size) * ratio
-        if residual < 0:
-            residual = 0.0
-        points.append((float(run.ctx), residual / ratio))
+        by_ctx[run.ctx].append(residual)
+    points = [(float(ctx), _median(values)) for ctx, values in sorted(by_ctx.items())]
     if not points:
         return None
 
-    if len({ctx for ctx, _ in points}) == 1:
-        ctx, residual = points[0][0], _median([y for _, y in points])
+    if len(points) == 1:
+        ctx, residual = points[0]
         overhead = min(DEFAULT_RUNTIME_OVERHEAD_MB, residual * 0.5)
         kv = max(0.0, (residual - overhead) / max(ctx, 1.0))
         return MemoryFit(overhead, kv)
@@ -205,7 +222,7 @@ def apply_memory_fit(
     offload_ratio: float,
 ) -> float:
     ratio = max(0.0, min(1.0, offload_ratio))
-    weights = _file_mb(file_size) * ratio
+    weights = _file_mib(file_size) * ratio
     return weights + (fit.overhead_mb + fit.kv_per_token * context_tokens) * ratio
 
 

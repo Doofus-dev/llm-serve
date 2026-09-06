@@ -216,13 +216,16 @@ class LLMServeApp(App):
         self.call_later(apply)
 
     @work(exclusive=True)
-    async def _run_download_job(self, job: DownloadJob) -> None:
-        ok, message = await self.download_manager.run(job)
-        if ok:
-            if job.on_success:
-                job.on_success()
-        else:
-            if job.on_error:
+    async def _process_download_queue(self) -> None:
+        while True:
+            job = self.download_manager.pop_next()
+            if job is None:
+                return
+            ok, message = await self.download_manager.run(job)
+            if ok:
+                if job.on_success:
+                    job.on_success()
+            elif job.on_error:
                 job.on_error(message)
 
     def _model_active_quant(self, model_name: str) -> str:
@@ -252,10 +255,6 @@ class LLMServeApp(App):
         on_complete=None,
         on_error=None,
     ) -> bool:
-        if self.download_manager.busy:
-            self.notify("Another download is already running", severity="warning")
-            return False
-
         repo = plan.repo_id
 
         def _after_download() -> None:
@@ -299,7 +298,16 @@ class LLMServeApp(App):
             on_success=_after_download,
             on_error=_on_error,
         )
-        self._run_download_job(job)
+        result = self.download_manager.enqueue(job)
+        if result == "duplicate":
+            self.notify(f"{filename} is already downloading or queued", severity="warning")
+            return False
+        if result == "queued":
+            waiting = self.download_manager.queue_size
+            self.notify(f"Queued {filename} ({waiting} waiting)", timeout=4)
+        else:
+            self.notify(f"Downloading {filename}…", timeout=4)
+        self._process_download_queue()
         return True
 
     def action_pick_quant(self) -> None:
@@ -318,15 +326,13 @@ class LLMServeApp(App):
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
             plan = build_download_plan(source["repo"], filename, self.paths.models_dir)
-            if not self.start_model_download(
+            self.start_model_download(
                 plan=plan,
                 filename=filename,
                 expected_bytes=expected_bytes,
                 clone_from=clone_from,
                 display=cfg.display,
-            ):
-                return
-            self.notify(f"Downloading {filename}…", timeout=4)
+            )
 
         def handle(result: str | None) -> None:
             if result:
