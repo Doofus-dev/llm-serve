@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tui.launch import (
@@ -12,6 +14,7 @@ from tui.launch import (
     build_server_args,
     launch_background,
     prepare_launch,
+    rotate_log,
     status_text,
     stop_server,
 )
@@ -159,6 +162,23 @@ class ProcessTests(unittest.TestCase):
             stop_server("no-such-model", paths=self.harness.paths)
         self.assertTrue(self.harness.paths.pid_file.exists())
         self.harness.paths.pid_file.unlink()
+
+
+class RotateLogTests(unittest.TestCase):
+    def test_truncates_to_half_max_when_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            path.write_text("".join(f"{i}\n" for i in range(20)))
+            rotate_log(path, max_lines=10)
+            lines = path.read_text().splitlines()
+            self.assertEqual(lines, [str(i) for i in range(15, 20)])
+
+    def test_leaves_short_file_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            path.write_text("".join(f"{i}\n" for i in range(5)))
+            rotate_log(path, max_lines=10)
+            self.assertEqual(path.read_text(), "".join(f"{i}\n" for i in range(5)))
 
 
 if __name__ == "__main__":

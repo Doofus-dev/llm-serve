@@ -198,7 +198,7 @@ class LLMServeApp(App):
         self.set_interval(METRICS_POLL_INTERVAL, self._poll_metrics)
         self.set_interval(5.0, self._poll_gpu)
         self.set_interval(3.0, self._poll_log)
-        self.query_one(LogPanel).poll_file(self.paths.log_file)
+        self.call_later(self._poll_log)
         self.query_one(StatusPanel).next_remote = self.remote_launch
         self.query_one(StatusPanel).next_log_verbosity = self.log_verbosity
         self._update_footer()

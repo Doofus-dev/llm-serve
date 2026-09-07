@@ -12,8 +12,10 @@ from tui.data.server_log import (
     format_elapsed,
     is_unformatted_event,
     parse_line,
+    read_session_tail,
     render_event,
     slice_to_session,
+    tail_lines,
 )
 
 STARTUP = """\
@@ -392,6 +394,79 @@ class TailerTests(unittest.TestCase):
             self.assertFalse(reset)
             self.assertEqual(request_event(extra).kind, "request")
             self.assertEqual(request_event(extra).cache_mode, "lcp")
+
+    def test_large_file_keeps_launch_in_tail_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            filler = "old noise without a launch marker\n" * 80
+            path.write_text(filler + STARTUP)
+            window = len(STARTUP.encode()) + 40
+            tailer = LogTailer(max_session_bytes=window)
+            events, reset = tailer.poll(path)
+            self.assertTrue(reset)
+            self.assertEqual(events[0].kind, "launch")
+            self.assertEqual(events[0].model, "qwen36-27b-bartowski")
+            self.assertTrue(any(event.kind == "ready" for event in events))
+            self.assertEqual(tailer._offset, path.stat().st_size)
+
+    def test_large_file_without_launch_in_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            launch = (
+                "── 2026-09-04 16:13:31 launch: qwen36-27b-bartowski (PID 172011) ──\n"
+            )
+            filler = "0.00.001.000 I srv  filler: padding line that is not a launch\n" * 80
+            tail = (
+                "0.99.000.000 I srv  llama_server: listening on http://0.0.0.0:8081\n"
+            )
+            path.write_text(launch + filler + tail)
+            window = len(tail.encode()) + 40
+            tailer = LogTailer(max_session_bytes=window)
+            events, reset = tailer.poll(path)
+            self.assertTrue(reset)
+            self.assertFalse(any(event.kind == "launch" for event in events))
+            self.assertTrue(any(event.kind == "ready" for event in events))
+            self.assertEqual(tailer._offset, path.stat().st_size)
+
+            with path.open("a") as handle:
+                handle.write(LCP_REQUEST)
+            extra, reset = tailer.poll(path)
+            self.assertFalse(reset)
+            self.assertEqual(request_event(extra).kind, "request")
+
+
+class TailHelperTests(unittest.TestCase):
+    def test_tail_lines_last_n(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            path.write_text("".join(f"line-{i}\n" for i in range(1000)))
+            self.assertEqual(tail_lines(path, 3), ["line-997", "line-998", "line-999"])
+            self.assertEqual(
+                tail_lines(path, 2, keepends=True),
+                ["line-998\n", "line-999\n"],
+            )
+
+    def test_tail_lines_short_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            path.write_text("a\nb\n")
+            self.assertEqual(tail_lines(path, 10), ["a", "b"])
+
+    def test_read_session_tail_caps_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "llm-serve.log"
+            earlier = (
+                "── 2026-09-04 13:40:10 launch: older-model (PID 1) ──\n"
+                "0.00.001.000 I srv  llama_server: listening on http://127.0.0.1:8081\n"
+            )
+            padding = "noise line without a launch marker\n" * 200
+            path.write_text(earlier + padding + STARTUP)
+            session, size = read_session_tail(
+                path, max_bytes=len(STARTUP.encode()) + 40
+            )
+            self.assertEqual(size, path.stat().st_size)
+            self.assertIn("qwen36-27b-bartowski", session)
+            self.assertNotIn("older-model", session)
 
 
 class RenderTests(unittest.TestCase):

@@ -30,6 +30,7 @@ from tui.data.presets import (
     get_preset,
     load_presets,
 )
+from tui.data.server_log import tail_lines
 from tui.paths import AppPaths, default_paths
 
 MAX_LOG_LINES = 1000
@@ -457,8 +458,7 @@ def prepare_launch(
 def rotate_log(path: Path, *, max_lines: int = MAX_LOG_LINES) -> None:
     if not path.is_file():
         return
-    text = path.read_text(errors="replace")
-    lines = text.splitlines(keepends=True)
+    lines = tail_lines(path, max_lines + 1, keepends=True)
     if len(lines) <= max_lines:
         return
     keep = lines[-(max_lines // 2) :]
@@ -560,7 +560,7 @@ def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
         "Last log lines:",
     ]
     if paths.log_file.is_file():
-        tail = paths.log_file.read_text(errors="replace").splitlines()[-10:]
+        tail = tail_lines(paths.log_file, 10)
         lines.extend(tail if tail else ["  (no log file)"])
     else:
         lines.append("  (no log file)")
@@ -667,7 +667,7 @@ def launch_background(
         if not _pid_alive(proc.pid):
             tail = ""
             if paths.log_file.is_file():
-                tail = "\n".join(paths.log_file.read_text(errors="replace").splitlines()[-10:])
+                tail = "\n".join(tail_lines(paths.log_file, 10))
             clear_pid_file(paths.pid_file)
             extra = f"\nLast log lines:\n{tail}" if tail else ""
             raise LaunchError(
