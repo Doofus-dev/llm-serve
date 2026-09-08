@@ -69,3 +69,34 @@ def clear_pid_file(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         return
+
+
+def remap_pid_preset_slots(
+    path: Path, remaps: dict[tuple[str, str], dict[int, int]]
+) -> bool:
+    """Update a running server's recorded preset slot after compacting. Returns True if rewritten."""
+    info = read_pid_file(path)
+    if (
+        info is None
+        or not info.alive
+        or info.quant is None
+        or info.preset_slot is None
+    ):
+        return False
+    mapping = remaps.get((info.model, info.quant))
+    if not mapping:
+        return False
+    new_slot = mapping.get(info.preset_slot)
+    if new_slot is None or new_slot == info.preset_slot:
+        return False
+    write_pid_file(
+        path,
+        pid=info.pid,
+        model=info.model,
+        port=info.port,
+        quant=info.quant,
+        preset_slot=new_slot,
+        remote=info.remote,
+        started_at=int(info.ts) if info.ts else None,
+    )
+    return True

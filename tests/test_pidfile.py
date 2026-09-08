@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from tui.data.pidfile import read_pid_file, write_pid_file
+from tui.data.pidfile import read_pid_file, remap_pid_preset_slots, write_pid_file
 
 
 class PidFileTests(unittest.TestCase):
@@ -54,6 +55,27 @@ class PidFileTests(unittest.TestCase):
             self.assertEqual(info.quant, "Q4_K_M")
             self.assertEqual(info.preset_slot, 2)
             self.assertTrue(info.remote)
+
+    def test_remap_updates_running_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "server.pid"
+            write_pid_file(
+                path,
+                pid=os.getpid(),
+                model="demo-model",
+                port=8081,
+                quant="Q2_K",
+                preset_slot=5,
+                remote=False,
+                started_at=1000,
+            )
+            changed = remap_pid_preset_slots(
+                path, {("demo-model", "Q2_K"): {1: 1, 3: 2, 5: 3}}
+            )
+            self.assertTrue(changed)
+            info = read_pid_file(path)
+            self.assertEqual(info.preset_slot, 3)
+            self.assertEqual(info.ts, "1000")
 
 
 if __name__ == "__main__":

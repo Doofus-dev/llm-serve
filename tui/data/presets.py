@@ -188,7 +188,7 @@ def save_presets(path: Path, store: PresetStore) -> None:
         data[model_name] = {}
         for quant, slots in quants.items():
             data[model_name][quant] = {}
-            for slot, preset in slots.items():
+            for slot, preset in sorted(slots.items()):
                 data[model_name][quant][str(slot)] = {
                     "name": preset.name,
                     "params": preset.params,
@@ -234,6 +234,45 @@ def next_free_slot(store: PresetStore, model: str, quant: str) -> int | None:
     return None
 
 
+def compact_preset_slots(store: PresetStore, model: str, quant: str) -> dict[int, int]:
+    """Renumber this quant's presets to 1..n. Returns old_slot -> new_slot."""
+    slots = store.presets.get(model, {}).get(quant)
+    if not slots:
+        if get_active_slot(store, model, quant) is not None:
+            clear_active_preset(store, model, quant)
+        return {}
+
+    old_slots = sorted(slots)
+    mapping = {old: new for new, old in enumerate(old_slots, start=1)}
+    if mapping != {slot: slot for slot in old_slots}:
+        compacted = {}
+        for old, new in mapping.items():
+            preset = slots[old]
+            preset.slot = new
+            compacted[new] = preset
+        store.presets[model][quant] = compacted
+
+    active = get_active_slot(store, model, quant)
+    if active is None:
+        return mapping
+    if active in mapping:
+        set_active_preset(store, model, quant, mapping[active])
+    else:
+        clear_active_preset(store, model, quant)
+    return mapping
+
+
+def compact_all_preset_slots(store: PresetStore) -> dict[tuple[str, str], dict[int, int]]:
+    """Compact every model/quant. Returns remaps only for quants that changed."""
+    remaps: dict[tuple[str, str], dict[int, int]] = {}
+    for model_name, quants in list(store.presets.items()):
+        for quant in list(quants):
+            mapping = compact_preset_slots(store, model_name, quant)
+            if any(old != new for old, new in mapping.items()):
+                remaps[(model_name, quant)] = mapping
+    return remaps
+
+
 def set_preset(
     store: PresetStore,
     model: str,
@@ -247,7 +286,9 @@ def set_preset(
     )
 
 
-def delete_preset(store: PresetStore, model: str, quant: str, slot: int) -> None:
+def delete_preset(store: PresetStore, model: str, quant: str, slot: int) -> dict[int, int]:
+    if get_active_slot(store, model, quant) == slot:
+        clear_active_preset(store, model, quant)
     quants = store.presets.get(model, {})
     if quant in quants and slot in quants[quant]:
         del quants[quant][slot]
@@ -255,6 +296,7 @@ def delete_preset(store: PresetStore, model: str, quant: str, slot: int) -> None
             del quants[quant]
         if not quants:
             del store.presets[model]
+    return compact_preset_slots(store, model, quant)
 
 
 def delete_all_presets_for_model(store: PresetStore, model: str) -> None:
