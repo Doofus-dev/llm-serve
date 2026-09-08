@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -12,7 +11,8 @@ QUANT_RE = re.compile(
     re.IGNORECASE,
 )
 SIZE_RE = re.compile(r"(\d+(?:\.\d+)?[BMbm])")
-FAMILY_RE = re.compile(r"([A-Za-z]+[\d]+(?:\.[\d]+)?)")
+VERSION_RE = re.compile(r"v\d+(?:\.\d+)?")
+FAMILY_RE = re.compile(r"([A-Za-z]+(?:[-_]?[\d]+(?:\.[\d]+)?)+)")
 
 
 def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | None]:
@@ -85,14 +85,17 @@ def family_display(repo_id: str, filename: str) -> str:
 
 
 def _family_from_text(text: str) -> str | None:
-    if m := FAMILY_RE.search(text):
+    cleaned = QUANT_RE.sub("", text)
+    cleaned = SIZE_RE.sub("", cleaned)
+    cleaned = VERSION_RE.sub("", cleaned)
+    if m := FAMILY_RE.search(cleaned):
         return m.group(1)
     return None
 
 
 def _prettify_family(raw: str) -> str:
-    # Qwen3.8 -> Qwen 3.8, Llama3.1 -> Llama 3.1
-    return re.sub(r"([a-zA-Z])(\d)", r"\1 \2", raw, count=1)
+    # Qwen3.8 -> Qwen 3.8, Llama-3.1 -> Llama 3.1, Llama3.1 -> Llama 3.1
+    return re.sub(r"([a-zA-Z])(?:-?)(\d)", r"\1 \2", raw, count=1)
 
 
 def author_size_label(params: dict, filename: str) -> str:
@@ -127,25 +130,3 @@ def default_model_slug(repo_id: str, filename: str, author: str) -> str:
     if author_bit and author_bit not in base:
         return f"{base}-{author_bit}"[:48].strip("-")
     return base[:48].strip("-")
-
-
-@dataclass(frozen=True)
-class QuantEntry:
-    quant_id: str
-    filename: str
-    file: str
-    downloaded: bool
-    size: int = 0
-
-
-def quant_entry_from_file(quant_id: str, filename: str, file_rel: str, models_dir: Path) -> QuantEntry:
-    path = models_dir / file_rel
-    downloaded = path.is_file()
-    size = path.stat().st_size if downloaded else 0
-    return QuantEntry(
-        quant_id=quant_id,
-        filename=filename,
-        file=file_rel,
-        downloaded=downloaded,
-        size=size,
-    )
