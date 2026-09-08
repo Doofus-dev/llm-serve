@@ -18,7 +18,6 @@ from typing import Mapping
 
 from tui.data.models_json import Registry, load_registry, resolve_model_key
 from tui.data.pidfile import (
-    PidInfo,
     clear_pid_file,
     read_pid_file,
     write_pid_file,
@@ -463,17 +462,6 @@ def rotate_log(path: Path, *, max_lines: int = MAX_LOG_LINES) -> None:
         return
     keep = lines[-(max_lines // 2) :]
     path.write_text("".join(keep))
-
-
-def running_server(paths: AppPaths | None = None) -> PidInfo | None:
-    paths = paths or default_paths()
-    info = read_pid_file(paths.pid_file)
-    if info is None:
-        return None
-    if info.alive:
-        return info
-    clear_pid_file(paths.pid_file)
-    return None
 
 
 def _pid_alive(pid: int) -> bool:

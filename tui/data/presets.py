@@ -196,10 +196,6 @@ def save_presets(path: Path, store: PresetStore) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
-def resolve_quant(model: str, quant: str | None, active_quant: str | None = None) -> str:
-    return quant or active_quant or "LOCAL"
-
-
 def get_active_slot(store: PresetStore, model: str, quant: str) -> int | None:
     return store.active.get(model, {}).get(quant)
 
@@ -357,19 +353,4 @@ def merge_identity_and_preset(identity: dict[str, Any], preset: Preset) -> dict[
     return merged
 
 
-def params_to_env(params: dict[str, Any]) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for key, value in params.items():
-        env_key = PARAM_TO_ENV.get(key, key.upper())
-        env[env_key] = str(value)
-    return env
 
-
-def overrides_to_env(overrides: dict[str, Any]) -> dict[str, str]:
-    """Backward-compatible alias."""
-    return params_to_env(overrides)
-
-
-def apply_preset(base_params: dict[str, Any], preset: Preset) -> dict[str, Any]:
-    """Backward-compatible merge helper."""
-    return merge_identity_and_preset(base_params, preset)

@@ -25,12 +25,10 @@ from tui.data.presets import (
     seed_default_preset,
 )
 from tui.data.quant import (
-    QuantEntry,
     author_size_label,
     default_model_slug,
     family_display,
     parse_gguf_filename,
-    quant_entry_from_file,
     quant_from_filename,
 )
 
@@ -395,19 +393,6 @@ def downloaded_repo_ids(reg: Registry, models_dir: Path) -> set[str]:
         if repo and model_file_paths(cfg, models_dir):
             ids.add(repo)
     return ids
-
-
-def get_quant_entries(cfg: ModelConfig, models_dir: Path) -> list[QuantEntry]:
-    quants = cfg.params.get("quants") or {}
-    entries: list[QuantEntry] = []
-    for qid, raw in quants.items():
-        if not isinstance(raw, dict):
-            continue
-        filename = str(raw.get("filename") or Path(str(raw.get("file", ""))).name)
-        file_rel = str(raw.get("file") or cfg.file)
-        entries.append(quant_entry_from_file(str(qid), filename, file_rel, models_dir))
-    entries.sort(key=lambda e: e.quant_id)
-    return entries
 
 
 def merge_repo_catalog(params: dict[str, Any], files: list[tuple[str, str]]) -> None:
