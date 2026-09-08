@@ -48,6 +48,7 @@ EventLabel = Literal[
 ]
 
 FALLBACK_SESSION_LINES = 400
+MAX_SESSION_BYTES = 512 * 1024
 
 
 def is_unformatted_event(event: "LogEvent") -> bool:
@@ -278,6 +279,69 @@ def slice_to_session(text: str, fallback_lines: int = FALLBACK_SESSION_LINES) ->
     if idx is not None:
         return "".join(lines[idx:])
     return "".join(lines[-fallback_lines:])
+
+
+def tail_bytes(path: Path, max_bytes: int) -> tuple[bytes, int]:
+    """Read at most *max_bytes* from the end of *path*.
+
+    Returns ``(data, eof_offset)``. *eof_offset* is the file position after the
+    bytes we consumed, suitable as a tailer's incremental read offset.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        if size == 0 or max_bytes <= 0:
+            return b"", size
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read()
+        return data, start + len(data)
+
+
+def tail_lines(path: Path, n: int, *, keepends: bool = False) -> list[str]:
+    """Return the last *n* lines of *path* without reading the whole file."""
+    if n <= 0 or not path.is_file():
+        return []
+    chunk_size = 8192
+    chunks: list[bytes] = []
+    newlines = 0
+    start = 0
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        pos = handle.tell()
+        if pos == 0:
+            return []
+        while pos > 0 and newlines <= n:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            handle.seek(pos)
+            chunk = handle.read(read_size)
+            chunks.append(chunk)
+            newlines += chunk.count(b"\n")
+        start = pos
+    text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+    if start > 0:
+        nl = text.find("\n")
+        if nl == -1:
+            return []
+        text = text[nl + 1 :]
+    return text.splitlines(keepends=keepends)[-n:]
+
+
+def read_session_tail(
+    path: Path, *, max_bytes: int = MAX_SESSION_BYTES
+) -> tuple[str, int]:
+    """Session text from a tail window of *path*, plus the file offset consumed.
+
+    Reads at most *max_bytes* from the end, drops a partial first line when the
+    window does not start at byte 0, then applies :func:`slice_to_session`.
+    """
+    data, size = tail_bytes(path, max_bytes)
+    text = data.decode("utf-8", errors="replace")
+    if size > len(data):
+        nl = text.find("\n")
+        text = "" if nl == -1 else text[nl + 1 :]
+    return slice_to_session(text), size
 
 
 def _esc(text: str) -> str:
@@ -1065,11 +1129,12 @@ def render_event(event: LogEvent, *, show_raw: bool = False) -> str:
 class LogTailer:
     """Incrementally read a log file and emit new events."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_session_bytes: int = MAX_SESSION_BYTES) -> None:
         self.aggregator = LogAggregator()
         self._offset = 0
         self._partial = ""
         self._started = False
+        self._max_session_bytes = max_session_bytes
 
     def reset(self) -> None:
         self.aggregator.reset()
@@ -1086,9 +1151,9 @@ class LogTailer:
         size = path.stat().st_size
         if not self._started or size < self._offset:
             self.aggregator.reset()
-            data = path.read_bytes()
-            text = data.decode("utf-8", errors="replace")
-            session = slice_to_session(text)
+            session, size = read_session_tail(
+                path, max_bytes=self._max_session_bytes
+            )
             self._offset = size
             self._partial = ""
             self._started = True
