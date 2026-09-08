@@ -24,12 +24,6 @@ class Metrics:
     prompt_tps_derived: float = 0.0
 
     @property
-    def avg_gen_tps(self) -> float:
-        if self.tokens_predicted_seconds_total > 0:
-            return self.tokens_predicted_total / self.tokens_predicted_seconds_total
-        return 0.0
-
-    @property
     def avg_prompt_tps(self) -> float:
         if self.prompt_seconds_total > 0:
             return self.prompt_tokens_total / self.prompt_seconds_total

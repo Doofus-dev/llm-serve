@@ -82,9 +82,6 @@ class DownloadManager:
     def queue_size(self) -> int:
         return len(self._queue)
 
-    def job_key(self, job: DownloadJob) -> str:
-        return job.key
-
     def has_job(self, key: str) -> bool:
         if self._current is not None and self._current.key == key:
             return True
