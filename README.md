@@ -1,168 +1,233 @@
 # llm-serve
 
-A declarative launcher for [llama.cpp](https://github.com/ggml-org/llama.cpp) that manages model profiles, aliases, and server parameters through JSON config and an interactive TUI. Launch any configured model with one command.
+A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a quant and preset, and start one `llama-server` — from the TUI or the command line.
 
-## Features
+## What it does
 
-- **Model registry** — Define models, quants, and presets in `models.json` (and `presets.json`)
-- **Interactive TUI** — Browse models, edit settings, download from Hugging Face, and monitor live throughput
-- **Friendly aliases** — `llm-serve coding` can follow a model family’s defaults or pin an exact quant and preset
-- **Fine-grained parameter control** — GPU offload, KV cache quantization, MoE expert offload, speculative decoding, reasoning/thinking control, and more
-- **Environment overrides** — Tune any parameter at runtime without editing config (`GPU_LAYERS=50 llm-serve my-model`)
-- **Dry-run mode** — Preview the generated command without launching (`llm-serve --dry-run my-model`)
-- **Remote access** — `llm-serve my-model --remote` binds to all interfaces so other devices on your LAN or VPN mesh can reach it
-- **Background/foreground modes** — Run servers in the background or attached to your terminal
-- **Status management** — `llm-serve status` and `llm-serve stop` for running servers
-- **One-command setup** — `./setup.sh` handles prerequisites, clones & builds llama.cpp, installs Python and TUI dependencies, creates directories
-- **Clean uninstall** — `llm-serve uninstall` removes build artifacts while preserving models and config
-- **PATH integration** — Automatically symlinks `llm-serve` into `~/.local/bin/` so you can launch the TUI or a model from any directory
+- **Model registry** — Profiles in `models.json` (display name, port, Hugging Face source, quants). Runtime knobs live in `presets.json`.
+- **Interactive TUI** — Browse models and aliases, edit presets, download GGUFs from Hugging Face, and watch live decode speed and GPU use.
+- **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
+- **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …).
+- **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, queue downloads.
+- **One server** — A single tracked `llama-server`. Launch refuses if one is already running.
+- **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
+- **Setup** — `./setup.sh` installs a project `.venv`, clones and builds llama.cpp (CUDA / ROCm / CPU), and puts `llm-serve` on `PATH`.
 
 ## Prerequisites
 
-- **Linux** — setup.sh currently requires a Linux distro with pacman, apt, dnf, or zypper (for auto-installing missing packages)
-- **Bash 4.4+** — Required for associative arrays. Most modern Linux distributions include this.
-- **Python 3.9+** — Required for the TUI and launcher. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and the TUI package into a project `.venv`
-- **Python 3.9+** — Required for the TUI and launcher. setup.sh installs Python, `python3-venv` (needed on Ubuntu/Debian), and the TUI package into a project `.venv`
-- **NVIDIA GPU** — Detected automatically via `nvidia-smi`; setup installs CUDA toolkit and builds with GPU support
-- **AMD GPU** — Detected automatically via `lspci`; setup installs ROCm HIP SDK and builds with `-DGGML_HIP=ON`
-- **Overrides** — `./setup.sh --cpu`, `--cuda`, or `--rocm` to force a build type
+- **Linux** with pacman, apt, dnf, or zypper (for `setup.sh` package installs)
+- **Bash 4.4+**
+- **Python 3.9+** with `venv` (Ubuntu/Debian: `python3-venv`)
+- **NVIDIA** (`nvidia-smi`) or **AMD** (`lspci`) GPU optional — otherwise a CPU build
+- **`hf` CLI** optional, for Hub browse/download: `curl -LsSf https://hf.co/cli/install.sh | bash`
 
-## Quick Start
+macOS and Windows are not supported by `setup.sh`. The launcher can work on macOS if you install Bash 4.4+ and build llama.cpp yourself.
+
+## Quick start
 
 ```bash
-git clone https://github.com/doofus-dev/llm-serve.git
+git clone https://github.com/Doofus-dev/llm-serve.git
 cd llm-serve
 
-# Run setup (handles everything: prereqs, llama.cpp clone + build, Python TUI deps, dirs, config)
 ./setup.sh              # Auto-detects GPU (NVIDIA→CUDA, AMD→ROCm, else CPU)
 ./setup.sh --cpu        # Force CPU-only
-./setup.sh --cuda       # Force CUDA (NVIDIA)
-./setup.sh --rocm       # Force ROCm (AMD)
-
-# Drop a .gguf model in models/ (or download from the TUI with H)
-
-# Edit models.json to register your model (or use the TUI editor)
-
-# Open the TUI, or launch a model directly (works from any directory after setup)
-./llm-serve
-./llm-serve my-model
-# or, once ~/.local/bin is on PATH:
-# llm-serve
-
-# Show configured models and CLI commands
-./llm-serve --help
+./setup.sh --cuda       # Force CUDA
+./setup.sh --rocm       # Force ROCm
 ```
 
-Verify it's working:
+Then:
+
+```bash
+# TUI — download a GGUF with H, or drop files in models/<author>/
+llm-serve
+
+# Or launch a profile / alias from any directory (after setup)
+llm-serve my-model
+llm-serve coding --remote
+```
+
+Default bind is `127.0.0.1:8081` (see `models.json`):
+
 ```bash
 curl http://127.0.0.1:8081/v1/models
 ```
 
-## Directory Structure
+## Command line
 
 ```
-llm-serve/ ← this repo
-├── llm-serve              # Launcher script
-├── setup.sh               # One-command environment setup
-├── models.json            # Your model registry (created from example on first setup)
-├── models.json.example    # Starter model profile
-├── presets.json           # Per-model preset slots (created/edited by the TUI)
-├── param-help.conf        # Parameter docs for TUI F1 help (not a config file)
-├── README.md              # This file
-├── LICENSE                # MIT
-├── .gitignore
-├── tui/                   # Textual TUI (requirements in tui/requirements.txt)
-├── models/                # Your .gguf model files (created by setup.sh)
-├── llama.cpp/             # llama.cpp clone + build (created by setup.sh)
-│   └── build/bin/llama-server
-└── logs/                  # Runtime logs (created by setup.sh)
+llm-serve                      Open the TUI
+llm-serve --help               Models, aliases, and this command list
+llm-serve list                 Same as --help
+llm-serve <model>              Start in the background
+llm-serve <model> --live       Foreground with live logs
+llm-serve <model> --dry-run    Print the llama-server command; do not start
+llm-serve <model> --remote     Bind 0.0.0.0
+llm-serve status               PID, port, local/remote, last log lines
+llm-serve stop                 Stop the tracked server
+llm-serve stop <model>         Stop only if that model is running
+llm-serve update               Pull and rebuild llama.cpp
+llm-serve update --yes         Same, no confirm
 ```
 
-`models/` lives at the repo root — separate from `llama.cpp/`. This keeps your model weights independent from the upstream source tree, so updating llama.cpp never touches your models.
+`<model>` matches an alias name, a model slug, or a display name.
 
-You can override any path at runtime:
-```bash
-LLAMA_DIR=/path/to/llama.cpp ./llm-serve my-model
-MODEL_DIR=/mnt/models ./llm-serve my-model
-```
+### Environment overrides
 
-## Usage
-
-```
-Usage: llm-serve [command] [options]
-
-Commands:
-  (no command)           Open the interactive TUI
-  <profile>              Launch the named model profile
-  list                   List all configured models
-  status                 Show running server status
-  stop                   Stop all running servers
-  stop <model>           Stop a specific model
-  uninstall              Remove build artifacts (keep models/ and models.json)
-  uninstall --force      Non-interactive uninstall
-  --dry-run <profile>    Show the command that would be run
-  --help                 Show this help message
-
-Options:
-  --live                 Run in foreground with live logs
-  --remote               Bind 0.0.0.0 so other devices (LAN/Meshnet) can reach it
-```
-
-### Environment Variable Overrides
-
-Most server parameters can be overridden at runtime:
+Common launch knobs (also `LOG_VERBOSITY`):
 
 ```bash
-GPU_LAYERS=50 ./llm-serve my-model
-CONTEXT_SIZE=131072 ./llm-serve my-model
-MODEL_PATH=/path/to/other-model.gguf ./llm-serve my-model
-MODEL_DIR=/mnt/models ./llm-serve my-model
-PORT=9000 ./llm-serve my-model
-GPU_LAYERS=99 CONTEXT_SIZE=32768 THREADS=16 ./llm-serve my-model
+GPU_LAYERS=50 CONTEXT_SIZE=32768 PORT=9000 llm-serve my-model
+MODEL_DIR=/mnt/models MODEL_PATH=/mnt/models/foo.gguf llm-serve my-model
+LLAMA_DIR=/opt/llama.cpp llm-serve my-model
 ```
 
-### Remote Access (LAN / Meshnet)
+`PORT`, `HOST`, `CONTEXT_SIZE`, `GPU_LAYERS`, `THREADS`, `UBATCH`, `PARALLEL`, `N_PREDICT`, `CACHE_TYPE_K`, `CACHE_TYPE_V`, `BATCH_SIZE`, `DEFRAG_THOLD`, `TEMP`, `TOP_P`, `SEED`, `ENABLE_MTP`, `N_CPU_MOE`, `MODEL_PATH`, `MODEL_DIR`
 
-By default the server binds to `127.0.0.1` (localhost only). To serve other devices — a laptop, phone, or anything on your LAN or a private VPN mesh like NordVPN Meshnet or Tailscale — launch with `--remote`:
+Path defaults (all under the repo that contains the `llm-serve` script, not the current directory):
+
+| Variable | Default |
+|----------|---------|
+| `LLAMA_DIR` | `{repo}/llama.cpp` |
+| `MODEL_DIR` | `{repo}/models` |
+| `LOG_DIR` | `{repo}/logs` |
+
+After setup, `~/.local/bin/llm-serve` points at the repo script, so the TUI and CLI work from any directory.
+
+## TUI
+
+```
+┌─ MODELS / ALIASES ─┬─ status (running line, throughput, GPU) ─┐
+│  cards + presets   │  active preset / runtime config            │
+└────────────────────┴─ translated server log ────────────────────┘
+```
+
+The running line shows family, quant, and preset slot: `RUNNING  Qwen 3.5  Q8_0  [1]`. **R** and **V** set remote and log verbosity for the *next* launch (saved in `tui-settings.json`).
+
+| Key | Action |
+|-----|--------|
+| **L** / **S** | Launch / stop |
+| **E** | Edit profile, preset, or rename alias |
+| **P** | Quant picker (switch file or queue a download) |
+| **N** / **D** | New / delete (preset or alias, depending on focus) |
+| **1–5** | Activate that preset (or pin it on an alias) |
+| **H** | Hugging Face Hub |
+| **R** | Next launch local ↔ remote |
+| **V** | Next launch log level (INFO → TRACE → DEBUG) |
+| **O** | Extra lines in the log pane |
+| **T** | Theme |
+| **F1** | Key help |
+| **Q** | Quit |
+| **Tab** | Models ↔ Aliases |
+| **←/→** | On an alias: change target model |
+
+In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles field help from `param-help.conf`.
+
+### Hub and quant picker
+
+Need the `hf` CLI for browse/download. Local models still work without it.
+
+File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns from runs saved in `tui-baselines.json` (written while a server is up). Context and GPU-offload sliders change the estimates. Downloads are queued one at a time; keep Hub open until they finish. Gated repos need **Login** (Hugging Face token) — that is not API auth for llama-server.
+
+## Configuration
+
+### `models.json`
+
+Identity only. First setup copies `models.json.example` if the file is missing.
+
+```json
+{
+  "models": {
+    "qwen38-27b-bartowski": {
+      "display": "Qwen 3.8",
+      "host": "127.0.0.1",
+      "port": 8081,
+      "file": "bartowski/Qwen3.8-27B-IQ2_XXS.gguf",
+      "active_quant": "IQ2_XXS",
+      "total_layers": 65,
+      "source": {
+        "hub": "huggingface",
+        "repo": "bartowski/Qwen3.8-27B-GGUF",
+        "filename": "Qwen3.8-27B-IQ2_XXS.gguf",
+        "author": "bartowski",
+        "revision": "main"
+      },
+      "quants": {
+        "IQ2_XXS": {
+          "filename": "Qwen3.8-27B-IQ2_XXS.gguf",
+          "file": "bartowski/Qwen3.8-27B-IQ2_XXS.gguf"
+        }
+      }
+    }
+  },
+  "aliases": {
+    "default": { "model": "qwen38-27b-bartowski" },
+    "coding": { "model": "qwen38-27b-bartowski", "quant": "IQ2_XXS", "preset": 1 }
+  }
+}
+```
+
+`quant` and `preset` on an alias only apply when **both** are set.
+
+### `presets.json`
+
+Created by the TUI (not by setup). Per model, per quant, slots `1`–`5`. Slot 1 is seeded as `default` when a quant is added. Launch uses the active slot for the active (or alias-pinned) quant.
+
+### Other files (repo root, gitignored except the example)
+
+| File | Purpose |
+|------|---------|
+| `tui-settings.json` | Theme, Hub author recents, next-launch remote and log verbosity |
+| `tui-baselines.json` | Measured VRAM and generation averages for Hub **Act.** columns |
+| `param-help.conf` | Preset-editor field docs (**F2**). Not a config file. |
+
+## Layout
+
+```
+llm-serve/
+├── llm-serve              # Entrypoint (TUI if no args; otherwise CLI)
+├── setup.sh
+├── pyproject.toml         # textual, httpx → project .venv
+├── models.json            # Registry (from models.json.example on first setup)
+├── presets.json           # Preset slots (TUI)
+├── param-help.conf
+├── tui/                   # Textual app
+├── tests/
+├── lib/                   # llama.cpp build + venv helpers
+├── patches/llama.cpp/     # Applied at build time
+├── models/                # GGUFs as author/filename.gguf
+├── llama.cpp/             # Clone + build
+├── logs/                  # llm-serve.log, .llm-serve.pid
+└── .venv/
+```
+
+`models/` is independent of the llama.cpp tree so an update does not touch weights.
+
+## Remote access
 
 ```bash
-./llm-serve my-model --remote
+llm-serve my-model --remote
 ```
 
-This binds `0.0.0.0` (all interfaces) and prints the addresses other devices can use:
+Binds `0.0.0.0` and prints reachable URLs. Only use this on a trusted LAN or private VPN (Tailscale, Meshnet, …). Do not expose the port to the public internet.
 
+## Development
+
+```bash
+./setup.sh          # or: python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+.venv/bin/pytest
 ```
-Remote mode: bound to 0.0.0.0 — reachable from other devices at:
-    http://192.168.1.100:8081/v1    # LAN (example — use your machine's address)
-    http://100.64.0.10:8081/v1      # Meshnet / VPN (example — use your mesh address)
-```
-
-Security note: `--remote` exposes the server to anything that can reach those addresses. Only use it on trusted networks (LAN, a private VPN mesh). Do not forward the port to the public internet — there is no authentication.
-
-## Configuration Reference
-
-Model profiles live in **`models.json`**. Each model can define multiple quants and preset slots; sampling and server tuning parameters are stored per quant/preset in **`presets.json`** (managed automatically by the TUI).
-
-Key concepts:
-
-- **`models`** — Model profiles with file paths, Hugging Face source metadata, ports, and quant variants
-- **`aliases`** — Friendly names that map to a model, optionally pinning `quant` and `preset`
-- **Presets** — Numbered slots (1, 2, 3, …) holding `gpu_layers`, `ctx`, cache types, sampling, reasoning, MTP, etc.
-- **F1 help** — In the TUI editor, focus a field to see docs parsed from `param-help.conf`
-
-See `models.json.example` for a minimal starting profile.
 
 ## FAQ
 
-**Can I use this with non-GGUF models?** No. This launcher is designed specifically for llama.cpp's GGUF format.
+**Non-GGUF models?** No. llama.cpp GGUF only.
 
-**Can I run multiple models at once?** Not currently. The script manages a single server instance.
+**Several models at once?** No. One PID file, one server.
 
-**Does this work on macOS?** The launcher works with Bash 4.4+ (install via Homebrew: `brew install bash`). setup.sh currently only supports Linux.
+**vLLM or another backend?** No.
 
-**Can I use this with vLLM or other backends?** Not yet. The launcher is llama.cpp-specific.
+**macOS?** `setup.sh` is Linux-only. The Python launcher may work with a manual llama.cpp build and Bash 4.4+.
 
-**What does uninstall remove?** llama.cpp clone+build, logs, and the ~/.local/bin symlink. It preserves models/, models.json, presets.json, and any system packages installed by setup.sh.
+**What does `update` do?** Fetches llama.cpp and rebuilds it (same GPU backend as last setup). It does not remove `models/` or your JSON.
 
 ## License
 
