@@ -346,7 +346,7 @@ def prepare_launch(
             f"unknown model '{requested}'. Run 'llm-serve' to see available models."
         )
 
-    registry = registry or load_registry(paths.models_json, models_dir=paths.models_dir)
+    registry = registry or load_registry(paths.models_json, models_dir=paths.models_dir, migrate=False)
     store = load_presets(paths.presets_json)
     cfg = registry.models[model_key]
     alias = registry.aliases.get(requested)
@@ -508,7 +508,7 @@ def stop_server(
         resolved = resolve_model_key(data, model)
         if resolved is None:
             raise LaunchError(f"unknown model '{model}'")
-        registry = load_registry(paths.models_json, models_dir=paths.models_dir)
+        registry = load_registry(paths.models_json, models_dir=paths.models_dir, migrate=False)
         display = (
             registry.models[resolved].display if resolved in registry.models else resolved
         )
@@ -559,7 +559,7 @@ def list_text(paths: AppPaths | None = None) -> str:
     paths = paths or default_paths()
     if not paths.models_json.is_file():
         raise LaunchError(f"models.json not found at {paths.models_json}")
-    registry = load_registry(paths.models_json, models_dir=paths.models_dir)
+    registry = load_registry(paths.models_json, models_dir=paths.models_dir, migrate=False)
     lines = ["Available models:", ""]
     for cfg in registry.models.values():
         lines.append(f"  {cfg.display:<22} {cfg.notes}")
