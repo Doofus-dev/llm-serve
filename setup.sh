@@ -368,7 +368,9 @@ case "$BUILD_TYPE" in
     cuda)
         [[ -n "$_LLAMA_GPU_NAME" ]] && ok "NVIDIA GPU: ${_LLAMA_GPU_NAME}"
         ok "Build type: CUDA (GPU acceleration)"
-        ok "nvcc $(nvcc --version | grep 'release' | cut -d' ' -f5 | tr -d ',')"
+        local nvcc_ver
+        nvcc_ver="$(nvcc --version 2>/dev/null | grep -oP 'release \K[0-9]+\.[0-9]+' || true)"
+        [[ -n "$nvcc_ver" ]] && ok "nvcc ${nvcc_ver}" || ok "nvcc installed"
         ;;
     rocm)
         [[ -n "$_LLAMA_GPU_NAME" ]] && ok "AMD GPU: ${_LLAMA_GPU_NAME}"
