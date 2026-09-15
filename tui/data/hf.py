@@ -173,39 +173,49 @@ async def _run_hf_async(
 ) -> tuple[int, str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
-    proc = await asyncio.create_subprocess_exec(
-        "hf",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
-    chunks: list[str] = []
-    leftover = b""
-    assert proc.stdout is not None
-    while True:
-        block = await proc.stdout.read(512)
-        if not block:
-            break
-        leftover += block
-        lines, leftover = take_hf_progress_lines(leftover)
-        for text in lines:
-            chunks.append(text)
-            if on_line:
-                on_line(text)
-    if leftover:
-        text = leftover.decode("utf-8", errors="replace").strip()
-        if text:
-            chunks.append(text)
-            if on_line:
-                on_line(text)
-    try:
-        rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise
-    output = "\n".join(chunks)
+
+    async def _lifecycle() -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "hf",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+        )
+        try:
+            chunks: list[str] = []
+            leftover = b""
+            assert proc.stdout is not None
+            while True:
+                block = await proc.stdout.read(512)
+                if not block:
+                    break
+                leftover += block
+                lines, leftover = take_hf_progress_lines(leftover)
+                for text in lines:
+                    chunks.append(text)
+                    if on_line:
+                        on_line(text)
+            if leftover:
+                text = leftover.decode("utf-8", errors="replace").strip()
+                if text:
+                    chunks.append(text)
+                    if on_line:
+                        on_line(text)
+            rc = await proc.wait()
+            return rc, "\n".join(chunks)
+        except asyncio.CancelledError:
+            # Cancellation (task cancel or timeout) must not leave the
+            # ``hf`` subprocess running in the background.
+            if proc.returncode is None:
+                proc.kill()
+                try:
+                    await proc.wait()
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+    rc, output = await asyncio.wait_for(_lifecycle(), timeout=timeout)
     return rc, output, output
 
 

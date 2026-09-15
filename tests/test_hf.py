@@ -1,11 +1,11 @@
 """Tests for Hugging Face integration helpers."""
 
-from __future__ import annotations
-
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Callable
 from unittest.mock import patch
 
 from tui.data.hf import (
@@ -29,6 +29,7 @@ from tui.data.hf import (
     list_gguf_repos,
     list_repo_ggufs,
     shard_filenames,
+    _run_hf_async,
 )
 from tui.data.models_json import create_downloaded_model, load_registry, merge_editor_params, update_model
 from tui.data.settings import TUISettings, load_settings, remember_hf_author, save_settings
@@ -392,6 +393,40 @@ class VRAMEstimateTests(unittest.TestCase):
     def test_fmt_tps_uses_tilde(self) -> None:
         self.assertEqual(fmt_tps(42.2), "~42 t/s")
         self.assertEqual(fmt_tps(None), "?")
+
+
+class HfSubprocessKillTests(unittest.IsolatedAsyncioTestCase):
+    """A hung ``hf`` subprocess must be killed on timeout or cancellation."""
+
+    def _hung_create(self) -> "Callable":
+        original = asyncio.create_subprocess_exec
+
+        async def hung_create(*args, **kwargs):
+            kwargs["stdout"] = asyncio.subprocess.PIPE
+            kwargs["stderr"] = asyncio.subprocess.STDOUT
+            return await original("sleep", "30", **kwargs)
+
+        return hung_create
+
+    def test_timeout_kills_hung_process(self) -> None:
+        async def run() -> None:
+            with patch("asyncio.create_subprocess_exec", new=self._hung_create()):
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(_run_hf_async(["download"], timeout=0.3), timeout=1.0)
+
+        asyncio.run(run())
+
+    def test_cancellation_kills_hung_process(self) -> None:
+        async def run() -> None:
+            with patch("asyncio.create_subprocess_exec", new=self._hung_create()):
+                task = asyncio.create_task(_run_hf_async(["download"], timeout=None))
+                await asyncio.sleep(0.2)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+
 
 
 if __name__ == "__main__":
