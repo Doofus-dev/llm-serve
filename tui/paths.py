@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# LLM_SERVE_HOME overrides the repo root for non-editable installs
+# (e.g. pip install into site-packages where __file__ is wrong).
+_ENV_HOME = os.environ.get("LLM_SERVE_HOME")
+REPO_ROOT = Path(_ENV_HOME).resolve() if _ENV_HOME else Path(__file__).resolve().parent.parent
 
 METRICS_POLL_INTERVAL = 0.5
 METRICS_HISTORY_SAMPLES = 120

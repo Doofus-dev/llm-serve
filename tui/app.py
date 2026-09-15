@@ -449,7 +449,15 @@ class LLMServeApp(App):
         if alive and info:
             if self.client is None or self.client.base != f"http://127.0.0.1:{info.port}":
                 if self.client:
-                    asyncio.ensure_future(self.client.close())
+                    old = self.client
+
+                    async def _safe_close() -> None:
+                        try:
+                            await old.close()
+                        except Exception:
+                            pass
+
+                    asyncio.ensure_future(_safe_close())
                 self.client = ServerClient("127.0.0.1", info.port)
         panel.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
 

@@ -121,7 +121,7 @@ class ModelDeletionTests(unittest.TestCase):
             self.assertEqual(saved["aliases"]["legacy"], {"model": "model"})
             self.assertEqual(
                 saved["aliases"]["pinned"],
-                {"model": "model", "quant": "Q4_K_M", "preset": 2},
+                {"model": "model", "quant": "Q4_K_M", "preset_slot": 2},
             )
             self.assertEqual(resolve_model_key(saved, "pinned"), "model")
 

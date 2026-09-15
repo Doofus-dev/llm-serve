@@ -19,7 +19,7 @@ class LogPanel(RichLog):
             markup=True,
             wrap=True,
             highlight=False,
-            max_lines=400,
+            max_lines=MAX_LOG_EVENTS * 2,  # headroom over the event list budget
             auto_scroll=False,
             **kwargs,
         )
