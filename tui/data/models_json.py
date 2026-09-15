@@ -77,7 +77,7 @@ class AliasTarget:
             return cls(model=raw)
         if not isinstance(raw, dict) or not raw.get("model"):
             return None
-        preset = raw.get("preset")
+        preset = raw.get("preset_slot", raw.get("preset"))
         try:
             preset_slot = int(preset) if preset is not None else None
         except (TypeError, ValueError):
@@ -89,7 +89,7 @@ class AliasTarget:
         result: dict[str, object] = {"model": self.model}
         if self.quant is not None and self.preset_slot is not None:
             result["quant"] = self.quant
-            result["preset"] = self.preset_slot
+            result["preset_slot"] = self.preset_slot
         return result
 
 

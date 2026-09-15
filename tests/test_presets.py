@@ -174,7 +174,7 @@ class RemapAliasPresetSlotTests(unittest.TestCase):
                 AliasTarget(model="qwen36", quant="Q2_K", preset_slot=3),
             )
             self.assertEqual(
-                json.loads(models_path.read_text())["aliases"]["think"]["preset"],
+                json.loads(models_path.read_text())["aliases"]["think"]["preset_slot"],
                 3,
             )
 

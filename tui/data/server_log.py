@@ -1167,7 +1167,7 @@ class LogTailer:
         with path.open("rb") as handle:
             handle.seek(self._offset)
             chunk = handle.read()
-        self._offset += len(chunk)
+            self._offset = handle.tell()
         text = self._partial + chunk.decode("utf-8", errors="replace")
         if text.endswith("\n"):
             lines = text.splitlines()

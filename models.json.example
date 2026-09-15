@@ -30,7 +30,7 @@
     "coding": {
       "model": "qwen38-27b-bartowski",
       "quant": "IQ2_XXS",
-      "preset": 1
+      "preset_slot": 1
     }
   }
 }

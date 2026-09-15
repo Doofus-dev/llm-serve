@@ -460,6 +460,8 @@ def rotate_log(path: Path, *, max_lines: int = MAX_LOG_LINES) -> None:
     lines = tail_lines(path, max_lines + 1, keepends=True)
     if len(lines) <= max_lines:
         return
+    # Truncate to half the budget so the next rotation has room to grow
+    # before it needs to truncate again — avoids thrashing on every poll.
     keep = lines[-(max_lines // 2) :]
     path.write_text("".join(keep))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -305,11 +306,14 @@ class QuantPickerScreen(ModalScreen[str | None]):
         if repo:
             remote_files, error = list_repo_ggufs(repo)
             if remote_files:
+                before = json.dumps(params.get("quants") or {}, sort_keys=True)
                 merge_repo_catalog(
                     params, [(f.path, f.size) for f in remote_files]
                 )
+                after = json.dumps(params.get("quants") or {}, sort_keys=True)
                 self.cfg.params["quants"] = params["quants"]
-                save_registry(self.registry_path, self.registry)
+                if before != after:
+                    save_registry(self.registry_path, self.registry)
 
         # Ensure local-only quants appear even if Hub list fails
         quants = params.get("quants") or {}

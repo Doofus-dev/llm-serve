@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import statistics
 from collections import deque
 from dataclasses import dataclass
 from typing import Literal
@@ -199,7 +200,7 @@ def rolling_gen_average(
         return None
     window = active[-ROLLING_AVG_SAMPLES:]
     ordered = sorted(window)
-    median = ordered[len(ordered) // 2]
+    median = statistics.median(ordered)
     if median > 0:
         typical = [sample for sample in window if sample <= median * _SPIKE_MULTIPLE]
         if len(typical) >= max(1, len(window) // 2):
