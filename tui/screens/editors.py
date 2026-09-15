@@ -288,7 +288,13 @@ class ProfileEditor(VerticalScroll):
             return
         updated = dict(self.params)
         updated["display"] = display
-        updated["port"] = int(self.port_input.value.strip()) if self.port_input else updated.get("port", 8081)
+        if self.port_input:
+            try:
+                port = int(self.port_input.value.strip())
+            except (TypeError, ValueError):
+                self.app.notify("Port must be a number", severity="error")
+                return
+            updated["port"] = port
         updated["host"] = self.host_input.value.strip() if self.host_input else updated.get("host", "127.0.0.1")
         updated["notes"] = self.notes_input.value.strip() if self.notes_input else ""
         self.on_save_callback(updated)

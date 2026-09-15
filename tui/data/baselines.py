@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tui.data.gpu import gpu_match_key, same_gpu
+from tui.data.fsutil import atomic_write
 
 MAX_RUNS = 200
 VRAM_DELTA_MB = 16.0
@@ -125,7 +126,7 @@ def save_baselines(path: Path, runs: list[RunBaseline]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     trimmed = sorted(runs, key=lambda run: run.updated_at, reverse=True)[:MAX_RUNS]
     payload = {"runs": [asdict(run) for run in trimmed]}
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
 def record_baseline(path: Path, observation: RunBaseline) -> bool:
