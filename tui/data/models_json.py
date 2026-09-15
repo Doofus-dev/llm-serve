@@ -289,8 +289,18 @@ def migrate_to_preset_architecture(data: dict[str, Any], presets_path: Path) -> 
     return changed
 
 
-def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
-    """Load models.json; migrate legacy profiles and preset-only architecture."""
+def load_registry(
+    path: Path,
+    *,
+    models_dir: Path | None = None,
+    migrate: bool = True,
+) -> Registry:
+    """Load models.json; migrate legacy profiles and preset-only architecture.
+
+    ``migrate`` controls whether legacy migrations run and config files are
+    written as a side effect. Set ``migrate=False`` for read-only callers
+    (CLI status/list/stop) that should not rewrite config files.
+    """
     if not path.exists():
         return Registry()
 
@@ -304,29 +314,37 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
                 normalized_aliases[str(alias)] = target.to_json()
     aliases_migrated = raw_aliases != normalized_aliases
     data["aliases"] = normalized_aliases
-    migrated, preset_remap = migrate_models_json(data, models_dir=models_dir)
+
     presets_path = path.parent / "presets.json"
-    preset_arch_migrated = migrate_to_preset_architecture(data, presets_path)
-    quant_remaps: dict[str, dict[str, str]] = {}
-    for model_name, params in data.get("models", {}).items():
-        remapped = _normalize_quant_ids(params)
-        if remapped:
-            quant_remaps[str(model_name)] = remapped
-            for alias, raw_target in data["aliases"].items():
-                target = AliasTarget.from_raw(raw_target)
-                if (
-                    target is not None
-                    and target.model == model_name
-                    and target.quant in remapped
-                ):
-                    target.quant = remapped[target.quant]
-                    data["aliases"][alias] = target.to_json()
-    if aliases_migrated or migrated or preset_arch_migrated or quant_remaps:
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-        if preset_remap:
-            _migrate_presets_file(presets_path, preset_remap)
-        if quant_remaps:
-            _remap_preset_quant_ids(presets_path, quant_remaps)
+
+    if migrate:
+        migrated, preset_remap = migrate_models_json(data, models_dir=models_dir)
+        preset_arch_migrated = migrate_to_preset_architecture(data, presets_path)
+        quant_remaps: dict[str, dict[str, str]] = {}
+        for model_name, params in data.get("models", {}).items():
+            remapped = _normalize_quant_ids(params)
+            if remapped:
+                quant_remaps[str(model_name)] = remapped
+                for alias, raw_target in data["aliases"].items():
+                    target = AliasTarget.from_raw(raw_target)
+                    if (
+                        target is not None
+                        and target.model == model_name
+                        and target.quant in remapped
+                    ):
+                        target.quant = remapped[target.quant]
+                        data["aliases"][alias] = target.to_json()
+        if aliases_migrated or migrated or preset_arch_migrated or quant_remaps:
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            if preset_remap:
+                _migrate_presets_file(presets_path, preset_remap)
+            if quant_remaps:
+                _remap_preset_quant_ids(presets_path, quant_remaps)
+    else:
+        # Read-only path: still normalize quant IDs in memory so callers get
+        # consistent IDs, but do not write anything to disk.
+        for _name, params in data.get("models", {}).items():
+            _normalize_quant_ids(params)
 
     reg = Registry()
     for name, params in data.get("models", {}).items():
@@ -341,7 +359,7 @@ def load_registry(path: Path, *, models_dir: Path | None = None) -> Registry:
         for alias, raw_target in data.get("aliases", {}).items()
         if (target := AliasTarget.from_raw(raw_target)) is not None
     }
-    if _compact_loaded_preset_slots(presets_path, reg.aliases):
+    if migrate and _compact_loaded_preset_slots(presets_path, reg.aliases):
         save_registry(path, reg)
     return reg
 
@@ -856,7 +874,7 @@ def _migrate_presets_file(path: Path, remap: dict[str, tuple[str, str]]) -> None
         if not isinstance(value, dict):
             continue
         # Already nested by quant?
-        if value and all(isinstance(v, dict) and ("name" in v or "1" in v or "overrides" in str(v)) for v in value.values()):
+        if value and all(isinstance(v, dict) and ("name" in v or "overrides" in v or "1" in v) for v in value.values()):
             first = next(iter(value.values()))
             if isinstance(first, dict) and "overrides" in first:
                 # flat: model -> slot -> preset

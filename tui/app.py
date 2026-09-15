@@ -216,7 +216,7 @@ class LLMServeApp(App):
 
         self.call_later(apply)
 
-    @work(exclusive=True)
+    @work
     async def _process_download_queue(self) -> None:
         while True:
             job = self.download_manager.pop_next()
@@ -682,7 +682,7 @@ class LLMServeApp(App):
         )
         self._launch_worker(launch_name)
 
-    @work(exclusive=True)
+    @work
     async def _launch_worker(self, launch_name: str) -> None:
         def _run():
             plan = prepare_launch(
@@ -738,7 +738,7 @@ class LLMServeApp(App):
     def action_stop(self) -> None:
         self._stop_worker()
 
-    @work(exclusive=True)
+    @work
     async def _stop_worker(self) -> None:
         try:
             message = await asyncio.to_thread(lambda: stop_server(paths=self.paths))

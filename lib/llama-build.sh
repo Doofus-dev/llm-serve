@@ -258,13 +258,29 @@ llama_detect_build_type() {
         echo "$_LLAMA_STAMP_TYPE"
         return 0
     fi
-    if [[ -x "${LLAMA_SERVER}" ]] && "${LLAMA_SERVER}" --help 2>&1 | grep -qi 'cuda'; then
-        echo "cuda"
-        return 0
-    fi
-    if [[ -x "${LLAMA_SERVER}" ]] && "${LLAMA_SERVER}" --help 2>&1 | grep -qiE 'hip|rocm'; then
-        echo "rocm"
-        return 0
+    # Detect build type from binary linkage instead of --help text, which
+    # can contain "cuda" in CPU builds (e.g. "no CUDA available" messages).
+    if [[ -x "${LLAMA_SERVER}" ]]; then
+        # Check linked shared libraries first — most reliable signal.
+        if ldd "${LLAMA_SERVER}" 2>/dev/null | grep -qiE 'libcuda|libroc|libamd'; then
+            if ldd "${LLAMA_SERVER}" 2>/dev/null | grep -qiE 'libcuda'; then
+                echo "cuda"
+                return 0
+            fi
+            echo "rocm"
+            return 0
+        fi
+        # Fall back to strings for statically-linked or unusual builds.
+        if strings "${LLAMA_SERVER}" 2>/dev/null | grep -qi 'libcuda' && \
+           ! strings "${LLAMA_SERVER}" 2>/dev/null | grep -qiE 'hip|rocm'; then
+            echo "cuda"
+            return 0
+        fi
+        if strings "${LLAMA_SERVER}" 2>/dev/null | grep -qiE 'hip|rocm' && \
+           ! strings "${LLAMA_SERVER}" 2>/dev/null | grep -qi 'libcuda'; then
+            echo "rocm"
+            return 0
+        fi
     fi
     if llama_has_nvidia_gpu; then
         echo "cuda"
@@ -279,18 +295,41 @@ llama_detect_build_type() {
 
 # Fetch upstream HEAD. Sets _LLAMA_LOCAL_HEAD, _LLAMA_REMOTE_HEAD, _LLAMA_UPSTREAM_AHEAD (0|1).
 # Returns 0 on success, 1 if fetch failed or not a git repo.
+# Skips the network fetch if the last check was less than 1 hour ago.
 llama_fetch_status() {
     _LLAMA_LOCAL_HEAD="$(llama_local_head)"
     _LLAMA_REMOTE_HEAD=""
     _LLAMA_UPSTREAM_AHEAD=0
 
     [[ -d "${LLAMA_DIR}/.git" ]] || return 1
-    git -C "${LLAMA_DIR}" fetch --quiet origin HEAD 2>/dev/null || return 1
+
+    # Skip fetch if we checked less than 3600 seconds ago.
+    local fetch_marker="${LLAMA_DIR}/build/.last-fetch"
+    if [[ -f "$fetch_marker" ]]; then
+        local last_ts
+        last_ts="$(cat "$fetch_marker" 2>/dev/null || true)"
+        if [[ -n "$last_ts" ]] && (( $(date +%s) - last_ts < 3600 )); then
+            _LLAMA_REMOTE_HEAD="$(git -C "${LLAMA_DIR}" rev-parse FETCH_HEAD 2>/dev/null || true)"
+            if [[ -n "$_LLAMA_LOCAL_HEAD" && -n "$_LLAMA_REMOTE_HEAD" ]]; then
+                local behind
+                behind="$(git -C "${LLAMA_DIR}" rev-list --count "${_LLAMA_LOCAL_HEAD}..${_LLAMA_REMOTE_HEAD}" 2>/dev/null || echo 0)"
+                [[ "$behind" -gt 0 ]] && _LLAMA_UPSTREAM_AHEAD=1
+            fi
+            return 0
+        fi
+    fi
+
+    # --timeout=15 prevents an indefinite hang on offline or slow machines.
+    git -C "${LLAMA_DIR}" fetch --quiet --timeout=15 origin HEAD 2>/dev/null || return 1
+    date +%s > "$fetch_marker"
 
     _LLAMA_REMOTE_HEAD="$(git -C "${LLAMA_DIR}" rev-parse FETCH_HEAD 2>/dev/null || true)"
-    if [[ -n "$_LLAMA_LOCAL_HEAD" && -n "$_LLAMA_REMOTE_HEAD" \
-          && "$_LLAMA_LOCAL_HEAD" != "$_LLAMA_REMOTE_HEAD" ]]; then
-        _LLAMA_UPSTREAM_AHEAD=1
+    if [[ -n "$_LLAMA_LOCAL_HEAD" && -n "$_LLAMA_REMOTE_HEAD" ]]; then
+        # Count commits upstream is ahead of local; only set the flag when
+        # upstream actually has commits we don't have (not when local is ahead).
+        local behind
+        behind="$(git -C "${LLAMA_DIR}" rev-list --count "${_LLAMA_LOCAL_HEAD}..${_LLAMA_REMOTE_HEAD}" 2>/dev/null || echo 0)"
+        [[ "$behind" -gt 0 ]] && _LLAMA_UPSTREAM_AHEAD=1
     fi
     return 0
 }
@@ -329,6 +368,9 @@ llama_serve_root() {
 }
 
 # Re-apply llm-serve patches after llama.cpp pull/rebuild. Idempotent.
+# If a patch fails to apply cleanly (upstream changed surrounding code),
+# falls back to `git apply --3way` which creates a merge commit with
+# conflict markers the user can resolve manually.
 llama_apply_local_patches() {
     local root patch_dir patch
     root="$(llama_serve_root)"
@@ -339,10 +381,20 @@ llama_apply_local_patches() {
         if git -C "$LLAMA_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
             continue
         fi
-        git -C "$LLAMA_DIR" apply "$patch" || {
-            echo "failed to apply $(basename "$patch") to llama.cpp" >&2
-            return 1
-        }
+        if git -C "$LLAMA_DIR" apply "$patch" 2>/dev/null; then
+            continue
+        fi
+        # Clean apply failed — try three-way merge as a fallback.
+        # This creates conflict markers the user must resolve manually.
+        if git -C "$LLAMA_DIR" apply --3way "$patch" 2>/dev/null; then
+            echo "warning: $(basename "$patch") applied with --3way (check for conflicts)" >&2
+            continue
+        fi
+        echo "failed to apply $(basename "$patch") to llama.cpp" >&2
+        echo "  The patch may target an older upstream commit. Try:" >&2
+        echo "    1. git -C ${LLAMA_DIR} apply --3way patches/llama.cpp/$(basename "$patch")" >&2
+        echo "    2. Manually apply the changes and rebuild" >&2
+        return 1
     done
 }
 
@@ -356,17 +408,28 @@ llama_build_server() {
 
     build_dir="$(llama_build_dir)"
     mkdir -p "$build_dir"
+
+    # Detect ninja — it's the recommended CMake generator for llama.cpp.
+    local generator=""
+    local build_cmd="make"
+    if command -v ninja &>/dev/null; then
+        generator="-GNinja"
+        build_cmd="ninja"
+    fi
+
     (
         cd "$build_dir"
         case "$build_type" in
             cuda)
                 llama_export_cuda_paths
-                cmake -DBUILD_SHARED_LIBS=OFF -DLLAMA_CUDA=ON ..
+                cmake ${generator} -DBUILD_SHARED_LIBS=OFF \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DLLAMA_CUDA=ON ..
                 ;;
             rocm)
                 llama_export_rocm_paths
                 # hipcc sets up HIP include/lib paths; raw clang misses hip/hip_fp16.h on Arch.
-                cmake -DBUILD_SHARED_LIBS=OFF \
+                cmake ${generator} -DBUILD_SHARED_LIBS=OFF \
                     -DGGML_HIP=ON \
                     -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_C_COMPILER=hipcc \
@@ -374,10 +437,11 @@ llama_build_server() {
                     ..
                 ;;
             *)
-                cmake -DBUILD_SHARED_LIBS=OFF ..
+                cmake ${generator} -DBUILD_SHARED_LIBS=OFF \
+                    -DCMAKE_BUILD_TYPE=Release ..
                 ;;
         esac
-        make -j"${nproc}" llama-server
+        ${build_cmd} -j"${nproc}" llama-server
     )
 
     [[ -x "${LLAMA_SERVER}" ]] || return 1

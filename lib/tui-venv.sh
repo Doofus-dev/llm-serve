@@ -53,7 +53,7 @@ tui_pip_install() {
     venv="$(tui_venv_dir "${root}")"
     [[ -x "${venv}/bin/pip" ]] || return 1
     "${venv}/bin/pip" install -q --upgrade pip
-    "${venv}/bin/pip" install -q -e "${root}"
+    "${venv}/bin/pip" install -q -e "${root}[test]"
 }
 
 # Create/repair the venv and install TUI deps if they are missing.

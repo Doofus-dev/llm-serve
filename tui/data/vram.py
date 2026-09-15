@@ -21,7 +21,7 @@ GPU_BANDWIDTH_EFFICIENCY = 0.55
 # CUDA graphs / compute buffers when we only have one measured context.
 DEFAULT_RUNTIME_OVERHEAD_MB = 640.0
 # Skip runs whose leftover after weights is just "file landed on the GPU".
-MIN_RESIDUAL_MIB = 384.0
+MIN_RESIDUAL_MB = 384.0
 MIN_RESIDUAL_FILE_RATIO = 0.08
 
 # Longest needles first so "7900 xtx" wins over "7900 xt".
@@ -107,9 +107,9 @@ def estimate_vram_mb(
     return (gpu_weights_mb + runtime_overhead_mb + kv_cache_mb) * 1.10
 
 
-def _file_mib(file_size: int) -> float:
-    """Bytes → MiB, matching nvidia-smi memory.used / memory.total."""
-    return file_size / (1024 * 1024)
+def _file_mb(file_size: int) -> float:
+    """Bytes → MB (10^6), consistent with estimate_vram_mb and GPU stats."""
+    return file_size / 1_000_000
 
 
 def _offload(run: RunBaseline) -> float:
@@ -167,9 +167,9 @@ def _residual_mib(run: RunBaseline) -> float | None:
     ratio = _offload(run)
     if ratio <= 0:
         return None
-    weights = _file_mib(run.file_size) * ratio
+    weights = _file_mb(run.file_size) * ratio
     residual = run.vram_used_mb - weights
-    if residual < MIN_RESIDUAL_MIB:
+    if residual < MIN_RESIDUAL_MB:
         return None
     if residual < weights * MIN_RESIDUAL_FILE_RATIO:
         return None
@@ -222,7 +222,7 @@ def apply_memory_fit(
     offload_ratio: float,
 ) -> float:
     ratio = max(0.0, min(1.0, offload_ratio))
-    weights = _file_mib(file_size) * ratio
+    weights = _file_mb(file_size) * ratio
     return weights + (fit.overhead_mb + fit.kv_per_token * context_tokens) * ratio
 
 
