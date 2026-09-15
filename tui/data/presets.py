@@ -11,6 +11,7 @@ from tui.data.preset_template import (
     DEFAULT_PRESET_NAME,
     default_preset_params,
 )
+from tui.data.fsutil import atomic_write
 
 MAX_PRESETS_PER_MODEL = 5
 
@@ -193,7 +194,7 @@ def save_presets(path: Path, store: PresetStore) -> None:
                     "name": preset.name,
                     "params": preset.params,
                 }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def get_active_slot(store: PresetStore, model: str, quant: str) -> int | None:

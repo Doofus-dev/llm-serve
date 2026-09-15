@@ -24,6 +24,7 @@ from tui.data.presets import (
     save_presets,
     seed_default_preset,
 )
+from tui.data.fsutil import atomic_write
 from tui.data.quant import (
     author_size_label,
     default_model_slug,
@@ -393,7 +394,7 @@ def save_registry(path: Path, reg: Registry) -> None:
             alias: target.to_json() for alias, target in reg.aliases.items()
         },
     }
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def find_model_by_repo(reg: Registry, repo_id: str) -> str | None:
@@ -889,7 +890,7 @@ def _migrate_presets_file(path: Path, remap: dict[str, tuple[str, str]]) -> None
 
     if new_active:
         new_data["_active"] = new_active
-    path.write_text(json.dumps(new_data, indent=2, ensure_ascii=False) + "\n")
+    atomic_write(path, json.dumps(new_data, indent=2, ensure_ascii=False) + "\n")
 
 
 def _remap_preset_quant_ids(
