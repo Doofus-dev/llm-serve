@@ -64,8 +64,8 @@ def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     line = Text(no_wrap=True)
     for i in range(bar_width):
         if text_start <= i < text_start + text_len:
-            # Text centered in bar: dark on filled, white on empty.
-            line.append(text[i - text_start], style="black" if i < filled else "white")
+            # Percentage digits as chars, bar color as foreground.
+            line.append(text[i - text_start], style=style if i < filled else "white")
         else:
             char = "▓" if i < filled else "░"
             line.append(char, style=style if i < filled else None)
