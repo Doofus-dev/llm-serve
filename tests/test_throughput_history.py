@@ -372,34 +372,37 @@ class ThroughputHistoryTests(unittest.TestCase):
         samples = [1.0, 5.0, 10.0, 20.0, 40.0]
         line = render_tps_sparkline(samples, width=5)
         rendered = render_text(line)
-        self.assertEqual(len(line.plain), 5)
+        self.assertEqual(len(line.plain), 5 + 1 + 5)
         self.assertIn("█", rendered)
         self.assertTrue(any(ch in rendered for ch in "▁▂▃▄▅▆▇"))
+        self.assertIn("─", rendered)
 
     def test_sparkline_is_always_fixed_width(self) -> None:
         short = render_tps_sparkline([10.0, 20.0], width=8)
         full = render_tps_sparkline([float(x) for x in range(20)], width=8)
         empty = render_tps_sparkline([], width=8)
-        self.assertEqual(len(short.plain), 8)
-        self.assertEqual(len(full.plain), 8)
-        self.assertEqual(len(empty.plain), 8)
+        self.assertEqual(len(short.plain), 8 + 1 + 8)
+        self.assertEqual(len(full.plain), 8 + 1 + 8)
+        self.assertEqual(len(empty.plain), 8 + 1 + 8)
 
     def test_sparkline_right_aligns_partial_history(self) -> None:
         line = render_tps_sparkline([5.0, 10.0], width=6)
         self.assertTrue(line.plain.startswith("    "))
-        self.assertFalse(line.plain.endswith(" "))
+        self.assertFalse(line.plain.split("\n")[0].rstrip().endswith(" "))
 
     def test_sparkline_scrolls_oldest_off_left(self) -> None:
         samples = [float(x) for x in range(1, 9)]
         line = render_tps_sparkline(samples, width=4)
-        # Last four samples are 5..8 — line should end with a block, not whitespace.
-        self.assertEqual(len(line.plain), 4)
-        self.assertNotEqual(line.plain[-1], " ")
+        sparkline_row = line.plain.split("\n")[0]
+        self.assertEqual(len(sparkline_row), 4)
+        self.assertNotEqual(sparkline_row[-1], " ")
 
-    def test_sparkline_empty_is_blank_fixed_width(self) -> None:
+    def test_sparkline_empty_renders_flat_line(self) -> None:
         line = render_tps_sparkline([], width=SPARKLINE_WIDTH)
-        self.assertEqual(len(line.plain), SPARKLINE_WIDTH)
-        self.assertEqual(line.plain.strip(), "")
+        sparkline_row = line.plain.split("\n")[0]
+        self.assertEqual(len(sparkline_row), SPARKLINE_WIDTH)
+        self.assertEqual(sparkline_row, "▁" * SPARKLINE_WIDTH)
+        self.assertIn("─", line.plain)
 
     def test_baseline_speed_uses_history_average_not_peak(self) -> None:
         samples = [40.0, 92.0, 70.0, 55.0, 80.0, 78.0, 76.0, 74.0]

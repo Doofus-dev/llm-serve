@@ -8,6 +8,7 @@ from rich import box
 from rich.console import Group
 from rich.table import Table
 from rich.text import Text
+from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widgets import Static
 
@@ -26,12 +27,39 @@ from tui.data.throughput_history import (
     render_tps_sparkline,
 )
 from tui.paths import METRICS_POLL_INTERVAL
+from tui.theme import ACCENT_STYLE, OK_STYLE, WARN_STYLE
 from tui.widgets.health import (
     fmt_uptime,
     generation_health,
+    health_dot,
     temperature_health,
     vram_health,
 )
+
+
+# --- VRAM bar gauge -------------------------------------------------------
+# The GPU column of the telemetry table is ~45 cells wide. The gauge row
+# must fit: bar + " NN% LABEL" without wrapping.
+VRAM_GAUGE_BAR_WIDTH = 30
+
+
+def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
+    """Render a horizontal bar gauge filled to the VRAM percentage.
+
+    The bar is colored by the health state; the percentage and label are
+    shown to the right of the bar. The GPU name is rendered above the
+    gauge by the caller.
+    """
+    pct = g.vram_pct
+    bar_width = VRAM_GAUGE_BAR_WIDTH
+    filled = int(round(pct / 100 * bar_width))
+    filled = max(0, min(bar_width, filled))
+
+    line = Text(no_wrap=True)
+    line.append("▓" * filled, style=style)
+    line.append("░" * (bar_width - filled))
+    line.append(f" {pct:.0f}% {label}", style=style)
+    return line
 
 
 class StatusPanel(Static):
@@ -50,27 +78,30 @@ class StatusPanel(Static):
     props: reactive[dict | None] = reactive(None)
     uptime: reactive[float] = reactive(0.0)
 
+    def compose(self) -> ComposeResult:
+        yield Static("STATUS", classes="card-title", id="status-title")
+
     def render(self) -> Group:
         info = self.pid_info
         if info and info.alive:
-            state = Text("● RUNNING", style="bold green")
-            state.append(f"  {self.model_display or info.model}", style="bold cyan")
+            state = Text("● RUNNING", style=OK_STYLE)
+            state.append(f"  {self.model_display or info.model}", style=ACCENT_STYLE)
             if self.quant_display:
-                state.append(f"  {self.quant_display}", style="bold yellow")
+                state.append(f"  {self.quant_display}", style=WARN_STYLE)
             if self.preset_display:
-                state.append(f"  {self.preset_display}", style="bold yellow")
+                state.append(f"  {self.preset_display}", style=WARN_STYLE)
             if info.remote:
-                state.append("  REMOTE", style="bold magenta")
+                state.append("  REMOTE", style=ACCENT_STYLE)
         else:
             state = Text("○ NOT RUNNING", style="bold red")
             state.append("  Press L to launch the selected model", style="dim")
 
         launch_flag = Text("NEXT LAUNCH ", style="dim")
         if self.next_remote:
-            launch_flag.append("[REMOTE]", style="bold magenta")
+            launch_flag.append("[REMOTE]", style=ACCENT_STYLE)
         else:
-            launch_flag.append("[LOCAL]", style="bold green")
-        launch_flag.append(f"  [LOG {log_verbosity_label(self.next_log_verbosity)}]", style="bold cyan")
+            launch_flag.append("[LOCAL]", style=OK_STYLE)
+        launch_flag.append(f"  [LOG {log_verbosity_label(self.next_log_verbosity)}]", style=ACCENT_STYLE)
 
         header = Table.grid(expand=True)
         header.add_column(ratio=1)
@@ -104,22 +135,19 @@ class StatusPanel(Static):
             elif live.stage == "generating":
                 gen_label, gen_style = generation_health(gen)
                 speed = Text()
-                speed.append(f"{gen:.1f} t/s", style=gen_style)
-                speed.append(" generation  ", style="dim")
-                speed.append(gen_label, style=gen_style)
+                speed.append(health_dot(gen_style))
+                speed.append(" ")
+                speed.append(f"{gen:.1f} t/s ", style=gen_style)
+                speed.append("generation", style="dim")
                 if gen > 0:
-                    speed.append(f"  {(1000.0 / gen):.1f} ms/token", style="dim")
+                    speed.append(f"  {gen_label}  {(1000.0 / gen):.1f} ms/token", style=gen_style)
                 throughput.append(speed)
             elif live.stage == "queued":
-                throughput.append(Text("waiting for a free slot", style="bold yellow"))
+                throughput.append(Text("waiting for a free slot", style=WARN_STYLE))
             else:
                 recap = format_last_request(live.last_request)
                 throughput.append(recap if recap is not None else Text("idle", style="dim"))
-            throughput.append(
-                render_tps_sparkline(history, width=SPARKLINE_WIDTH)
-                if history
-                else Text(" " * SPARKLINE_WIDTH, style="dim", no_wrap=True)
-            )
+            throughput.append(render_tps_sparkline(history, width=SPARKLINE_WIDTH))
             avg_line = format_avg_line(history, METRICS_POLL_INTERVAL)
             if avg_line is None:
                 avg_line = Text("avg —", style="dim")
@@ -127,27 +155,27 @@ class StatusPanel(Static):
                     avg_line.append("  (waiting on generate)", style="dim")
             throughput.append(avg_line)
         else:
-            throughput.append(
-                Text("Metrics unavailable", style="dim")
-            )
-
+            empty = Text(justify="center")
+            empty.append("○ ", style="dim")
+            empty.append("Metrics unavailable", style="dim")
+            empty.append("\n")
+            empty.append("Press L to launch the selected model", style="bold dim")
+            throughput.append(empty)
         gpu_lines: list[Text] = []
         g = self.gpu
         if g and g.available:
             gpu_lines.append(Text(g.name, style="bold"))
             vram_label, vram_style = vram_health(g.vram_pct)
-            memory = Text(f"{g.memory_label} ")
-            memory.append(
-                f"{g.vram_used_mb/1024:.1f} / {g.vram_total_mb/1024:.1f} GB  "
-                f"({g.vram_pct:.0f}%) {vram_label}",
-                style=vram_style,
-            )
+            memory = render_vram_gauge(g, vram_label, vram_style)
             gpu_lines.append(memory)
 
             thermals = Text(f"{g.utilization_pct:.0f}% utilization  •  ")
             if g.temp_c > 0:
                 temp_label, temp_style = temperature_health(g.temp_c)
-                thermals.append(f"{g.temp_c:.0f}°C {temp_label}", style=temp_style)
+                thermals.append(health_dot(temp_style))
+                thermals.append(" ")
+                thermals.append(f"{g.temp_c:.0f}°C ", style=temp_style)
+                thermals.append(temp_label, style=temp_style)
             else:
                 thermals.append("temperature unavailable", style="dim")
             gpu_lines.append(thermals)
@@ -160,7 +188,9 @@ class StatusPanel(Static):
                     )
                 )
         else:
-            gpu_lines.append(Text("GPU stats unavailable", style="dim"))
+            gpu_empty = Text(justify="center")
+            gpu_empty.append("○ GPU stats unavailable", style="dim")
+            gpu_lines.append(gpu_empty)
 
         telemetry = Table(
             box=box.SIMPLE_HEAD,

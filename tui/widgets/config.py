@@ -9,11 +9,13 @@ from rich.table import Table
 from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import Static
+from textual.app import ComposeResult
 
 from tui.data.context_length import resolve_context_length
 from tui.data.models_json import Registry
 from tui.data.presets import PresetStore, get_active_slot, get_preset, merge_identity_and_preset
 from tui.paths import PROFILE_KEYS
+from tui.theme import ACCENT, ACCENT_STYLE, WARN_STYLE
 from tui.widgets.health import fmt_ctx, model_author, model_file_exists
 
 
@@ -25,15 +27,18 @@ class ConfigPanel(Static):
     preset_store: PresetStore | None = None
     models_dir: Path | None = None
 
+    def compose(self) -> ComposeResult:
+        yield Static("ACTIVE PRESET", classes="card-title", id="config-title")
+
     @staticmethod
     def _label(label: str) -> Text:
-        return Text(label, style="cyan")
+        return Text(label, style=ACCENT)
 
     @staticmethod
     def _value(value: object) -> Text:
         if value == "":
             return Text("—", style="dim")
-        return Text(str(value), style="bold yellow")
+        return Text(str(value), style=WARN_STYLE)
 
     def render(self) -> Group:
         title = Text("ACTIVE PRESET", style="bold")
@@ -129,4 +134,9 @@ class ConfigPanel(Static):
             renderables.extend((Text("RUNTIME CONFIG", style="bold dim"), config))
             return Group(*renderables)
         else:
-            return Group(title, Text("Select a model in the tree", style="dim"))
+            empty = Text(justify="center")
+            empty.append("○ ", style="dim")
+            empty.append("No model selected", style="dim")
+            empty.append("\n")
+            empty.append("Pick a model in the tree on the left", style="bold dim")
+            return Group(title, empty)

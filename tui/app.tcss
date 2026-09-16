@@ -3,11 +3,69 @@
         background: $surface;
     }
 
+/* --- Card framing for the three right-panel zones --- */
+#status,
+#config,
+#logs {
+    border: round #3a4046;
+    padding: 0 1;
+    background: #1a1d21;
+}
+
+#status .card-title,
+#config .card-title,
+#logs .card-title {
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+    color: #8a929c;
+    text-style: bold;
+    border-bottom: solid #3a4046;
+    background: #1a1d21;
+}
+
+
 
 ActionBar {
     height: auto;
     min-height: 3;
     align: left middle;
+}
+
+/* --- Dialog polish: title separator, button row, backdrop --- */
+.dialog-title {
+    height: 1;
+    margin: 0;
+    padding: 0 1;
+    border-bottom: solid #3a4046;
+    color: #d0d4d8;
+    text-style: bold;
+}
+
+.dialog-separator {
+    height: 1;
+    margin: 0;
+    padding: 0;
+    color: #3a4046;
+}
+
+.dialog-actions {
+    height: 1;
+    width: 1fr;
+    margin: 1 0 0 0;
+    align: right middle;
+}
+
+#confirm-dialog,
+#create-dialog,
+#hub-login-dialog,
+#hub-download-dialog {
+    width: 60;
+    height: auto;
+    background: $surface;
+    border: round $primary;
+    padding: 1 2;
+    align: center middle;
 }
 
 Button,
@@ -138,7 +196,8 @@ Button.-style-flat:disabled {
         background: $surface;
     }
     #model-nav > .option-list--option-highlighted {
-        background: $primary-background;
+        background: $surface-darken-1;
+        border-left: solid $accent;
         color: $foreground;
         text-style: none;
     }
@@ -173,20 +232,51 @@ Button.-style-flat:disabled {
     #status {
         height: 13;
         min-height: 9;
-        border-bottom: solid $secondary;
+        border: round $border;
         padding: 0 1;
+        background: $panel;
+    }
+    #status .card-title {
+        height: 1;
+        margin: 0;
+        padding: 0 1;
+        color: $text-muted;
+        text-style: bold;
+        border-bottom: solid $border;
+        background: $panel;
     }
     #config {
         height: 1fr;
         padding: 0 1;
         overflow-y: auto;
+        border: round $border;
+        background: $panel;
+    }
+    #config .card-title {
+        height: 1;
+        margin: 0;
+        padding: 0 1;
+        color: $text-muted;
+        text-style: bold;
+        border-bottom: solid $border;
+        background: $panel;
     }
     #logs {
         height: 10;
         min-height: 6;
         width: 1fr;
-        border-top: solid $secondary;
+        border: round $border;
         padding: 0 1;
+        background: $panel;
+    }
+    #logs .card-title {
+        height: 1;
+        margin: 0;
+        padding: 0 1;
+        color: $text-muted;
+        text-style: bold;
+        border-bottom: solid $border;
+        background: $panel;
     }
     #editor-scroll { height: 1fr; padding: 0 1; }
     #editor-scroll > Label {
@@ -326,23 +416,6 @@ Button.-style-flat:disabled {
         height: auto;
     }
     
-    #confirm-dialog {
-        width: 60;
-        height: auto;
-        background: $surface;
-        border: round $error;
-        padding: 1 2;
-        align: center middle;
-    }
-    
-    #create-dialog {
-        width: 60;
-        height: auto;
-        background: $surface;
-        border: round $primary;
-        padding: 1 2;
-        align: center middle;
-    }
 
     Input { margin: 0; }
 

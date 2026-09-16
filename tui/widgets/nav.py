@@ -16,6 +16,7 @@ from tui.data.presets import (
     merge_identity_and_preset,
 )
 from tui.data.quant import quant_from_filename
+from tui.theme import ACCENT, ACCENT_STYLE, OK, OK_STYLE, WARN_STYLE
 from tui.widgets.health import fmt_ctx, fmt_model_runtime_line
 
 
@@ -28,6 +29,7 @@ class ModelNav(OptionList):
         self.preset_store = preset_store
         self.models_dir = models_dir
         self._option_data: dict[str, tuple] = {}
+        self.running_model: str | None = None
 
     def on_mount(self) -> None:
         self.refresh_cards()
@@ -58,22 +60,26 @@ class ModelNav(OptionList):
                 preset = get_preset(self.preset_store, name, active_q, slot)
                 if preset:
                     runtime_params = merge_identity_and_preset(model.params, preset)
-
+            is_running = name == self.running_model
             card = Text()
-            card.append(model.display, style="bold cyan")
+            card.append("● " if is_running else "○ ", style=OK if is_running else "dim")
+            card.append(model.display, style=ACCENT_STYLE)
             model_aliases = [
                 alias for alias, target in aliases.items() if target.model == name
             ]
             if model_aliases:
                 card.append(f"  {', '.join(model_aliases)}", style="dim")
+            card.append("  ", style="dim")
+            card.append(f"[{active_q}]", style=WARN_STYLE)
             card.append("\n")
             card.append(model_author_size_line(model), style="dim")
             card.append("\n")
-            card.append("Quant ", style="cyan")
-            card.append(active_q, style="bold yellow")
+            card.append("\n")
+            card.append("Quant ", style=ACCENT)
+            card.append(active_q, style=WARN_STYLE)
             if preset is not None and slot is not None:
                 card.append("  •  Preset ", style="dim")
-                card.append(f"[{slot}] {preset.name}", style="bold yellow")
+                card.append(f"[{slot}] {preset.name}", style=WARN_STYLE)
             card.append("\n")
             card.append(fmt_model_runtime_line(runtime_params, self.models_dir), style="dim")
             self._add(card, ("model", name), f"model-{model_index}")
@@ -81,7 +87,7 @@ class ModelNav(OptionList):
             for slot, preset in sorted(list_presets_for_quant(self.preset_store, name, active_q).items()):
                 active = get_active_slot(self.preset_store, name, active_q) == slot
                 preset_line = Text("  ")
-                preset_line.append("● " if active else "○ ", style="green" if active else "dim")
+                preset_line.append("● " if active else "○ ", style=OK if active else "dim")
                 preset_line.append(f"[{slot}] {preset.name}", style="bold" if active else "")
                 preset_line.append(
                     f"  ctx {fmt_ctx(preset.params.get('ctx', '?'))}",
@@ -140,7 +146,7 @@ class AliasNav(OptionList):
         self.clear_options()
         self._option_data.clear()
         for index, (alias, target) in enumerate(self.registry.aliases.items()):
-            line = Text(f"{alias}", style="bold yellow")
+            line = Text(f"{alias}", style=WARN_STYLE)
             target_model = self.registry.models.get(target.model)
             line.append(
                 f"  →  {target_model.display if target_model else target.model}",
@@ -149,9 +155,9 @@ class AliasNav(OptionList):
             if target.quant is not None and target.preset_slot is not None:
                 line.append(
                     f"  {target.preset_slot}",
-                    style="bold green",
+                    style=OK_STYLE,
                 )
-            line.append("  ←/→", style="bold cyan")
+            line.append("  ←/→", style=ACCENT_STYLE)
             option_id = f"alias-{index}"
             self._option_data[option_id] = ("alias", alias)
             self.add_option(Option(line, id=option_id))

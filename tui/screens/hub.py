@@ -43,6 +43,7 @@ from tui.data.hf import (
     list_gguf_repos,
     list_repo_ggufs,
 )
+from tui.theme import ERR, OK, WARN
 from tui.data.gguf import read_gguf_architecture
 from tui.data.models_json import (
     Registry,
@@ -75,7 +76,7 @@ class HFLoginDialog(ModalScreen[tuple[bool, str] | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-login-dialog"):
-            yield Label("[bold]Hugging Face Login[/bold]")
+            yield Label("[bold]Hugging Face Login[/bold]", classes="dialog-title")
             yield Label("Paste a token from huggingface.co/settings/tokens")
             yield Input(password=True, placeholder="hf_...", id="token")
             with ActionBar():
@@ -107,7 +108,7 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
     def compose(self) -> ComposeResult:
         options = [(name, name) for name in self.registry.models.keys()]
         with Vertical(id="hub-download-dialog"):
-            yield Label("[bold]Register Downloaded Model[/bold]")
+            yield Label("[bold]Register Downloaded Model[/bold]", classes="dialog-title")
             yield Label("Display name:")
             yield Input(value=self.default_name, placeholder="Qwen 3.8", id="name")
             yield Label("Clone server params from:")
@@ -406,7 +407,7 @@ class HubScreen(Screen):
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
                 "● on disk · — queue download on select · Act. after a local run · "
-                "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
+                f"[{OK}]●[/] fit · [{WARN}]⚠[/] tight · [{ERR}]●[/] too large[/]",
                 id="hub-help",
             )
 

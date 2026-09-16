@@ -19,6 +19,7 @@ from tui.data.vram import (
     fmt_tps,
     status_symbol,
 )
+from tui.theme import OK
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,7 @@ def fmt_downloaded(downloaded: bool) -> str:
 
 def fmt_downloaded_cell(downloaded: bool) -> str:
     mark = fmt_downloaded(downloaded)
-    return f"[green]{mark}[/]" if downloaded else mark
+    return f"[{OK}]{mark}[/]" if downloaded else mark
 
 
 def quant_file_row_cells(row: QuantFileRow) -> tuple:

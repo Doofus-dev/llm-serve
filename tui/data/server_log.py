@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from tui.data.log_collapse import classify_family
+from tui.theme import ACCENT, ACCENT_STYLE, ERR, ERR_STYLE, OK_STYLE, WARN, WARN_STYLE
 
 CacheMode = Literal["lcp", "lru"]
 EventKind = Literal[
@@ -992,26 +993,26 @@ class LogAggregator:
 
 
 _LABEL_STYLE = {
-    "started": "bold green",
-    "loading": "cyan",
-    "ready": "bold green",
-    "request": "bold cyan",
-    "warn": "bold yellow",
-    "error": "bold red",
+    "started": OK_STYLE,
+    "loading": ACCENT,
+    "ready": OK_STYLE,
+    "request": ACCENT_STYLE,
+    "warn": WARN_STYLE,
+    "error": ERR_STYLE,
     "hint": "dim",
     "info": "dim",
-    "cancel": "bold yellow",
+    "cancel": WARN_STYLE,
     "stopped": "dim",
-    "http": "cyan",
-    "idle": "cyan",
-    "prefill": "cyan",
-    "gen": "cyan",
-    "ckpt": "cyan",
+    "http": ACCENT,
+    "idle": ACCENT,
+    "prefill": ACCENT,
+    "gen": ACCENT,
+    "ckpt": ACCENT,
 }
 
 
 def _y(value: object) -> str:
-    return f"[bold yellow]{_esc(str(value))}[/]"
+    return f"[{WARN_STYLE}]{_esc(str(value))}[/]"
 
 
 def _render_body(event: LogEvent) -> str:
@@ -1098,9 +1099,9 @@ def _render_body(event: LogEvent) -> str:
             body += f"  [dim]×{event.count}[/]"
         return body
     if event.severity == "warn":
-        return f"[yellow]{_esc(event.message)}[/]"
+        return f"[{WARN}]{_esc(event.message)}[/]"
     if event.severity == "error":
-        return f"[bold red]{_esc(event.message)}[/]"
+        return f"[{ERR}]{_esc(event.message)}[/]"
     if event.label in {"hint", "info", "stopped"}:
         body = f"[dim]{_esc(event.message)}[/]"
         if event.count > 1:

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from textual.geometry import Size
 from textual.widgets import RichLog
+from textual.app import ComposeResult
+from textual.widgets import Static
 
 from tui.data.server_log import LogEvent, LogTailer, is_unformatted_event, render_event
 from tui.paths import MAX_LOG_EVENTS
@@ -28,6 +30,18 @@ class LogPanel(RichLog):
         self._show_info = False
         self._empty_shown = False
         self._last_strip_count = 0
+        self._line_count_label: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("LOGS", classes="card-title", id="logs-title")
+
+    def _render_line_count(self) -> None:
+        """Show a faint line counter when the log is scrolled."""
+        count = len(self.lines)
+        if self.scroll_offset > 0 and count > 0:
+            self._line_count_label = f"{count} lines"
+        else:
+            self._line_count_label = None
 
     def _should_follow(self) -> bool:
         if self.is_vertical_scrollbar_grabbed:
@@ -104,7 +118,7 @@ class LogPanel(RichLog):
     def _show_empty(self) -> None:
         self.clear()
         self._last_strip_count = 0
-        self.write("[dim]no events yet — press L to launch[/]", scroll_end=True)
+        self.write("[dim center]○ no events yet[/]\n[dim bold center]Press L to launch[/]", scroll_end=True)
         self._empty_shown = True
 
     def _write_event(self, event: LogEvent, *, follow: bool) -> int:
@@ -150,6 +164,7 @@ class LogPanel(RichLog):
             self.scroll_end(animate=False, immediate=True, x_axis=False)
         else:
             self.scroll_to(y=pinned_y, animate=False, immediate=True)
+        self._render_line_count()
 
     def toggle_info(self) -> bool:
         self._show_info = not self._show_info
