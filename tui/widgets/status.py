@@ -46,19 +46,30 @@ VRAM_GAUGE_BAR_WIDTH = 30
 def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     """Render a horizontal bar gauge filled to the VRAM percentage.
 
-    The bar is colored by the health state; the percentage and label are
-    shown to the right of the bar. The GPU name is rendered above the
-    gauge by the caller.
+    The bar is colored by the health state; the percentage is engraved
+    inside the bar near the right edge of the filled portion, with
+    reverse coloring so it stays readable against either region. The
+    health label is shown to the right of the bar. The GPU name is
+    rendered above the gauge by the caller.
     """
     pct = g.vram_pct
     bar_width = VRAM_GAUGE_BAR_WIDTH
     filled = int(round(pct / 100 * bar_width))
     filled = max(0, min(bar_width, filled))
 
+    pct_text = f"{pct:.0f}%"
+    text_len = len(pct_text)
+    text_start = filled - text_len
+
     line = Text(no_wrap=True)
-    line.append("▓" * filled, style=style)
-    line.append("░" * (bar_width - filled))
-    line.append(f" {pct:.0f}% {label}", style=style)
+    for i in range(bar_width):
+        char = "▓" if i < filled else "░"
+        if text_start <= i < text_start + text_len:
+            # Percentage text: dark on filled bar, health color on empty.
+            line.append(char, style="darkgrey" if i < filled else style)
+        else:
+            line.append(char, style=style if i < filled else None)
+    line.append(f" {label}", style=style)
     return line
 
 
