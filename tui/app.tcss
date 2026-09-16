@@ -278,6 +278,15 @@ Button.-style-flat:disabled {
         border-bottom: solid $border;
         background: $panel;
     }
+    #help-hint {
+        height: 1;
+        width: 1fr;
+        margin: 0;
+        padding: 0 2;
+        color: $text-muted;
+        text-style: none;
+        align: right middle;
+    }
     #editor-scroll { height: 1fr; padding: 0 1; }
     #editor-scroll > Label {
         height: 1;

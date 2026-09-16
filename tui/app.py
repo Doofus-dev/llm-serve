@@ -158,6 +158,7 @@ class LLMServeApp(App):
                     yield StatusPanel(id="status")
                     yield ConfigPanel(id="config")
             yield LogPanel(id="logs")
+            yield Label("F1 Help", id="help-hint")
         yield Footer()
 
     def _selection_kind(self) -> str | None:
