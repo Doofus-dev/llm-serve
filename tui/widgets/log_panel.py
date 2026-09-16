@@ -38,7 +38,7 @@ class LogPanel(RichLog):
     def _render_line_count(self) -> None:
         """Show a faint line counter when the log is scrolled."""
         count = len(self.lines)
-        if self.scroll_offset > 0 and count > 0:
+        if self.scroll_offset.y > 0 and count > 0:
             self._line_count_label = f"{count} lines"
         else:
             self._line_count_label = None
