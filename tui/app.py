@@ -76,6 +76,7 @@ from tui.screens.editors import (
     ProfileEditor,
 )
 from tui.screens.hub import HubScreen
+from tui.screens.help import HelpScreen
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
@@ -1206,7 +1207,7 @@ class LLMServeApp(App):
         )
 
     def action_help(self) -> None:
-        self.notify(HELP_TEXT, title="Help", timeout=15)
+        self.push_screen(HelpScreen())
 
     def notify(self, message: str, *, title: str = "", severity: str = "information",
                timeout: float | None = None, **kwargs):
