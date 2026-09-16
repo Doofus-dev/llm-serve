@@ -46,30 +46,29 @@ VRAM_GAUGE_BAR_WIDTH = 30
 def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     """Render a horizontal bar gauge filled to the VRAM percentage.
 
-    The bar is colored by the health state; the percentage is engraved
-    inside the bar near the right edge of the filled portion, with
-    reverse coloring so it stays readable against either region. The
-    health label is shown to the right of the bar. The GPU name is
-    rendered above the gauge by the caller.
+    The bar is colored by the health state. The percentage and health
+    label are centered in the middle of the bar, with reverse coloring
+    so they stay readable against either the filled or empty region.
+    The GPU name is rendered above the gauge by the caller.
     """
     pct = g.vram_pct
     bar_width = VRAM_GAUGE_BAR_WIDTH
     filled = int(round(pct / 100 * bar_width))
     filled = max(0, min(bar_width, filled))
 
-    pct_text = f"{pct:.0f}%"
-    text_len = len(pct_text)
-    text_start = filled - text_len
+    text = f"{pct:.0f}% {label}"
+    text_len = len(text)
+    text_start = (bar_width - text_len) // 2
+    text_start = max(0, min(bar_width - text_len, text_start))
 
     line = Text(no_wrap=True)
     for i in range(bar_width):
         if text_start <= i < text_start + text_len:
-            # Percentage text engraved into the bar: dark on filled, health color on empty.
-            line.append(pct_text[i - text_start], style="darkgrey" if i < filled else style)
+            # Text centered in bar: dark on filled region, health color on empty.
+            line.append(text[i - text_start], style="darkgrey" if i < filled else style)
         else:
             char = "▓" if i < filled else "░"
             line.append(char, style=style if i < filled else None)
-    line.append(f" {label}", style=style)
     return line
 
 
