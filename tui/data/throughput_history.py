@@ -11,6 +11,7 @@ from typing import Literal
 from rich.text import Text
 
 from tui.data.stats import Metrics
+from tui.theme import ACCENT, ACCENT_STYLE, OK, OK_STYLE, WARN, WARN_STYLE, ERR, ERR_STYLE
 
 # Unicode block steps for a btop-style single-line bar chart.
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
@@ -446,7 +447,7 @@ def format_avg_line(samples: list[float], poll_interval: float) -> Text | None:
     active = sum(1 for sample in samples if sample > 0)
     window_s = min(active, ROLLING_AVG_SAMPLES) * poll_interval
     line = Text()
-    line.append(f"avg {avg:.1f} tok/s", style="bold cyan")
+    line.append(f"avg {avg:.1f} tok/s", style=ACCENT_STYLE)
     line.append(f"  ({window_s:.0f}s rolling)", style="dim")
     return line
 
@@ -490,13 +491,13 @@ def _stage_lit(live: LiveThroughput, key: str) -> bool:
 
 def _stage_style(key: str) -> str:
     if key == "queued":
-        return "bold yellow"
+        return WARN_STYLE
     if key == "cache":
-        return "bold cyan"
+        return ACCENT_STYLE
     if key == "prefill":
-        return "bold magenta"
+        return ACCENT_STYLE
     if key == "generating":
-        return "bold green"
+        return OK_STYLE
     return "bold"
 
 
@@ -532,16 +533,18 @@ def render_prefill_progress(live: LiveThroughput, width: int = PREFILL_BAR_WIDTH
         filled = min(width, round(width * done / total))
 
     line = Text(no_wrap=True)
-    line.append(_PREFILL_BLOCKS[1] * filled, style="bold magenta")
+    line.append(_PREFILL_BLOCKS[1] * filled, style=ACCENT_STYLE)
     line.append(_PREFILL_BLOCKS[0] * (width - filled), style="dim")
     if total > 0:
-        line.append(f"  {done:,}/{total:,}", style="bold cyan")
+        pct = round(100 * done / total)
+        line.append(f"  {pct:>3d}%", style=ACCENT_STYLE)
+        line.append(f"  {done:,}/{total:,}", style="dim")
     elif done > 0:
-        line.append(f"  {done:,}", style="bold cyan")
+        line.append(f"  {done:,}", style=ACCENT_STYLE)
     if live.prompt_tps > 0:
         line.append(f"  {fmt_compact_tps(live.prompt_tps)}", style="dim")
     if live.n_prompt_cache > 0:
-        line.append(f"  cache {live.n_prompt_cache:,}", style="cyan")
+        line.append(f"  cache {live.n_prompt_cache:,}", style=ACCENT)
     return line
 
 
@@ -549,10 +552,10 @@ def _bar_style(tps: float) -> str:
     if tps <= 0:
         return "dim"
     if tps >= 20:
-        return "bold green"
+        return OK_STYLE
     if tps >= 5:
-        return "yellow"
-    return "red"
+        return WARN
+    return ERR
 
 
 def render_tps_sparkline(
@@ -563,13 +566,22 @@ def render_tps_sparkline(
 
     New samples appear on the right; once full, older samples scroll off the left
     (btop-style). Width is always exactly ``width`` characters so the line never
-    wraps or shifts the layout.
+    wraps or shifts the layout. A baseline axis renders below the bars.
+
+    When the visible history has 20 or more samples, the sparkline is rendered
+    as a filled area chart: the line row on top, a faint fill row below it, and
+    the baseline axis on the bottom. This makes the trend read better at a
+    glance than a single line.
     """
     if width <= 0:
         width = SPARKLINE_WIDTH
 
     if not samples:
-        return Text(" " * width, style="dim", no_wrap=True)
+        line = Text(no_wrap=True)
+        line.append("▁" * width, style="dim")
+        line.append("\n")
+        line.append("─" * width, style="dim")
+        return line
 
     view = samples[-width:]
     scale = max(max(view), 1.0)
@@ -584,4 +596,21 @@ def render_tps_sparkline(
             continue
         level = min(levels, round((tps / scale) * levels))
         line.append(_SPARK_BLOCKS[level], style=_bar_style(tps))
+
+    if len(view) >= 20:
+        # Filled area chart: faint fill below the line, baseline axis below.
+        line.append("\n")
+        for _ in range(width - len(view)):
+            line.append(" ", style="dim")
+        for tps in view:
+            if tps <= 0:
+                line.append(" ", style="dim")
+                continue
+            level = min(levels, round((tps / scale) * levels))
+            line.append("▒" * max(1, level), style="cyan")
+        line.append("\n")
+        line.append("─" * width, style="dim")
+    else:
+        line.append("\n")
+        line.append("─" * width, style="dim")
     return line

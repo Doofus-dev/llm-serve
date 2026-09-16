@@ -25,6 +25,7 @@ from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save
 from tui.data.quant_table import QuantFileRow, build_quant_file_rows, quant_file_row_cells
 from tui.data.vram import fmt_memory_mb
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
+from tui.theme import ERR, OK, WARN
 
 
 class QuantPickerScreen(ModalScreen[str | None]):
@@ -158,7 +159,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             yield Static(
                 "[dim]←→ context · [ ] offload · Enter select · "
                 "● on disk · — queue download on select · "
-                "[green]●[/] fit · [yellow]⚠[/] tight · [red]●[/] too large[/]",
+                f"[{OK}]●[/] fit · [{WARN}]⚠[/] tight · [{ERR}]●[/] too large[/]",
                 id="quant-picker-help",
             )
             with ActionBar(id="quant-picker-actions"):

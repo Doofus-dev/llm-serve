@@ -13,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches, QueryError
 from textual.events import Focus
 from textual.widgets import Footer, Header, Label
+from textual.theme import Theme
 
 from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selection_supports_action
 from tui.data.baselines import RunBaseline, record_baseline
@@ -86,8 +87,21 @@ from tui.widgets.status import StatusPanel
 class LLMServeApp(App):
     TITLE = "llm-serve"
     CSS_PATH = Path(__file__).with_name("app.tcss")
+    CSS = """\
+    Footer {
+        border-top: solid $border;
+    }
+    Footer FooterKey .footer-key--key {
+        color: $accent;
+    }
+    Footer FooterKey .footer-key--description {
+        color: $text-muted;
+    }
+    Footer FooterLabel {
+        color: $text-muted;
+    }
+    """
     BINDINGS = build_app_bindings()
-
     def __init__(self, paths: AppPaths | None = None):
         super().__init__()
         self.paths = paths or default_paths()
@@ -106,6 +120,28 @@ class LLMServeApp(App):
         self._focused_param: str | None = None
         self._gen_history = ThroughputHistory(max_samples=METRICS_HISTORY_SAMPLES)
         self._throughput_reader = ThroughputReader()
+        self._prev_running_key: str | None = None
+        self.register_theme(
+            Theme(
+                name="llm-serve",
+                primary="#4db3c4",
+                secondary="#3a4046",
+                accent="#4db3c4",
+                error="#d9534f",
+                success="#58c06d",
+                warning="#d8a63f",
+                foreground="#d0d4d8",
+                background="#101214",
+                surface="#101214",
+                panel="#1a1d21",
+                variables={
+                    "border": "#3a4046",
+                    "text-muted": "#8a929c",
+                },
+            )
+        )
+        self.theme = "llm-serve"
+
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -432,6 +468,11 @@ class LLMServeApp(App):
             if running_key in self.registry.models
             else None
         )
+        nav = self.query_one(ModelNav)
+        nav.running_model = running_key
+        if nav.running_model != (self._prev_running_key if hasattr(self, '_prev_running_key') else None):
+            nav.refresh_cards()
+        self._prev_running_key = running_key
         panel.quant_display = None
         panel.preset_display = None
         if alive and info:

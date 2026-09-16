@@ -199,11 +199,10 @@ class ConfirmDialog(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
-            yield Label(self.message)
+            yield Label(self.message, classes="dialog-title")
             with ActionBar():
                 yield Button("Yes", variant="error", id="yes")
                 yield Button("No", variant="primary", id="no")
-
     def action_cancel(self) -> None:
         self.dismiss(False)
 
@@ -472,7 +471,7 @@ class CreateAliasDialog(ModalScreen[tuple[str, str] | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-dialog"):
-            yield Label("[bold]Create New Alias[/bold]")
+            yield Label("[bold]Create New Alias[/bold]", classes="dialog-title")
             yield Label("")
             yield Label("Alias name:")
             yield Input(placeholder="fast", id="name")
@@ -515,7 +514,7 @@ class EditAliasDialog(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="create-dialog"):
-            yield Label(f"[bold]Rename Alias: {self.alias_name}[/bold]")
+            yield Label(f"[bold]Rename Alias: {self.alias_name}[/bold]", classes="dialog-title")
             yield Label("")
             yield Label("Alias name:")
             yield Input(value=self.alias_name, placeholder="fast", id="name")

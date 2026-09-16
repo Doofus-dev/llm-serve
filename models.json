@@ -1,17 +1,8 @@
 {
   "models": {
     "qwen38-27b-bartowski": {
+      "host": "127.0.0.1",
       "active_quant": "IQ2_XS",
-      "context_length": 262144,
-      "source": {
-        "hub": "huggingface",
-        "repo": "bartowski/Qwen3.8-27B-GGUF",
-        "filename": "Qwen3.8-27B-IQ2_XS.gguf",
-        "author": "bartowski",
-        "revision": "main"
-      },
-      "display": "Qwen 3.8",
-      "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
       "quants": {
         "IQ2_XXS": {
           "filename": "Qwen3.8-27B-IQ2_XXS.gguf",
@@ -130,23 +121,23 @@
           "file": "bartowski/Qwen3.8-27B-Q8_0.gguf"
         }
       },
-      "host": "127.0.0.1",
-      "port": 8081,
-      "file": "bartowski/Qwen3.8-27B-IQ2_XS.gguf",
-      "total_layers": 65
-    },
-    "qwen36-27b-bartowski": {
-      "active_quant": "Q2_K",
-      "context_length": 262144,
       "source": {
         "hub": "huggingface",
-        "repo": "bartowski/Qwen_Qwen3.6-27B-GGUF",
-        "filename": "Qwen_Qwen3.6-27B-Q2_K.gguf",
+        "repo": "bartowski/Qwen3.8-27B-GGUF",
+        "filename": "Qwen3.8-27B-IQ2_XS.gguf",
         "author": "bartowski",
         "revision": "main"
       },
-      "display": "Qwen 3.6",
+      "display": "Qwen 3.8",
       "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
+      "context_length": 262144,
+      "port": 8081,
+      "total_layers": 65,
+      "file": "bartowski/Qwen3.8-27B-IQ2_XS.gguf"
+    },
+    "qwen36-27b-bartowski": {
+      "host": "127.0.0.1",
+      "active_quant": "Q2_K",
       "quants": {
         "Q3_K_M": {
           "filename": "Qwen_Qwen3.6-27B-Q3_K_M.gguf",
@@ -265,10 +256,19 @@
           "file": "bartowski/Qwen_Qwen3.6-27B-Q6_K_L.gguf"
         }
       },
-      "host": "127.0.0.1",
+      "source": {
+        "hub": "huggingface",
+        "repo": "bartowski/Qwen_Qwen3.6-27B-GGUF",
+        "filename": "Qwen_Qwen3.6-27B-Q2_K.gguf",
+        "author": "bartowski",
+        "revision": "main"
+      },
+      "display": "Qwen 3.6",
+      "notes": "Qwen 3.8 27B — bartowski GGUF quant collection",
+      "context_length": 262144,
       "port": 8081,
-      "file": "bartowski/Qwen_Qwen3.6-27B-Q2_K.gguf",
-      "total_layers": 65
+      "total_layers": 65,
+      "file": "bartowski/Qwen_Qwen3.6-27B-Q2_K.gguf"
     }
   },
   "aliases": {
@@ -278,7 +278,7 @@
     "coding": {
       "model": "qwen36-27b-bartowski",
       "quant": "Q2_K",
-      "preset": 2
+      "preset_slot": 2
     }
   }
 }

@@ -133,7 +133,7 @@ class DashboardTests(unittest.TestCase):
 
         rendered = render_text(panel.render())
 
-        self.assertIn("(94%) CRITICAL", rendered)
+        self.assertIn("94% CRITICAL", rendered)
         self.assertIn("87°C HOT", rendered)
 
     def test_status_panel_renders_throughput_graph(self) -> None:
