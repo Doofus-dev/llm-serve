@@ -137,6 +137,37 @@ def effective_gpu_memory(
 
 
 
+def parse_pidof(text: str) -> list[int]:
+    """Parse `pidof` stdout into PIDs."""
+    pids: list[int] = []
+    for token in text.split():
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def kfd_client_pids(root: Path | None = None) -> list[int]:
+    """Return KFD compute client PIDs from sysfs."""
+    proc_root = Path("/sys/class/kfd/kfd/proc") if root is None else root
+    pids: list[int] = []
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return pids
+    for entry in entries:
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
 def parse_nvidia_compute_apps(text: str) -> list[ProcessMem]:
     """Parse `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory`."""
     processes: list[ProcessMem] = []
@@ -260,6 +291,23 @@ def _query_nvidia_compute_apps() -> list[ProcessMem]:
     return parse_nvidia_compute_apps(result.stdout)
 
 
+def _query_llama_server_pids() -> list[int]:
+    try:
+        result = subprocess.run(
+            ["pidof", "llama-server"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    return parse_pidof(result.stdout)
+
+
+def _amd_client_pids() -> set[int]:
+    return set(kfd_client_pids()) | set(_query_llama_server_pids())
+
+
 def collect_process_stats(tracked_pids: Sequence[int] = ()) -> list[ProcessMem]:
     """VRAM + RSS for tracked llama-server PIDs and other cheap GPU consumers."""
     tracked: set[int] = set()
@@ -272,7 +320,7 @@ def collect_process_stats(tracked_pids: Sequence[int] = ()) -> list[ProcessMem]:
     for proc in _query_nvidia_compute_apps():
         by_pid[proc.pid] = proc
 
-    for pid in tracked:
+    for pid in tracked | _amd_client_pids():
         if pid not in by_pid:
             by_pid[pid] = ProcessMem(pid=pid, name=_comm(pid), vram_mb=_drm_vram_mb(pid))
         elif by_pid[pid].vram_mb <= 0:
