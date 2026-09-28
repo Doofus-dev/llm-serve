@@ -530,7 +530,10 @@ class LLMServeApp(App):
             panel = self.query_one(StatusPanel)
         except (QueryError, NoMatches):
             return
-        panel.gpu = query_gpu()
+        tracked = []
+        if panel.pid_info and panel.pid_info.alive:
+            tracked.append(panel.pid_info.pid)
+        panel.gpu = query_gpu(tracked)
         self._record_baseline(panel)
 
     def _poll_log(self) -> None:

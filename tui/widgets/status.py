@@ -12,7 +12,7 @@ from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widgets import Static
 
-from tui.data.gpu import GPUStats
+from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo
 from tui.data.settings import log_verbosity_label
 from tui.data.stats import Metrics
@@ -38,9 +38,45 @@ from tui.widgets.health import (
 
 
 # --- VRAM bar gauge -------------------------------------------------------
-# The GPU column of the telemetry table is ~45 cells wide. The gauge row
-# must fit: bar + " NN% LABEL" without wrapping.
-VRAM_GAUGE_BAR_WIDTH = 30
+# GPU column is ~45 cells. Gauge + process rows must stay on one line.
+VRAM_GAUGE_BAR_WIDTH = 24
+PROCESS_NAME_WIDTH = 14
+
+
+def fmt_mem_mb(mb: float) -> str:
+    if mb <= 0:
+        return "—"
+    if mb >= 1024:
+        return f"{mb / 1024:.1f}G"
+    return f"{mb:.0f}M"
+
+
+def render_process_rows(processes: list[ProcessMem]) -> Table:
+    table = Table(
+        box=None,
+        expand=True,
+        padding=(0, 1),
+        show_edge=False,
+        show_header=True,
+        pad_edge=False,
+        collapse_padding=True,
+    )
+    table.add_column("PROC", ratio=2, no_wrap=True, overflow="ellipsis")
+    table.add_column("PID", justify="right", no_wrap=True, width=6)
+    table.add_column("VRAM", justify="right", no_wrap=True, width=6)
+    table.add_column("RAM", justify="right", no_wrap=True, width=6)
+    for proc in processes:
+        mark = "*" if proc.tracked else " "
+        name = proc.name or str(proc.pid)
+        if len(name) > PROCESS_NAME_WIDTH:
+            name = name[: PROCESS_NAME_WIDTH - 1] + "…"
+        table.add_row(
+            Text(f"{mark}{name}", style=ACCENT_STYLE if proc.tracked else None),
+            str(proc.pid),
+            fmt_mem_mb(proc.vram_mb),
+            fmt_mem_mb(proc.ram_mb),
+        )
+    return table
 
 
 def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
@@ -170,15 +206,19 @@ class StatusPanel(Static):
             empty.append("\n")
             empty.append("Press L to launch the selected model", style="bold dim")
             throughput.append(empty)
-        gpu_lines: list[Text] = []
+        gpu_lines: list = []
         g = self.gpu
         if g and g.available:
-            gpu_lines.append(Text(g.name, style="bold"))
+            title = Text(g.name, style="bold")
+            title.append(
+                f"  {fmt_mem_mb(g.vram_used_mb)} / {fmt_mem_mb(g.vram_total_mb)} total",
+                style="dim",
+            )
+            gpu_lines.append(title)
             vram_label, vram_style = vram_health(g.vram_pct)
-            memory = render_vram_gauge(g, vram_label, vram_style)
-            gpu_lines.append(memory)
+            gpu_lines.append(render_vram_gauge(g, vram_label, vram_style))
 
-            thermals = Text(f"{g.utilization_pct:.0f}% utilization  •  ")
+            thermals = Text(f"{g.utilization_pct:.0f}% util  •  ", no_wrap=True)
             if g.temp_c > 0:
                 temp_label, temp_style = temperature_health(g.temp_c)
                 thermals.append(health_dot(temp_style))
@@ -186,16 +226,20 @@ class StatusPanel(Static):
                 thermals.append(f"{g.temp_c:.0f}°C ", style=temp_style)
                 thermals.append(temp_label, style=temp_style)
             else:
-                thermals.append("temperature unavailable", style="dim")
+                thermals.append("temp n/a", style="dim")
             gpu_lines.append(thermals)
             if g.unified and g.dedicated_total_mb:
                 gpu_lines.append(
                     Text(
-                        f"VRAM BAR {g.dedicated_used_mb/1024:.1f} / "
-                        f"{g.dedicated_total_mb/1024:.1f} GB",
+                        f"BAR {fmt_mem_mb(g.dedicated_used_mb)} / {fmt_mem_mb(g.dedicated_total_mb)}",
                         style="dim",
+                        no_wrap=True,
                     )
                 )
+            if g.processes:
+                gpu_lines.append(render_process_rows(g.processes))
+            else:
+                gpu_lines.append(Text("no GPU processes", style="dim"))
         else:
             gpu_empty = Text(justify="center")
             gpu_empty.append("○ GPU stats unavailable", style="dim")
