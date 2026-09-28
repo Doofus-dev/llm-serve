@@ -176,6 +176,40 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("VRAM", collapsed)
         self.assertIn("RAM", collapsed)
 
+    def test_status_panel_shows_full_seven_digit_pids(self) -> None:
+        panel = StatusPanel()
+        panel.gpu = GPUStats(
+            name="Test GPU",
+            vram_used_mb=12_288,
+            vram_total_mb=16_384,
+            utilization_pct=40,
+            temp_c=55,
+            available=True,
+            processes=[
+                ProcessMem(
+                    pid=1120647,
+                    name="llama-server",
+                    vram_mb=13902,
+                    ram_mb=1251,
+                    tracked=True,
+                ),
+                ProcessMem(
+                    pid=4155563,
+                    name="llama-server",
+                    vram_mb=0,
+                    ram_mb=2.5,
+                    tracked=False,
+                ),
+            ],
+        )
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("1120647", rendered)
+        self.assertIn("4155563", rendered)
+        self.assertNotIn("11206…", rendered)
+        self.assertNotIn("41555…", rendered)
+
     def test_status_panel_shows_next_launch_remote_toggle(self) -> None:
         panel = StatusPanel()
         self.assertIn("NEXT LAUNCH [LOCAL]  [LOG TRACE]", render_text(panel.render()))

@@ -62,7 +62,7 @@ def render_process_rows(processes: list[ProcessMem]) -> Table:
         collapse_padding=True,
     )
     table.add_column("PROC", ratio=2, no_wrap=True, overflow="ellipsis")
-    table.add_column("PID", justify="right", no_wrap=True, width=6)
+    table.add_column("PID", justify="right", no_wrap=True, width=8)
     table.add_column("VRAM", justify="right", no_wrap=True, width=6)
     table.add_column("RAM", justify="right", no_wrap=True, width=6)
     for proc in processes:
