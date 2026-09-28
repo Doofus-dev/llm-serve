@@ -1,19 +1,7 @@
 
     Screen {
         background: $surface;
-        /* JetBrains Mono — app typeface; inherited by every widget. */
     }
-
-StatusHeader {
-    dock: top;
-    width: 100%;
-    height: 1;
-    background: $panel;
-    color: $foreground;
-    text-style: bold;
-    padding: 0 1;
-    content-align: left middle;
-}
 
 /* --- Card framing for the three right-panel zones --- */
 #status,

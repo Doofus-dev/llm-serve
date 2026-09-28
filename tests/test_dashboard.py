@@ -12,7 +12,7 @@ from tui.widgets.config import ConfigPanel
 from tui.widgets.health import generation_health, temperature_health, vram_health
 from tui.widgets.status import StatusHeader, StatusPanel
 from tui.data.gpu import GPUStats, ProcessMem
-from tui.data.pidfile import PidInfo
+from tui.data.pidfile import PidInfo, write_pid_file
 from tui.data.stats import Metrics
 from tui.data.throughput_history import LastRequest, LiveThroughput
 
@@ -275,7 +275,36 @@ class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(list(app.query(Header))), 0)
                 header = app.query_one(StatusHeader)
                 self.assertIn("not running", render_text(header.render()))
-                self.assertEqual(app.get_theme_variable_defaults()["font-family"], "JetBrains Mono")
+        finally:
+            harness.cleanup()
+
+    async def test_header_stays_live_in_editor_mode(self) -> None:
+        from tests.support import MODEL_SLUG, QUANT, Harness
+
+        harness = Harness()
+        try:
+            app = harness.app()
+            async with app.run_test(size=(120, 40)):
+                write_pid_file(
+                    harness.paths.pid_file,
+                    pid=os.getpid(),
+                    model=MODEL_SLUG,
+                    port=8080,
+                    quant=QUANT,
+                    preset_slot=1,
+                    remote=False,
+                )
+                app._editor_mode = True
+                app._refresh_pid()
+                header = app.query_one(StatusHeader)
+                self.assertIn(
+                    f"port 8080  •  PID {os.getpid()}",
+                    render_text(header.render()),
+                )
+
+                harness.paths.pid_file.unlink()
+                app._refresh_pid()
+                self.assertIn("not running", render_text(header.render()))
         finally:
             harness.cleanup()
 

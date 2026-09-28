@@ -26,9 +26,6 @@ ERR = "red"             # red health state
 TEXT = "white"          # primary text tier
 TEXT_MUTED = "grey"     # secondary text tier
 TEXT_DIM = "darkgrey"   # faint text tier
-# App-wide typeface. Textual 8.x has no font-family CSS property; the token
-# is registered on the theme so every widget inherits the same intent.
-APP_FONT = "JetBrains Mono"
 
 # --- Rich markup styles (what widget code uses) --------------------------
 # Named colors match the Rich color names used in existing tests.
@@ -55,7 +52,6 @@ PALETTE_CSS = """\
     $text: #d0d4d8;
     $text-muted: #8a929c;
     $text-dim: #5c646c;
-    $font-family: JetBrains Mono;
 }
 """
 

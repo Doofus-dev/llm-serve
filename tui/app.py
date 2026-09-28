@@ -82,7 +82,6 @@ from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
 from tui.widgets.log_panel import LogPanel
 from tui.widgets.nav import AliasNav, ModelNav
-from tui.theme import APP_FONT
 from tui.widgets.status import StatusHeader, StatusPanel
 
 
@@ -90,9 +89,6 @@ class LLMServeApp(App):
     TITLE = "llm-serve"
     CSS_PATH = Path(__file__).with_name("app.tcss")
     CSS = """\
-    Screen {
-        /* JetBrains Mono — app typeface; inherited by every widget. */
-    }
     Footer {
         border-top: solid $border;
     }
@@ -142,14 +138,10 @@ class LLMServeApp(App):
                 variables={
                     "border": "#3a4046",
                     "text-muted": "#8a929c",
-                    "font-family": APP_FONT,
                 },
             )
         )
         self.theme = "llm-serve"
-
-    def get_theme_variable_defaults(self) -> dict[str, str]:
-        return {"font-family": APP_FONT}
 
     def compose(self) -> ComposeResult:
         yield StatusHeader(id="status-header")
@@ -436,87 +428,86 @@ class LLMServeApp(App):
 
     def _refresh_pid(self) -> None:
         info = read_pid_file(self.paths.pid_file)
-        if self._editor_mode:
-            return
-        try:
-            panel = self.query_one(StatusPanel)
-        except (QueryError, NoMatches):
-            return
+        alive = info.alive if info else False
+        if not self._editor_mode:
+            try:
+                panel = self.query_one(StatusPanel)
+            except (QueryError, NoMatches):
+                panel = None
+            if panel is not None:
+                was_alive = panel.pid_info.alive if panel.pid_info else False
+                prev = panel.pid_info
+                switched = bool(
+                    alive
+                    and info
+                    and prev
+                    and (info.pid != prev.pid or info.model != prev.model)
+                )
+                if not alive or switched:
+                    self._gen_history.clear()
+                    self._throughput_reader.clear()
+                    panel.gen_tps_history = []
+                    panel.live_throughput = None
+                    panel.metrics = None
+                    panel.props = None
+                panel.pid_info = info if alive else None
+                running_key = None
+                if alive and info:
+                    running_alias = self.registry.aliases.get(info.model)
+                    running_key = running_alias.model if running_alias else info.model
+                    if running_key not in self.registry.models:
+                        running_key = next(
+                            (
+                                key
+                                for key, model in self.registry.models.items()
+                                if model.display == info.model
+                            ),
+                            None,
+                        )
+                panel.model_display = (
+                    self.registry.models[running_key].display
+                    if running_key in self.registry.models
+                    else None
+                )
+                nav = self.query_one(ModelNav)
+                nav.running_model = running_key
+                if nav.running_model != (self._prev_running_key if hasattr(self, '_prev_running_key') else None):
+                    nav.refresh_cards()
+                self._prev_running_key = running_key
+                panel.quant_display = None
+                panel.preset_display = None
+                if alive and info:
+                    quant = info.quant
+                    slot = info.preset_slot
+                    if running_key in self.registry.models:
+                        quant = quant or self._model_active_quant(running_key)
+                        if slot is None:
+                            slot = get_active_slot(self.preset_store, running_key, quant)
+                    panel.quant_display = quant or None
+                    if slot is not None:
+                        panel.preset_display = f"[{slot}]"
+                if alive and not was_alive:
+                    self._launch_time = time.time()
+                if alive and info:
+                    if self.client is None or self.client.base != f"http://127.0.0.1:{info.port}":
+                        if self.client:
+                            old = self.client
+
+                            async def _safe_close() -> None:
+                                try:
+                                    await old.close()
+                                except Exception:
+                                    pass
+
+                            asyncio.ensure_future(_safe_close())
+                        self.client = ServerClient("127.0.0.1", info.port)
+                panel.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
         try:
             header = self.query_one(StatusHeader)
         except (QueryError, NoMatches):
-            header = None
-        was_alive = panel.pid_info.alive if panel.pid_info else False
-        alive = info.alive if info else False
-        prev = panel.pid_info
-        switched = bool(
-            alive
-            and info
-            and prev
-            and (info.pid != prev.pid or info.model != prev.model)
-        )
-        if not alive or switched:
-            self._gen_history.clear()
-            self._throughput_reader.clear()
-            panel.gen_tps_history = []
-            panel.live_throughput = None
-            panel.metrics = None
-            panel.props = None
-        panel.pid_info = info if alive else None
-        running_key = None
-        if alive and info:
-            running_alias = self.registry.aliases.get(info.model)
-            running_key = running_alias.model if running_alias else info.model
-            if running_key not in self.registry.models:
-                running_key = next(
-                    (
-                        key
-                        for key, model in self.registry.models.items()
-                        if model.display == info.model
-                    ),
-                    None,
-                )
-        panel.model_display = (
-            self.registry.models[running_key].display
-            if running_key in self.registry.models
-            else None
-        )
-        nav = self.query_one(ModelNav)
-        nav.running_model = running_key
-        if nav.running_model != (self._prev_running_key if hasattr(self, '_prev_running_key') else None):
-            nav.refresh_cards()
-        self._prev_running_key = running_key
-        panel.quant_display = None
-        panel.preset_display = None
-        if alive and info:
-            quant = info.quant
-            slot = info.preset_slot
-            if running_key in self.registry.models:
-                quant = quant or self._model_active_quant(running_key)
-                if slot is None:
-                    slot = get_active_slot(self.preset_store, running_key, quant)
-            panel.quant_display = quant or None
-            if slot is not None:
-                panel.preset_display = f"[{slot}]"
-        if alive and not was_alive:
-            self._launch_time = time.time()
-        if alive and info:
-            if self.client is None or self.client.base != f"http://127.0.0.1:{info.port}":
-                if self.client:
-                    old = self.client
-
-                    async def _safe_close() -> None:
-                        try:
-                            await old.close()
-                        except Exception:
-                            pass
-
-                    asyncio.ensure_future(_safe_close())
-                self.client = ServerClient("127.0.0.1", info.port)
-        panel.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
-        if header is not None:
-            header.pid_info = panel.pid_info
-            header.uptime = panel.uptime
+            return
+        header.pid_info = info if alive else None
+        header.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
 
     async def _poll_metrics(self) -> None:
         self._refresh_pid()
