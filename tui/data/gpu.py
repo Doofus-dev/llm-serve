@@ -136,7 +136,6 @@ def effective_gpu_memory(
     return vram_used_mb, vram_total_mb, False
 
 
-
 def parse_pidof(text: str) -> list[int]:
     """Parse `pidof` stdout into PIDs."""
     pids: list[int] = []
@@ -199,7 +198,7 @@ def parse_nvidia_compute_apps(text: str) -> list[ProcessMem]:
 
 
 def parse_drm_fdinfo(text: str) -> float:
-    """Return VRAM MiB from a DRM fdinfo blob, or 0 if absent."""
+    """Return GPU memory MiB from a DRM fdinfo blob (VRAM, else GTT), or 0."""
     vram_kib = 0.0
     gtt_kib = 0.0
     for raw in text.splitlines():
@@ -309,7 +308,11 @@ def _amd_client_pids() -> set[int]:
 
 
 def collect_process_stats(tracked_pids: Sequence[int] = ()) -> list[ProcessMem]:
-    """VRAM + RSS for tracked llama-server PIDs and other cheap GPU consumers."""
+    """VRAM + RSS for tracked PIDs and other cheap GPU clients.
+
+    NVIDIA: ``nvidia-smi --query-compute-apps``. AMD: KFD sysfs clients
+    plus ``pidof llama-server`` (no full ``/proc`` walk).
+    """
     tracked: set[int] = set()
     for pid in tracked_pids:
         if pid and pid > 0:

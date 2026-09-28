@@ -126,9 +126,11 @@ class HelpScreen(ModalScreen[None]):
                 yield Label("Panels", classes="help-section")
                 yield Static(
                     "Status bar (top right)\n"
-                    "  Server state, model name, VRAM gauge with percentage\n"
-                    "  and health label. Green = healthy, yellow = warning,\n"
-                    "  red = critical.",
+                    "  Server state, model name, device memory total and gauge\n"
+                    "  with health label, then a per-process table (name, PID,\n"
+                    "  VRAM, RAM). * marks the tracked llama-server; leftover\n"
+                    "  or extra GPU clients appear when present. Green =\n"
+                    "  healthy, yellow = warning, red = critical.",
                     classes="help-row",
                 )
                 yield Static(
@@ -167,8 +169,7 @@ class HelpScreen(ModalScreen[None]):
                     classes="help-tip",
                 )
                 yield Static(
-                    "• Press L to launch, S to stop. The status bar shows\n"
-                    "  live VRAM usage and throughput as tokens stream.",
+                    "• Press L to launch, S to stop.",
                     classes="help-tip",
                 )
                 yield Static(
