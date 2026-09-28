@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from rich import box
 from rich.console import Group
 from rich.table import Table
@@ -27,7 +25,7 @@ from tui.data.throughput_history import (
     render_tps_sparkline,
 )
 from tui.paths import METRICS_POLL_INTERVAL
-from tui.theme import ACCENT_STYLE, OK_STYLE, WARN_STYLE
+from tui.theme import ACCENT, ACCENT_STYLE, DIM_STYLE, OK_STYLE, TEXT_MUTED, WARN_STYLE
 from tui.widgets.health import (
     fmt_uptime,
     generation_health,
@@ -107,6 +105,39 @@ def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     return line
 
 
+def fmt_server_status_line(info: PidInfo | None, uptime: float) -> str:
+    """Live `port • PID • up` line shown in the top header."""
+    if info and info.alive:
+        return f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(uptime)}"
+    return "not running"
+
+
+class StatusHeader(Static):
+    """Top bar: live server port, PID, and uptime (or a not-running placeholder)."""
+
+    DEFAULT_CSS = """
+    StatusHeader {
+        dock: top;
+        width: 100%;
+        height: 1;
+        background: $panel;
+        color: $foreground;
+        text-style: bold;
+        padding: 0 1;
+        content-align: left middle;
+    }
+    """
+
+    pid_info: reactive[PidInfo | None] = reactive(None)
+    uptime: reactive[float] = reactive(0.0)
+
+    def render(self) -> Text:
+        info = self.pid_info
+        if info and info.alive:
+            return Text(fmt_server_status_line(info, self.uptime), style=ACCENT)
+        return Text("not running", style=TEXT_MUTED)
+
+
 class StatusPanel(Static):
     """Live status + throughput + GPU."""
 
@@ -155,18 +186,16 @@ class StatusPanel(Static):
 
         renderables: list = [header]
         if info and info.alive:
-            renderables.append(
-                Text(
-                    f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(self.uptime)}",
-                    style="dim",
-                )
-            )
-        if self.props:
-            alias = self.props.get("model_alias", "?")
-            mp = self.props.get("model_path", "?")
-            renderables.append(
-                Text(f"alias {alias}  •  {Path(str(mp)).name}", style="dim")
-            )
+            family = self.model_display or info.model
+            slot_text = None
+            if self.preset_display:
+                slot = str(self.preset_display).strip("[]")
+                if slot:
+                    slot_text = f"slot {slot}"
+            if slot_text:
+                renderables.append(Text(f"{family}  •  {slot_text}", style=DIM_STYLE))
+            else:
+                renderables.append(Text(family, style=DIM_STYLE))
 
         throughput: list[Text] = []
         m = self.metrics

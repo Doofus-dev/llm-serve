@@ -10,9 +10,9 @@ from rich.console import Console
 
 from tui.widgets.config import ConfigPanel
 from tui.widgets.health import generation_health, temperature_health, vram_health
-from tui.widgets.status import StatusPanel
+from tui.widgets.status import StatusHeader, StatusPanel
 from tui.data.gpu import GPUStats, ProcessMem
-from tui.data.pidfile import PidInfo
+from tui.data.pidfile import PidInfo, write_pid_file
 from tui.data.stats import Metrics
 from tui.data.throughput_history import LastRequest, LiveThroughput
 
@@ -108,6 +108,46 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("RUNNING  Qwen 3.6  Q8_0  [1]  REMOTE", rendered)
         self.assertNotIn("qwen36-27b-bartowski", rendered)
+
+    def test_status_panel_hot_bar_shows_family_and_slot_not_path(self) -> None:
+        panel = StatusPanel()
+        panel.pid_info = PidInfo(
+            pid=os.getpid(),
+            model="qwen38-27b-bartowski",
+            port=8080,
+            ts="",
+        )
+        panel.model_display = "Qwen 3.8"
+        panel.quant_display = "Q8_0"
+        panel.preset_display = "[2]"
+        panel.uptime = 65
+        panel.props = {
+            "model_alias": "coding",
+            "model_path": "/home/doofus/models/Qwen3.8-27B-Q8_0.gguf",
+        }
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("Qwen 3.8  •  slot 2", rendered)
+        self.assertNotIn("alias coding", rendered)
+        self.assertNotIn("Qwen3.8-27B-Q8_0.gguf", rendered)
+        self.assertNotIn("port 8080", rendered)
+        self.assertNotIn(f"PID {os.getpid()}", rendered)
+        self.assertNotIn("up 0:01:05", rendered)
+
+    def test_status_header_shows_live_status_or_not_running(self) -> None:
+        header = StatusHeader()
+        self.assertIn("not running", render_text(header.render()))
+
+        header.pid_info = PidInfo(
+            pid=os.getpid(),
+            model="qwen38-27b-bartowski",
+            port=8080,
+            ts="",
+        )
+        header.uptime = 65
+        rendered = render_text(header.render())
+        self.assertIn(f"port 8080  •  PID {os.getpid()}  •  up 0:01:05", rendered)
 
     def test_status_health_thresholds(self) -> None:
         self.assertEqual(vram_health(74.9), ("OK", "bold green"))
@@ -220,6 +260,53 @@ class DashboardTests(unittest.TestCase):
         rendered = render_text(panel.render())
         self.assertIn("NEXT LAUNCH [REMOTE]", rendered)
         self.assertIn("[LOG INFO]", rendered)
+
+
+class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_app_top_bar_is_live_status_not_title(self) -> None:
+        from textual.widgets import Header
+
+        from tests.support import Harness
+
+        harness = Harness()
+        try:
+            app = harness.app()
+            async with app.run_test(size=(120, 40)):
+                self.assertEqual(len(list(app.query(Header))), 0)
+                header = app.query_one(StatusHeader)
+                self.assertIn("not running", render_text(header.render()))
+        finally:
+            harness.cleanup()
+
+    async def test_header_stays_live_in_editor_mode(self) -> None:
+        from tests.support import MODEL_SLUG, QUANT, Harness
+
+        harness = Harness()
+        try:
+            app = harness.app()
+            async with app.run_test(size=(120, 40)):
+                write_pid_file(
+                    harness.paths.pid_file,
+                    pid=os.getpid(),
+                    model=MODEL_SLUG,
+                    port=8080,
+                    quant=QUANT,
+                    preset_slot=1,
+                    remote=False,
+                )
+                app._editor_mode = True
+                app._refresh_pid()
+                header = app.query_one(StatusHeader)
+                self.assertIn(
+                    f"port 8080  •  PID {os.getpid()}",
+                    render_text(header.render()),
+                )
+
+                harness.paths.pid_file.unlink()
+                app._refresh_pid()
+                self.assertIn("not running", render_text(header.render()))
+        finally:
+            harness.cleanup()
 
 
 if __name__ == "__main__":
