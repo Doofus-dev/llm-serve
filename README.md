@@ -5,7 +5,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 ## What it does
 
 - **Model registry** — Profiles in `models.json` (display name, port, Hugging Face source, quants). Runtime knobs live in `presets.json`.
-- **Interactive TUI** — Browse models and aliases, edit presets, download GGUFs from Hugging Face, and watch live decode speed and GPU use.
+- **Interactive TUI** — Browse models and aliases, edit presets, download GGUFs from Hugging Face, and watch live decode speed plus per-process VRAM and RAM.
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
 - **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …).
 - **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, queue downloads.

@@ -5,8 +5,9 @@ from __future__ import annotations
 import csv
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 _GPU_VENDOR_PREFIXES = (
     "nvidia corporation ",
@@ -20,6 +21,17 @@ _GPU_VENDOR_PREFIXES = (
 
 
 @dataclass
+class ProcessMem:
+    """Per-process VRAM and RSS observed for the live GPU panel."""
+
+    pid: int
+    name: str
+    vram_mb: float = 0.0
+    ram_mb: float = 0.0
+    tracked: bool = False
+
+
+@dataclass
 class GPUStats:
     name: str = ""
     vram_used_mb: float = 0.0
@@ -30,6 +42,7 @@ class GPUStats:
     unified: bool = False
     dedicated_used_mb: float = 0.0
     dedicated_total_mb: float = 0.0
+    processes: list[ProcessMem] = field(default_factory=list)
 
     @property
     def vram_pct(self) -> float:
@@ -121,6 +134,219 @@ def effective_gpu_memory(
     if unified:
         return gtt_used_mb, gtt_total_mb, True
     return vram_used_mb, vram_total_mb, False
+
+
+def parse_pidof(text: str) -> list[int]:
+    """Parse `pidof` stdout into PIDs."""
+    pids: list[int] = []
+    for token in text.split():
+        try:
+            pid = int(token)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def kfd_client_pids(root: Path | None = None) -> list[int]:
+    """Return KFD compute client PIDs from sysfs."""
+    proc_root = Path("/sys/class/kfd/kfd/proc") if root is None else root
+    pids: list[int] = []
+    try:
+        entries = proc_root.iterdir()
+    except OSError:
+        return pids
+    for entry in entries:
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def parse_nvidia_compute_apps(text: str) -> list[ProcessMem]:
+    """Parse `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory`."""
+    processes: list[ProcessMem] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if "no running" in lower or lower.startswith("pid"):
+            continue
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        name = Path(parts[1]).name or parts[1]
+        mem = parts[2].split()[0] if parts[2] else "0"
+        if mem.upper() in {"[N/A]", "N/A", "[NOTSUPPORTED]"}:
+            vram_mb = 0.0
+        else:
+            try:
+                vram_mb = float(mem)
+            except ValueError:
+                continue
+        processes.append(ProcessMem(pid=pid, name=name, vram_mb=vram_mb))
+    return processes
+
+
+def parse_drm_fdinfo(text: str) -> float:
+    """Return GPU memory MiB from a DRM fdinfo blob (VRAM, else GTT), or 0."""
+    vram_kib = 0.0
+    gtt_kib = 0.0
+    for raw in text.splitlines():
+        if ":" not in raw:
+            continue
+        key, _, value = raw.partition(":")
+        key = key.strip().lower()
+        token = value.strip().split()[0] if value.strip() else "0"
+        try:
+            amount = float(token)
+        except ValueError:
+            continue
+        if key in {"drm-memory-vram", "drm-total-vram"}:
+            vram_kib += amount
+        elif key in {"drm-memory-gtt", "drm-total-gtt"}:
+            gtt_kib += amount
+    kib = vram_kib or gtt_kib
+    return kib / 1024.0 if kib else 0.0
+
+
+def process_rss_mb(pid: int) -> float | None:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) / 1024.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _comm(pid: int) -> str:
+    try:
+        name = Path(f"/proc/{pid}/comm").read_text().strip()
+        if name:
+            return name
+    except OSError:
+        pass
+    return str(pid)
+
+
+def _child_pids(pid: int) -> set[int]:
+    children: set[int] = set()
+    task = Path(f"/proc/{pid}/task")
+    try:
+        for child_file in task.glob("*/children"):
+            for token in child_file.read_text().split():
+                try:
+                    children.add(int(token))
+                except ValueError:
+                    continue
+    except OSError:
+        return children
+    return children
+
+
+def _drm_vram_mb(pid: int) -> float:
+    fdinfo = Path(f"/proc/{pid}/fdinfo")
+    total = 0.0
+    try:
+        for entry in fdinfo.iterdir():
+            try:
+                text = entry.read_text()
+            except OSError:
+                continue
+            if "drm-memory" not in text and "drm-driver" not in text:
+                continue
+            total += parse_drm_fdinfo(text)
+    except OSError:
+        return 0.0
+    return total
+
+
+def _query_nvidia_compute_apps() -> list[ProcessMem]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid,process_name,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    return parse_nvidia_compute_apps(result.stdout)
+
+
+def _query_llama_server_pids() -> list[int]:
+    try:
+        result = subprocess.run(
+            ["pidof", "llama-server"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    return parse_pidof(result.stdout)
+
+
+def _amd_client_pids() -> set[int]:
+    return set(kfd_client_pids()) | set(_query_llama_server_pids())
+
+
+def collect_process_stats(tracked_pids: Sequence[int] = ()) -> list[ProcessMem]:
+    """VRAM + RSS for tracked PIDs and other cheap GPU clients.
+
+    NVIDIA: ``nvidia-smi --query-compute-apps``. AMD: KFD sysfs clients
+    plus ``pidof llama-server`` (no full ``/proc`` walk).
+    """
+    tracked: set[int] = set()
+    for pid in tracked_pids:
+        if pid and pid > 0:
+            tracked.add(int(pid))
+            tracked.update(_child_pids(int(pid)))
+
+    by_pid: dict[int, ProcessMem] = {}
+    for proc in _query_nvidia_compute_apps():
+        by_pid[proc.pid] = proc
+
+    for pid in tracked | _amd_client_pids():
+        if pid not in by_pid:
+            by_pid[pid] = ProcessMem(pid=pid, name=_comm(pid), vram_mb=_drm_vram_mb(pid))
+        elif by_pid[pid].vram_mb <= 0:
+            drm = _drm_vram_mb(pid)
+            if drm:
+                by_pid[pid].vram_mb = drm
+
+    for pid, proc in list(by_pid.items()):
+        rss = process_rss_mb(pid)
+        if rss is None:
+            by_pid.pop(pid)
+            continue
+        if rss is not None:
+            proc.ram_mb = rss
+        if not proc.name or proc.name == str(pid):
+            proc.name = _comm(pid)
+        proc.tracked = pid in tracked
+
+    ordered = sorted(
+        by_pid.values(),
+        key=lambda proc: (not proc.tracked, -proc.vram_mb, proc.pid),
+    )
+    return ordered
 
 
 def _try_nvidia() -> GPUStats | None:
@@ -297,5 +523,7 @@ def _ram_fallback() -> GPUStats:
     )
 
 
-def query_gpu() -> GPUStats:
-    return _try_nvidia() or _try_rocm() or _ram_fallback()
+def query_gpu(tracked_pids: Sequence[int] = ()) -> GPUStats:
+    stats = _try_nvidia() or _try_rocm() or _ram_fallback()
+    stats.processes = collect_process_stats(tracked_pids)
+    return stats
