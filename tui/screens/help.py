@@ -125,7 +125,12 @@ class HelpScreen(ModalScreen[None]):
                 # --- Panels section ---
                 yield Label("Panels", classes="help-section")
                 yield Static(
-                    "Status bar (top right)\n"
+                    "Top bar\n"
+                    "  Live server port, PID, and uptime, or not running.",
+                    classes="help-row",
+                )
+                yield Static(
+                    "STATUS panel (right)\n"
                     "  Server state, model name, device memory total and gauge\n"
                     "  with health label, then a per-process table (name, PID,\n"
                     "  VRAM, RAM). * marks the tracked llama-server; leftover\n"

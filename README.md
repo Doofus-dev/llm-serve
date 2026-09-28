@@ -96,12 +96,13 @@ After setup, `~/.local/bin/llm-serve` points at the repo script, so the TUI and 
 ## TUI
 
 ```
+┌─ port • PID • uptime ──────────────────────────────────────────┐
 ┌─ MODELS / ALIASES ─┬─ status (running line, throughput, GPU) ─┐
 │  cards + presets   │  active preset / runtime config            │
 └────────────────────┴─ translated server log ────────────────────┘
 ```
 
-The running line shows family, quant, and preset slot: `RUNNING  Qwen 3.5  Q8_0  [1]`. **R** and **V** set remote and log verbosity for the *next* launch (saved in `tui-settings.json`).
+The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`, or `not running`. The running line shows family, quant, and preset slot: `RUNNING  Qwen 3.5  Q8_0  [1]`. **R** and **V** set remote and log verbosity for the *next* launch (saved in `tui-settings.json`).
 
 | Key | Action |
 |-----|--------|
