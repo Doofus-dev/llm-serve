@@ -23,6 +23,7 @@ from tui.data.throughput_history import (
     render_stage_strip,
     render_tps_sparkline,
     sample_tps_for_history,
+    sparkline_trend,
     summarize_slots,
 )
 
@@ -403,6 +404,27 @@ class ThroughputHistoryTests(unittest.TestCase):
         self.assertEqual(len(sparkline_row), SPARKLINE_WIDTH)
         self.assertEqual(sparkline_row, "▁" * SPARKLINE_WIDTH)
         self.assertIn("─", line.plain)
+
+    def test_sparkline_area_fill_stays_fixed_width(self) -> None:
+        samples = [float(i % 40) for i in range(24)]
+        line = render_tps_sparkline(samples, width=20)
+        rows = line.plain.split("\n")
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            self.assertEqual(len(row), 20)
+        self.assertTrue(any(ch in rows[1] for ch in "░▒▓█"))
+
+    def test_format_avg_line_includes_peak_min_trend(self) -> None:
+        samples = [10.0, 20.0, 25.0, 30.0]
+        line = format_avg_line(samples, 0.5)
+        assert line is not None
+        self.assertIn("avg 21.2 tok/s", line.plain)
+        self.assertIn("peak 30.0", line.plain)
+        self.assertIn("min 10.0", line.plain)
+        self.assertIn("▲", line.plain)
+        self.assertEqual(sparkline_trend(samples), "▲")
+        falling = [40.0, 38.0, 36.0, 20.0]
+        self.assertEqual(sparkline_trend(falling), "▼")
 
     def test_baseline_speed_uses_history_average_not_peak(self) -> None:
         samples = [40.0, 92.0, 70.0, 55.0, 80.0, 78.0, 76.0, 74.0]
