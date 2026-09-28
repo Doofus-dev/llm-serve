@@ -12,7 +12,7 @@ from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches, QueryError
 from textual.events import Focus
-from textual.widgets import Footer, Header, Label
+from textual.widgets import Footer, Label
 from textual.theme import Theme
 
 from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selection_supports_action
@@ -82,13 +82,17 @@ from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
 from tui.widgets.log_panel import LogPanel
 from tui.widgets.nav import AliasNav, ModelNav
-from tui.widgets.status import StatusPanel
+from tui.theme import APP_FONT
+from tui.widgets.status import StatusHeader, StatusPanel
 
 
 class LLMServeApp(App):
     TITLE = "llm-serve"
     CSS_PATH = Path(__file__).with_name("app.tcss")
     CSS = """\
+    Screen {
+        /* JetBrains Mono — app typeface; inherited by every widget. */
+    }
     Footer {
         border-top: solid $border;
     }
@@ -138,14 +142,17 @@ class LLMServeApp(App):
                 variables={
                     "border": "#3a4046",
                     "text-muted": "#8a929c",
+                    "font-family": APP_FONT,
                 },
             )
         )
         self.theme = "llm-serve"
 
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return {"font-family": APP_FONT}
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield StatusHeader(id="status-header")
         with Vertical(id="app-body"):
             yield DownloadBar(id="download-bar")
             with Horizontal(id="main"):
@@ -435,6 +442,10 @@ class LLMServeApp(App):
             panel = self.query_one(StatusPanel)
         except (QueryError, NoMatches):
             return
+        try:
+            header = self.query_one(StatusHeader)
+        except (QueryError, NoMatches):
+            header = None
         was_alive = panel.pid_info.alive if panel.pid_info else False
         alive = info.alive if info else False
         prev = panel.pid_info
@@ -503,6 +514,9 @@ class LLMServeApp(App):
                     asyncio.ensure_future(_safe_close())
                 self.client = ServerClient("127.0.0.1", info.port)
         panel.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
+        if header is not None:
+            header.pid_info = panel.pid_info
+            header.uptime = panel.uptime
 
     async def _poll_metrics(self) -> None:
         self._refresh_pid()

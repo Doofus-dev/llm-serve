@@ -6,7 +6,7 @@ from tui.widgets.download_bar import DownloadBar
 from tui.widgets.health import generation_health, temperature_health, vram_health
 from tui.widgets.log_panel import LogPanel
 from tui.widgets.nav import AliasNav, ModelNav
-from tui.widgets.status import StatusPanel
+from tui.widgets.status import StatusHeader, StatusPanel
 
 __all__ = [
     "ActionBar",
@@ -15,6 +15,7 @@ __all__ = [
     "DownloadBar",
     "LogPanel",
     "ModelNav",
+    "StatusHeader",
     "StatusPanel",
     "generation_health",
     "temperature_health",
