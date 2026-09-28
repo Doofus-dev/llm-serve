@@ -11,7 +11,7 @@ from rich.console import Console
 from tui.widgets.config import ConfigPanel
 from tui.widgets.health import generation_health, temperature_health, vram_health
 from tui.widgets.status import StatusPanel
-from tui.data.gpu import GPUStats
+from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo
 from tui.data.stats import Metrics
 from tui.data.throughput_history import LastRequest, LiveThroughput
@@ -146,6 +146,69 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("avg 21.2 tok/s", rendered)
         self.assertTrue(any(ch in rendered for ch in "▁▂▃▄▅▆▇█"))
+
+
+    def test_status_panel_renders_multiple_gpu_processes(self) -> None:
+        panel = StatusPanel()
+        panel.gpu = GPUStats(
+            name="Test GPU",
+            vram_used_mb=12_288,
+            vram_total_mb=16_384,
+            utilization_pct=40,
+            temp_c=55,
+            available=True,
+            processes=[
+                ProcessMem(pid=100, name="llama-server", vram_mb=8192, ram_mb=1500, tracked=True),
+                ProcessMem(pid=200, name="other-llama", vram_mb=4096, ram_mb=900, tracked=False),
+            ],
+        )
+
+        rendered = render_text(panel.render())
+        collapsed = " ".join(rendered.split())
+
+        self.assertIn("12.0G / 16.0G total", collapsed)
+        self.assertIn("llama-server", collapsed)
+        self.assertIn("other-llama", collapsed)
+        self.assertIn("100", collapsed)
+        self.assertIn("200", collapsed)
+        self.assertIn("8.0G", collapsed)
+        self.assertIn("4.0G", collapsed)
+        self.assertIn("VRAM", collapsed)
+        self.assertIn("RAM", collapsed)
+
+    def test_status_panel_shows_full_seven_digit_pids(self) -> None:
+        panel = StatusPanel()
+        panel.gpu = GPUStats(
+            name="Test GPU",
+            vram_used_mb=12_288,
+            vram_total_mb=16_384,
+            utilization_pct=40,
+            temp_c=55,
+            available=True,
+            processes=[
+                ProcessMem(
+                    pid=1120647,
+                    name="llama-server",
+                    vram_mb=13902,
+                    ram_mb=1251,
+                    tracked=True,
+                ),
+                ProcessMem(
+                    pid=4155563,
+                    name="llama-server",
+                    vram_mb=0,
+                    ram_mb=2.5,
+                    tracked=False,
+                ),
+            ],
+        )
+
+        rendered = render_text(panel.render())
+
+        self.assertIn("1120647", rendered)
+        self.assertIn("4155563", rendered)
+        self.assertNotIn("11206…", rendered)
+        self.assertNotIn("41555…", rendered)
 
     def test_status_panel_shows_next_launch_remote_toggle(self) -> None:
         panel = StatusPanel()
