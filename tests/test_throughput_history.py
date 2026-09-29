@@ -23,6 +23,7 @@ from tui.data.throughput_history import (
     render_stage_strip,
     render_tps_sparkline,
     sample_tps_for_history,
+    sparkline_trend,
     summarize_slots,
 )
 
@@ -403,6 +404,57 @@ class ThroughputHistoryTests(unittest.TestCase):
         self.assertEqual(len(sparkline_row), SPARKLINE_WIDTH)
         self.assertEqual(sparkline_row, "▁" * SPARKLINE_WIDTH)
         self.assertIn("─", line.plain)
+
+    def test_sparkline_area_fill_stays_fixed_width(self) -> None:
+        samples = [float(i % 40) for i in range(24)]
+        line = render_tps_sparkline(samples, width=20)
+        rows = line.plain.split("\n")
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            self.assertEqual(len(row), 20)
+        self.assertTrue(any(ch in rows[1] for ch in "░▒▓█"))
+
+    def test_format_avg_line_includes_peak_min_trend(self) -> None:
+        samples = [10.0, 20.0, 25.0, 30.0]
+        line = format_avg_line(samples, 0.5)
+        assert line is not None
+        rows = line.plain.split("\n")
+        self.assertEqual(len(rows), 2)
+        self.assertIn("avg 21.2 tok/s", rows[0])
+        self.assertIn("rolling", rows[0])
+        self.assertNotIn("peak", rows[0])
+        self.assertIn("peak 30.0", rows[1])
+        self.assertIn("min 10.0", rows[1])
+        self.assertIn("▲", rows[1])
+        for row in rows:
+            self.assertLessEqual(len(row), SPARKLINE_WIDTH)
+        self.assertEqual(sparkline_trend(samples), "▲")
+        falling = [40.0, 38.0, 36.0, 20.0]
+        self.assertEqual(sparkline_trend(falling), "▼")
+
+    def test_format_avg_line_peak_min_match_visible_sparkline(self) -> None:
+        samples = [60.0] + [0.0] * 80 + [10.0, 20.0, 25.0, 30.0]
+        line = format_avg_line(samples, 0.5)
+        assert line is not None
+        rows = line.plain.split("\n")
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertIn("peak 30.0", rows[1])
+        self.assertIn("min 10.0", rows[1])
+        self.assertNotIn("60.0", line.plain)
+        self.assertEqual(sparkline_trend(samples), "▲")
+
+    def test_format_avg_line_strips_decode_start_spike(self) -> None:
+        spiked = [80.0] * 10 + [1000.0]
+        line = format_avg_line(spiked, 0.5)
+        assert line is not None
+        self.assertIn("peak 80.0", line.plain)
+        self.assertNotIn("1000", line.plain)
+        self.assertEqual(sparkline_trend(spiked), "→")
+        after = spiked + [80.0]
+        after_line = format_avg_line(after, 0.5)
+        assert after_line is not None
+        self.assertEqual(sparkline_trend(after), "→")
+        self.assertNotIn("▼", after_line.plain)
 
     def test_baseline_speed_uses_history_average_not_peak(self) -> None:
         samples = [40.0, 92.0, 70.0, 55.0, 80.0, 78.0, 76.0, 74.0]

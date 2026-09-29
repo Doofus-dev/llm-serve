@@ -230,8 +230,8 @@ Button.-style-flat:disabled {
     }
     #right { layout: vertical; height: 1fr; width: 1fr; }
     #status {
-        height: 16;
-        min-height: 11;
+        height: 17;
+        min-height: 12;
         overflow-y: auto;
         border: round $border;
         padding: 0 1;

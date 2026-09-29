@@ -139,10 +139,12 @@ class HelpScreen(ModalScreen[None]):
                     classes="help-row",
                 )
                 yield Static(
-                    "Throughput chart (below status)\n"
-                    "  Tokens/sec over time with baseline comparison line.\n"
-                    "  The filled area shows current throughput; the dashed\n"
-                    "  line is your recorded baseline for that model.",
+                    "Throughput (inside STATUS)\n"
+                    "  Tokens/sec sparkline in the THROUGHPUT column. New\n"
+                    "  samples enter on the right; a faint fill appears under\n"
+                    "  the line after enough ticks. Captions below: rolling\n"
+                    "  average, then peak / min / trend for the visible window.\n"
+                    "  While generating: live t/s, health, and ms/token.",
                     classes="help-row",
                 )
                 yield Static(
