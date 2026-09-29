@@ -18,12 +18,11 @@ from tui.theme import (
     ERR,
     ERR_STYLE,
     OK_STYLE,
-    TEXT_MUTED,
     WARN,
     WARN_STYLE,
 )
 
-# Unicode block steps for a btop-style single-line bar chart.
+# Unicode block steps for the sparkline line and optional fill row.
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
 _FILL_BLOCKS = " ░▒▓█"
 _PREFILL_BLOCKS = "░█"

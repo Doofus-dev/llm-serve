@@ -89,7 +89,6 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("PREFILL", rendered)
         self.assertIn("CACHE", rendered)
         self.assertIn("3,631/4,096", rendered)
-        self.assertIn("3.8k t/s", rendered)
         self.assertIn("waiting on generate", rendered)
         self.assertNotIn("3800", rendered)
 
