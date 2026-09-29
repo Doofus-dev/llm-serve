@@ -354,4 +354,41 @@ def merge_identity_and_preset(identity: dict[str, Any], preset: Preset) -> dict[
     return merged
 
 
+def _norm_param_value(value: object) -> str:
+    if value is None or value is False:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def diff_preset_params(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> dict[str, dict[str, tuple[str, str]]]:
+    """Classify param differences between two full preset dicts.
+
+    Returns ``{"added": ..., "removed": ..., "changed": ...}`` mapping param
+    name to ``(left_display, right_display)``. Added = present only on the
+    right; removed = present only on the left.
+    """
+    added: dict[str, tuple[str, str]] = {}
+    removed: dict[str, tuple[str, str]] = {}
+    changed: dict[str, tuple[str, str]] = {}
+    keys = set(left) | set(right)
+    for key in sorted(keys):
+        lval = _norm_param_value(left.get(key))
+        rval = _norm_param_value(right.get(key))
+        if lval == rval:
+            continue
+        pair = (lval, rval)
+        if not lval and rval:
+            added[key] = pair
+        elif lval and not rval:
+            removed[key] = pair
+        else:
+            changed[key] = pair
+    return {"added": added, "removed": removed, "changed": changed}
+
+
 
