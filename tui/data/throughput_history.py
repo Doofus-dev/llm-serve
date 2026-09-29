@@ -203,6 +203,24 @@ ROLLING_AVG_SAMPLES = 16
 _SPIKE_MULTIPLE = 2.5
 
 
+def _active_samples(samples: list[float]) -> list[float]:
+    return [sample for sample in samples if sample > 0]
+
+
+def _spike_filtered(samples: list[float]) -> list[float]:
+    """Drop idle zeros and one-tick decode-start spikes."""
+    active = _active_samples(samples)
+    if not active:
+        return []
+    median = statistics.median(sorted(active))
+    if median <= 0:
+        return active
+    typical = [sample for sample in active if sample <= median * _SPIKE_MULTIPLE]
+    if len(typical) >= max(1, len(active) // 2):
+        return typical
+    return active
+
+
 def rolling_gen_average(
     history: list[float] | None,
     *,
@@ -211,16 +229,12 @@ def rolling_gen_average(
     """Mean of the latest generation samples, ignoring idle zeros and spikes."""
     if not history:
         return None
-    active = [sample for sample in history if sample > 0]
+    active = _active_samples(history)
     if len(active) < min_samples:
         return None
-    window = active[-ROLLING_AVG_SAMPLES:]
-    ordered = sorted(window)
-    median = statistics.median(ordered)
-    if median > 0:
-        typical = [sample for sample in window if sample <= median * _SPIKE_MULTIPLE]
-        if len(typical) >= max(1, len(window) // 2):
-            window = typical
+    window = _spike_filtered(active[-ROLLING_AVG_SAMPLES:])
+    if not window:
+        return None
     return sum(window) / len(window)
 
 
@@ -454,17 +468,15 @@ class ThroughputHistory:
         return len(self._samples)
 
 
-def _active_samples(samples: list[float]) -> list[float]:
-    return [sample for sample in samples if sample > 0]
-
-
-def sparkline_trend(samples: list[float]) -> str | None:
-    """Compare the latest sample to the prior window: rising, falling, or steady."""
-    active = _active_samples(samples)
-    if len(active) < 4:
+def sparkline_trend(samples: list[float], *, width: int = SPARKLINE_WIDTH) -> str | None:
+    """Compare the latest visible sample to the prior window: rising, falling, or steady."""
+    if width <= 0:
+        width = SPARKLINE_WIDTH
+    visible = _spike_filtered(samples[-width:])
+    if len(visible) < 4:
         return None
-    last = active[-1]
-    prior = active[:-1]
+    last = visible[-1]
+    prior = visible[:-1]
     base = sum(prior[-ROLLING_AVG_SAMPLES:]) / len(prior[-ROLLING_AVG_SAMPLES:])
     if base <= 0:
         return None
@@ -475,30 +487,67 @@ def sparkline_trend(samples: list[float]) -> str | None:
     return "→"
 
 
-def format_avg_line(samples: list[float], poll_interval: float) -> Text | None:
-    """Rolling avg plus peak/min/trend for the sparkline scale."""
+def _append_fitted_fields(line: Text, fields: list[tuple[str, str]], width: int) -> None:
+    used = 0
+    started = False
+    for text, style in fields:
+        piece = text
+        if len(piece) > width:
+            piece = piece[: width - 1] + "…" if width > 1 else piece[:width]
+        gap = 2 if started else 0
+        if started and used + gap + len(piece) > width:
+            line.append("\n")
+            used = 0
+            gap = 0
+            started = False
+        if gap:
+            line.append("  ")
+        line.append(piece, style=style)
+        used += gap + len(piece)
+        started = True
+
+
+def format_avg_line(
+    samples: list[float],
+    poll_interval: float,
+    width: int = SPARKLINE_WIDTH,
+) -> Text | None:
+    """Rolling avg on one line; peak/min/trend on a sparkline-width line below."""
     active = _active_samples(samples)
     if not active:
         return None
+    if width <= 0:
+        width = SPARKLINE_WIDTH
     avg = rolling_gen_average(samples)
-    line = Text(no_wrap=True)
+    line = Text()
     if avg is None:
-        line.append("avg —", style=DIM_STYLE)
+        _append_fitted_fields(line, [("avg —", DIM_STYLE)], width)
     else:
-        line.append(f"avg {avg:.1f} tok/s", style=ACCENT_STYLE)
         window_s = min(len(active), ROLLING_AVG_SAMPLES) * poll_interval
-        line.append(f"  ({window_s:.0f}s rolling)", style=DIM_STYLE)
-    peak = max(active)
-    floor = min(active)
-    line.append(f"  peak {peak:.1f}", style=DIM_STYLE)
-    line.append(f"  min {floor:.1f}", style=DIM_STYLE)
-    trend = sparkline_trend(samples)
+        _append_fitted_fields(
+            line,
+            [
+                (f"avg {avg:.1f} tok/s", ACCENT_STYLE),
+                (f"({window_s:.0f}s rolling)", DIM_STYLE),
+            ],
+            width,
+        )
+    visible = _spike_filtered(samples[-width:])
+    if not visible:
+        return line
+    stats: list[tuple[str, str]] = [
+        (f"peak {max(visible):.1f}", DIM_STYLE),
+        (f"min {min(visible):.1f}", DIM_STYLE),
+    ]
+    trend = sparkline_trend(samples, width=width)
     if trend == "▲":
-        line.append("  ▲", style=OK_STYLE)
+        stats.append(("▲", OK_STYLE))
     elif trend == "▼":
-        line.append("  ▼", style=ERR_STYLE)
+        stats.append(("▼", ERR_STYLE))
     elif trend == "→":
-        line.append("  →", style=DIM_STYLE)
+        stats.append(("→", DIM_STYLE))
+    line.append("\n")
+    _append_fitted_fields(line, stats, width)
     return line
 
 
