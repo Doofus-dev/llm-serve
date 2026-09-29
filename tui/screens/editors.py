@@ -138,6 +138,14 @@ class ParamEditorMixin:
     """Shared compose/save helpers for model and preset parameter editors."""
 
     fields: dict[str, ParamInput | ParamSelect]
+    id_prefix: str = ""
+
+    def _field_id(self, kind: str, param: str) -> str:
+        prefix = self.id_prefix
+        if prefix:
+            return f"{prefix}{kind}_{param}"
+        return f"{kind}_{param}"
+
 
     def _yield_param_controls(
         self,
@@ -159,8 +167,7 @@ class ParamEditorMixin:
             initial = select_initial_value(param, value)
             select_kwargs: dict = {
                 "options": select_options(param),
-                "id": f"select_{param}",
-                "prompt": param,
+                "id": self._field_id("select", param),
             }
             if param in PARAM_ALLOW_BLANK:
                 select_kwargs["allow_blank"] = True
@@ -172,7 +179,12 @@ class ParamEditorMixin:
             yield widget
             return
 
-        widget = ParamInput(param, value=str(value), placeholder=param, id=f"input_{param}")
+        widget = ParamInput(
+            param,
+            value=str(value),
+            placeholder=param,
+            id=self._field_id("input", param),
+        )
         self.fields[param] = widget
         yield widget
 
@@ -342,6 +354,8 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         models_dir: Path,
         on_save,
         on_cancel,
+        id_prefix: str = "",
+        compare_mode: bool = False,
     ):
         super().__init__()
         self.model_name = model_name
@@ -364,16 +378,25 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         self.name_input: EditorInput | None = None
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
+        self.id_prefix = id_prefix
+        self.compare_mode = compare_mode
 
     def compose(self) -> ComposeResult:
-        verb = "New" if self.is_new else "Edit"
-        yield Label(
-            f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  "
-            "(Ctrl+S: save, Esc: cancel, F2: help)"
-        )
+        if self.compare_mode:
+            yield Label(
+                f"[bold][{self.slot}] {self.preset.name}[/bold]  Ctrl+S saves this side"
+            )
+        else:
+            verb = "New" if self.is_new else "Edit"
+            yield Label(
+                f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  "
+                "(Ctrl+S: save, Esc: cancel, F2: help)"
+            )
         yield Label("Preset name:", classes="field-label")
-        self.name_input = EditorInput(value=self.preset.name, placeholder="preset-name", id="preset_name")
-        yield self.name_input
+        name_id = f"{self.id_prefix}preset_name" if self.id_prefix else "preset_name"
+        self.name_input = EditorInput(
+            value=self.preset.name, placeholder="preset-name", id=name_id
+        )
 
         for group_name, param_names in PRESET_PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
@@ -386,30 +409,44 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
                                     value = self.max_ctx if self.max_ctx is not None else self.identity.get(param, "")
                                 else:
                                     value = self.identity.get(param, "")
-                                with Vertical(classes="param-field"):
+                                with Vertical(
+                                    classes="param-field",
+                                    id=self._field_id("field", param),
+                                ):
                                     yield Label(f"{param}  [dim]from model[/]", classes="param-label")
                                     yield Label(fmt_locked_value(value), classes="param-locked")
                                 continue
                             value = self.preset.params.get(param, "")
                             if param == "ctx" and self.max_ctx is not None:
-                                with Vertical(classes="param-field"):
+                                with Vertical(
+                                    classes="param-field",
+                                    id=self._field_id("field", param),
+                                ):
                                     yield from self._yield_param_controls(
                                         param,
                                         value,
                                         label=f"ctx  [dim]max {fmt_ctx(self.max_ctx)}[/]",
                                     )
                                 continue
-                            with Vertical(classes="param-field"):
+                            with Vertical(
+                                classes="param-field",
+                                id=self._field_id("field", param),
+                            ):
                                 yield from self._yield_param_controls(param, value)
 
+        save_id = f"{self.id_prefix}save" if self.id_prefix else "save"
+        cancel_id = f"{self.id_prefix}cancel" if self.id_prefix else "cancel"
         with ActionBar():
-            yield Button("Save", variant="success", id="save")
-            yield Button("Cancel", id="cancel")
+            yield Button("Save", variant="success", id=save_id)
+            if not self.compare_mode:
+                yield Button("Cancel", id=cancel_id)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
+        save_id = f"{self.id_prefix}save" if self.id_prefix else "save"
+        cancel_id = f"{self.id_prefix}cancel" if self.id_prefix else "cancel"
+        if event.button.id == cancel_id:
             self.on_cancel_callback()
-        elif event.button.id == "save":
+        elif event.button.id == save_id:
             self.save()
 
     def save(self) -> None:
@@ -438,6 +475,8 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         self.on_save_callback(name, params)
 
     def on_mount(self) -> None:
+        if self.compare_mode:
+            return
         first = self._first_focusable_field()
         if first:
             first.focus()

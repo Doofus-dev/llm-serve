@@ -29,6 +29,7 @@ def build_app_bindings(
         Binding("e", "edit", "Edit"),
         Binding("p", "pick_quant", "Quant"),
         Binding("n", "new", "New"),
+        Binding("c", "compare_presets", "Compare"),
         Binding("d", "delete", "Delete"),
         # Next launch + log panel
         Binding("r", "toggle_remote", "Remote ON" if remote_on else "Remote OFF"),
@@ -43,7 +44,7 @@ def build_app_bindings(
     ]
 
 
-SELECTION_ACTIONS = frozenset({"launch", "edit", "pick_quant", "new", "delete"})
+SELECTION_ACTIONS = frozenset({"launch", "edit", "pick_quant", "new", "delete", "compare_presets"})
 
 
 def selection_supports_action(
@@ -59,6 +60,8 @@ def selection_supports_action(
     if action == "edit":
         return kind in {"model", "preset", "alias"}
     if action == "pick_quant":
+        return models_section and kind in {"model", "preset"}
+    if action == "compare_presets":
         return models_section and kind in {"model", "preset"}
     if action == "launch":
         return kind in {"model", "preset", "alias"}
@@ -79,6 +82,7 @@ Models pane (model or preset selected)
   E         edit profile / preset
   P         pick quant
   N         new preset
+  C         compare two presets
   D         delete
 
 Aliases pane

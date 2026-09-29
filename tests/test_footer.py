@@ -28,6 +28,10 @@ class FooterBindingTests(unittest.TestCase):
         self.assertTrue(selection_supports_action("launch", "alias"))
         self.assertTrue(selection_supports_action("pick_quant", "model", models_section=True))
         self.assertTrue(selection_supports_action("pick_quant", "preset", models_section=True))
+        self.assertTrue(selection_supports_action("compare_presets", "model", models_section=True))
+        self.assertTrue(selection_supports_action("compare_presets", "preset", models_section=True))
+        self.assertFalse(selection_supports_action("compare_presets", "model", models_section=False))
+        self.assertFalse(selection_supports_action("compare_presets", "alias", models_section=True))
         self.assertFalse(selection_supports_action("pick_quant", "model", models_section=False))
         self.assertFalse(selection_supports_action("pick_quant", "alias", models_section=True))
         self.assertFalse(selection_supports_action("pick_quant", None))
@@ -46,6 +50,7 @@ class FooterBindingTests(unittest.TestCase):
                 "edit",
                 "pick_quant",
                 "new",
+                "compare_presets",
                 "delete",
                 "toggle_remote",
                 "cycle_log_verbosity",
@@ -82,7 +87,7 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             app.query_one(ModelNav).focus()
             await pilot.pause(0.1)
             on_model = shown_actions(app)
-            self.assertTrue({"launch", "edit", "pick_quant"} <= on_model)
+            self.assertTrue({"launch", "edit", "pick_quant", "compare_presets"} <= on_model)
             self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_model)
 
             aliases = app.query_one(AliasNav)
@@ -91,6 +96,7 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             on_alias = shown_actions(app)
             self.assertIn("launch", on_alias)
             self.assertNotIn("pick_quant", on_alias)
+            self.assertNotIn("compare_presets", on_alias)
             self.assertIn("edit", on_alias)
             self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_alias)
 
