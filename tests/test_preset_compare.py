@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import unittest
 
+from textual.widgets import Select
+
 from tests.support import MODEL_SLUG, QUANT, Harness
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
 from tui.data.presets import (
@@ -15,6 +17,7 @@ from tui.data.presets import (
     set_preset,
 )
 from tui.screens.compare import PresetCompareScreen, format_diff_summary
+from tui.screens.editors import ConfirmDialog, PresetEditor
 from tui.widgets.nav import ModelNav
 
 
@@ -115,6 +118,87 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             app.action_compare_presets()
             await pilot.pause(0.2)
             self.assertNotIsInstance(app.screen, PresetCompareScreen)
+
+    def _add_slot(self, slot: int, name: str) -> None:
+        store = load_presets(self.harness.paths.presets_json)
+        params = dict(DEFAULT_PRESET_PARAMS)
+        set_preset(store, MODEL_SLUG, QUANT, slot, name, params)
+        save_presets(self.harness.paths.presets_json, store)
+
+    async def test_compare_blocks_dashboard_delete(self) -> None:
+        app = self.harness.app()
+        gguf = self.harness.paths.models_dir / "demo" / "Demo-Q4_K_M.gguf"
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            self.assertIsInstance(app.screen, PresetCompareScreen)
+            actions = {
+                binding.action
+                for _key, binding, _enabled, _tooltip in app.screen.active_bindings.values()
+            }
+            self.assertNotIn("delete", actions)
+            self.assertNotIn("launch", actions)
+            self.assertNotIn("edit", actions)
+            await pilot.press("d")
+            await pilot.pause(0.2)
+            self.assertIsInstance(app.screen, PresetCompareScreen)
+            self.assertNotIsInstance(app.screen, ConfirmDialog)
+            self.assertIn(MODEL_SLUG, app.registry.models)
+            self.assertTrue(gguf.exists())
+
+    async def test_compare_excludes_the_other_side_slot(self) -> None:
+        self._add_slot(3, "coding")
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            left = screen.query_one("#cmp-left-slot", Select)
+            with self.assertRaises(Exception):
+                left.value = str(screen.right_slot)
+            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 1)
+            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
+            left.value = "3"
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.3)
+            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 3)
+            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
+            right = screen.query_one("#cmp-right-slot", Select)
+            with self.assertRaises(Exception):
+                right.value = "3"
+            right.value = "1"
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.3)
+            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 3)
+            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 1)
+
+    async def test_compare_updates_labels_after_rename_save(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            editor = screen.query_one("#cmp-left-editor", PresetEditor)
+            self.assertIsNotNone(editor.name_input)
+            editor.name_input.value = "renamed-default"
+            editor.save()
+            await pilot.pause(0.3)
+            title = str(screen.query_one("#cmp-left-title").content)
+            self.assertIn("renamed-default", title)
+            prompt = str(screen.query_one("#cmp-left-slot #label").content)
+            self.assertIn("renamed-default", prompt)
+            stored = get_preset(
+                load_presets(self.harness.paths.presets_json), MODEL_SLUG, QUANT, 1
+            )
+            self.assertEqual(stored.name, "renamed-default")
 
 
 if __name__ == "__main__":

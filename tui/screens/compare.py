@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.screen import Screen
+from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static
 
 from tui.data.presets import (
@@ -64,7 +65,7 @@ def format_diff_summary(
     return "\n".join(lines)
 
 
-class PresetCompareScreen(Screen[None]):
+class PresetCompareScreen(ModalScreen[None]):
     """Compare and independently edit two preset slots of one model/quant."""
 
     BINDINGS = [
@@ -76,10 +77,11 @@ class PresetCompareScreen(Screen[None]):
     CSS = """\
     PresetCompareScreen {
         background: $surface;
+        align: center middle;
     }
     #compare-root {
-        height: 1fr;
-        width: 1fr;
+        height: 100%;
+        width: 100%;
         padding: 0 1;
     }
     #compare-header {
@@ -169,19 +171,65 @@ class PresetCompareScreen(Screen[None]):
         self.right_slot = right_slot
         self.on_saved = on_saved
         self._help_visible = False
+        self._syncing_selects = False
         self._replacing = False
+        self._replace_lock = asyncio.Lock()
 
-    def _slot_options(self) -> list[tuple[str, str]]:
+    def _slot_options(self, exclude: int) -> list[tuple[str, str]]:
         presets = list_presets_for_quant(self.store, self.model_name, self.quant)
         return [
             (f"{slot}: {preset.name}", str(slot))
             for slot, preset in sorted(presets.items())
+            if slot != exclude
         ]
+
+    def _refresh_slot_selects(self) -> None:
+        if self._replacing:
+            return
+        try:
+            left = self.query_one("#cmp-left-slot", Select)
+            right = self.query_one("#cmp-right-slot", Select)
+        except NoMatches:
+            return
+        self._syncing_selects = True
+        try:
+            self._apply_select_options(
+                left, self._slot_options(exclude=self.right_slot), str(self.left_slot)
+            )
+            self._apply_select_options(
+                right, self._slot_options(exclude=self.left_slot), str(self.right_slot)
+            )
+        except Exception:
+            self._syncing_selects = False
+            raise
+        self.call_after_refresh(self._finish_syncing_selects)
+
+    def _finish_syncing_selects(self) -> None:
+        self._syncing_selects = False
+
+    def _apply_select_options(
+        self, select: Select, options: list[tuple[str, str]], value: str
+    ) -> None:
+        select.set_options(options)
+        select.value = value
+        prompt = next((label for label, opt in options if opt == value), None)
+        if prompt is not None:
+            select.query_one("#label", Static).update(prompt)
+
+    def _set_compare_title(self, editor: PresetEditor, slot: int, name: str) -> None:
+        title_id = f"#{editor.id_prefix}title"
+        try:
+            editor.query_one(title_id, Label).update(
+                f"[bold][{slot}] {name}[/bold]  Ctrl+S saves this side"
+            )
+        except NoMatches:
+            return
+        editor.preset.name = name
 
     def _make_editor(self, side: str, slot: int) -> PresetEditor:
         preset = get_preset(self.store, self.model_name, self.quant, slot)
 
-        def on_save(name: str, params: dict, *, _slot: int = slot) -> None:
+        def on_save(name: str, params: dict, *, _slot: int = slot, _side: str = side) -> None:
             set_preset(self.store, self.model_name, self.quant, _slot, name, params)
             save_presets(self.presets_path, self.store)
             if self.on_saved:
@@ -191,6 +239,11 @@ class PresetCompareScreen(Screen[None]):
             self.app.notify(
                 f"Saved {self.model_name}/{self.quant} [{_slot}] {name}"
             )
+            try:
+                self._set_compare_title(self._editor(_side), _slot, name)
+            except NoMatches:
+                pass
+            self._refresh_slot_selects()
             self._refresh_diff()
 
         editor = PresetEditor(
@@ -209,7 +262,6 @@ class PresetCompareScreen(Screen[None]):
         return editor
 
     def compose(self) -> ComposeResult:
-        options = self._slot_options()
         with Vertical(id="compare-root"):
             yield Label(
                 f"[bold]Compare presets[/]  {self.model_name} / {self.quant}",
@@ -218,7 +270,7 @@ class PresetCompareScreen(Screen[None]):
             with Horizontal(id="compare-pickers"):
                 yield Label("Left")
                 yield Select(
-                    options,
+                    self._slot_options(exclude=self.right_slot),
                     value=str(self.left_slot),
                     id="cmp-left-slot",
                     compact=True,
@@ -226,7 +278,7 @@ class PresetCompareScreen(Screen[None]):
                 )
                 yield Label("Right")
                 yield Select(
-                    options,
+                    self._slot_options(exclude=self.left_slot),
                     value=str(self.right_slot),
                     id="cmp-right-slot",
                     compact=True,
@@ -263,8 +315,13 @@ class PresetCompareScreen(Screen[None]):
             field.add_class(f"diff-{kind}")
 
     def _refresh_diff(self) -> None:
-        left = self._editor("left")
-        right = self._editor("right")
+        if self._replacing:
+            return
+        try:
+            left = self._editor("left")
+            right = self._editor("right")
+        except NoMatches:
+            return
         left_params = self._current_params(left)
         right_params = self._current_params(right)
         left_name = left.name_input.value.strip() if left.name_input else left.preset.name
@@ -292,43 +349,65 @@ class PresetCompareScreen(Screen[None]):
             self._set_field_diff("right", param, right_kind)
 
     def _replace_side(self, side: str, slot: int) -> None:
-        self.run_worker(self._replace_side_async(side, slot), exclusive=True, group="replace-side")
+        self.run_worker(
+            self._replace_side_async(side, slot),
+            group=f"replace-side-{side}",
+        )
 
     async def _replace_side_async(self, side: str, slot: int) -> None:
-        old = self._editor(side)
-        if old.slot == slot:
-            return
-        container = self.query_one("#compare-editors", Horizontal)
-        other_side = "right" if side == "left" else "left"
-        other = self._editor(other_side)
-        new = self._make_editor(side, slot)
-        await old.remove()
-        if side == "left":
-            await container.mount(new, before=other)
-        else:
-            await container.mount(new, after=other)
+        async with self._replace_lock:
+            if side == "left":
+                self.left_slot = slot
+            else:
+                self.right_slot = slot
+            old = self._editor(side)
+            if old.slot == slot:
+                return
+            self._replacing = True
+            try:
+                container = self.query_one("#compare-editors", Horizontal)
+                other_side = "right" if side == "left" else "left"
+                other = self._editor(other_side)
+                new = self._make_editor(side, slot)
+                await old.remove()
+                if side == "left":
+                    await container.mount(new, before=other)
+                else:
+                    await container.mount(new, after=other)
+            finally:
+                self._replacing = False
+            self.call_after_refresh(self._after_side_replaced)
+
+    def _after_side_replaced(self) -> None:
+        self._refresh_slot_selects()
         self._refresh_diff()
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if self._syncing_selects:
+            return
         if event.select.id not in SLOT_SELECT_IDS:
             self._refresh_diff()
-            return
-        if self._replacing:
             return
         if event.value is Select.NULL or event.value is None:
             return
         slot = int(str(event.value))
+        other_slot = self.right_slot if event.select.id == "cmp-left-slot" else self.left_slot
+        if slot == other_slot:
+            self._refresh_slot_selects()
+            return
         if event.select.id == "cmp-left-slot":
             if slot == self.left_slot or self._editor("left").slot == slot:
                 self.left_slot = slot
                 return
             self.left_slot = slot
+            self._refresh_slot_selects()
             self._replace_side("left", slot)
             return
         if slot == self.right_slot or self._editor("right").slot == slot:
             self.right_slot = slot
             return
         self.right_slot = slot
+        self._refresh_slot_selects()
         self._replace_side("right", slot)
 
     def on_input_changed(self, event: Input.Changed) -> None:

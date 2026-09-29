@@ -383,8 +383,10 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
 
     def compose(self) -> ComposeResult:
         if self.compare_mode:
+            title_id = f"{self.id_prefix}title" if self.id_prefix else None
             yield Label(
-                f"[bold][{self.slot}] {self.preset.name}[/bold]  Ctrl+S saves this side"
+                f"[bold][{self.slot}] {self.preset.name}[/bold]  Ctrl+S saves this side",
+                id=title_id,
             )
         else:
             verb = "New" if self.is_new else "Edit"
@@ -397,6 +399,7 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         self.name_input = EditorInput(
             value=self.preset.name, placeholder="preset-name", id=name_id
         )
+        yield self.name_input
 
         for group_name, param_names in PRESET_PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
