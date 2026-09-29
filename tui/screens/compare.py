@@ -347,10 +347,9 @@ class PresetCompareScreen(ModalScreen[None]):
 
     async def _replace_side_async(self, side: str, slot: int) -> None:
         async with self._replace_lock:
-            if side == "left":
-                self.left_slot = slot
-            else:
-                self.right_slot = slot
+            current = self.left_slot if side == "left" else self.right_slot
+            if current != slot:
+                return
             try:
                 old = self._editor(side)
             except NoMatches:

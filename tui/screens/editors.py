@@ -474,6 +474,12 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
                     severity="warning",
                 )
                 params["ctx"] = self.max_ctx
+                ctx_widget = self.fields.get("ctx")
+                if ctx_widget is not None:
+                    ctx_widget.value = str(self.max_ctx)
+
+        if self.name_input:
+            self.name_input.value = name
 
         self.on_save_callback(name, params)
 

@@ -220,6 +220,58 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 4)
             self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
 
+    async def test_stale_replace_worker_keeps_latest_pair(self) -> None:
+        self._add_slot(3, "coding")
+        self._add_slot(4, "fast")
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            left = screen.query_one("#cmp-left-slot", Select)
+            right = screen.query_one("#cmp-right-slot", Select)
+            left.value = "3"
+            left.value = "4"
+            right.value = "3"
+            await pilot.pause(0.2)
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.3)
+            self.assertEqual(screen.left_slot, 4)
+            self.assertEqual(screen.right_slot, 3)
+            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 4)
+            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 3)
+            self.assertEqual(str(left.value), "4")
+            self.assertEqual(str(right.value), "3")
+
+    async def test_compare_save_writes_normalized_name_and_ctx(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            editor = screen.query_one("#cmp-left-editor", PresetEditor)
+            self.assertIsNotNone(editor.name_input)
+            editor.name_input.value = ""
+            screen.query_one("#cmp-left-input_ctx").value = "999999"
+            editor.save()
+            await pilot.pause(0.3)
+            self.assertEqual(editor.name_input.value, "slot-1")
+            self.assertEqual(screen.query_one("#cmp-left-input_ctx").value, "32768")
+            summary = str(screen.query_one("#diff-summary").content)
+            self.assertIn("slot-1", summary)
+            self.assertIn("32768", summary)
+            stored = get_preset(
+                load_presets(self.harness.paths.presets_json), MODEL_SLUG, QUANT, 1
+            )
+            self.assertEqual(stored.name, "slot-1")
+            self.assertEqual(stored.params["ctx"], 32768)
+
     async def test_compare_help_follows_field_focus(self) -> None:
         app = self.harness.app()
         async with app.run_test(size=(160, 50)) as pilot:
