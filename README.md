@@ -7,7 +7,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 - **Model registry** — Profiles in `models.json` (display name, port, Hugging Face source, quants). Runtime knobs live in `presets.json`.
 - **Interactive TUI** — Browse models and aliases, edit presets, download GGUFs from Hugging Face, and watch live decode speed plus per-process VRAM and RAM.
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
-- **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …).
+- **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …). The TUI can compare and independently edit two slots of one model/quant.
 - **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, queue downloads.
 - **One server** — A single tracked `llama-server`. Launch refuses if one is already running.
 - **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
@@ -109,6 +109,7 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`,
 | **L** / **S** | Launch / stop |
 | **E** | Edit profile, preset, or rename alias |
 | **P** | Quant picker (switch file or queue a download) |
+| **C** | Compare two presets of the current model/quant |
 | **N** / **D** | New / delete (preset or alias, depending on focus) |
 | **1–5** | Activate that preset (or pin it on an alias) |
 | **H** | Hugging Face Hub |
@@ -122,6 +123,8 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`,
 | **←/→** | On an alias: change target model |
 
 In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles field help from `param-help.conf`.
+
+**C** on a model or preset opens compare for that quant (needs two slots). **Ctrl+S** saves the focused side, **Esc** closes, **F2** still toggles field help.
 
 ### Hub and quant picker
 
