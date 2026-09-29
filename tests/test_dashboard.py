@@ -10,11 +10,11 @@ from rich.console import Console
 
 from tui.widgets.config import ConfigPanel
 from tui.widgets.health import generation_health, temperature_health, vram_health
-from tui.widgets.status import StatusHeader, StatusPanel
+from tui.widgets.status import StatusHeader, StatusPanel, format_generation_speed
+from tui.data.throughput_history import LastRequest, LiveThroughput, SPARKLINE_WIDTH
 from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo, write_pid_file
 from tui.data.stats import Metrics
-from tui.data.throughput_history import LastRequest, LiveThroughput
 
 
 def render_text(renderable) -> str:
@@ -47,8 +47,29 @@ class DashboardTests(unittest.TestCase):
         rendered = render_text(panel.render())
 
         self.assertIn("GENERATE", rendered)
-        self.assertIn("49.5 t/s generation", rendered)
+        self.assertIn("49.5 t/s FAST", rendered)
+        self.assertIn("20.2 ms/token", rendered)
+        self.assertNotIn("t/s generation", rendered)
         self.assertNotIn("59,916 prompt tokens", rendered)
+
+    def test_generation_speed_fits_sparkline_width(self) -> None:
+        cases = (
+            (10.0, "MODERATE", "100.0"),
+            (100.0, "FAST", "10.0"),
+            (49.5, "FAST", "20.2"),
+        )
+        for tps, label, ms_token in cases:
+            with self.subTest(tps=tps):
+                line = format_generation_speed(tps)
+                self.assertLessEqual(line.cell_len, SPARKLINE_WIDTH)
+                self.assertTrue(line.no_wrap)
+                output = io.StringIO()
+                Console(file=output, width=SPARKLINE_WIDTH, color_system=None).print(line)
+                rendered = output.getvalue()
+                self.assertEqual(rendered.count("\n"), 1)
+                self.assertIn(f"{tps:.1f} t/s {label}", rendered)
+                self.assertIn(f"{ms_token} ms/token", rendered)
+                self.assertNotIn("generation", rendered)
 
     def test_status_panel_shows_prefill_phase(self) -> None:
         panel = StatusPanel()

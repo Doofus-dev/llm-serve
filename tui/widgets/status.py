@@ -105,6 +105,21 @@ def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     return line
 
 
+def format_generation_speed(gen_tps: float, width: int = SPARKLINE_WIDTH) -> Text:
+    """One-line live rate: t/s, health, ms/token, sized to the sparkline column."""
+    gen_label, gen_style = generation_health(gen_tps)
+    rate = f"{gen_tps:.1f} t/s"
+    extras = f" {gen_label} {(1000.0 / gen_tps):.1f} ms/token" if gen_tps > 0 else ""
+    speed = Text()
+    speed.append(health_dot(gen_style))
+    speed.append(" ")
+    speed.append(rate, style=gen_style)
+    if extras:
+        speed.append(extras, style=gen_style)
+    speed.no_wrap = speed.cell_len <= width
+    return speed
+
+
 def fmt_server_status_line(info: PidInfo | None, uptime: float) -> str:
     """Live `port • PID • up` line shown in the top header."""
     if info and info.alive:
@@ -207,15 +222,7 @@ class StatusPanel(Static):
             if live.stage == "prefill":
                 throughput.append(render_prefill_progress(live))
             elif live.stage == "generating":
-                gen_label, gen_style = generation_health(gen)
-                speed = Text(no_wrap=True)
-                speed.append(health_dot(gen_style))
-                speed.append(" ")
-                speed.append(f"{gen:.1f} t/s ", style=gen_style)
-                speed.append("generation", style=DIM_STYLE)
-                if gen > 0:
-                    speed.append(f"  {gen_label}  {(1000.0 / gen):.1f} ms/token", style=gen_style)
-                throughput.append(speed)
+                throughput.append(format_generation_speed(gen))
             elif live.stage == "queued":
                 throughput.append(Text("waiting for a free slot", style=WARN_STYLE))
             else:
