@@ -11,15 +11,29 @@ from typing import Literal
 from rich.text import Text
 
 from tui.data.stats import Metrics
-from tui.theme import ACCENT, ACCENT_STYLE, OK, OK_STYLE, WARN, WARN_STYLE, ERR, ERR_STYLE
+from tui.theme import (
+    ACCENT,
+    ACCENT_STYLE,
+    DIM_STYLE,
+    ERR,
+    ERR_STYLE,
+    OK_STYLE,
+    WARN,
+    WARN_STYLE,
+)
 
-# Unicode block steps for a btop-style single-line bar chart.
+# Unicode block steps for the sparkline line and optional fill row.
 _SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+_FILL_BLOCKS = " ░▒▓█"
 _PREFILL_BLOCKS = "░█"
 
 # Fixed display width — must fit the THROUGHPUT column without wrapping.
 SPARKLINE_WIDTH = 40
 PREFILL_BAR_WIDTH = 12
+# Visible samples before the sparkline grows a fill row under the line.
+_AREA_MIN_SAMPLES = 20
+_TREND_UP = 1.10
+_TREND_DOWN = 0.90
 
 ThroughputSource = Literal["slots", "metrics_delta", "metrics_gauge", "idle"]
 RequestStage = Literal["idle", "queued", "prefill", "generating"]
@@ -188,6 +202,24 @@ ROLLING_AVG_SAMPLES = 16
 _SPIKE_MULTIPLE = 2.5
 
 
+def _active_samples(samples: list[float]) -> list[float]:
+    return [sample for sample in samples if sample > 0]
+
+
+def _spike_filtered(samples: list[float]) -> list[float]:
+    """Drop idle zeros and one-tick decode-start spikes."""
+    active = _active_samples(samples)
+    if not active:
+        return []
+    median = statistics.median(sorted(active))
+    if median <= 0:
+        return active
+    typical = [sample for sample in active if sample <= median * _SPIKE_MULTIPLE]
+    if len(typical) >= max(1, len(active) // 2):
+        return typical
+    return active
+
+
 def rolling_gen_average(
     history: list[float] | None,
     *,
@@ -196,16 +228,12 @@ def rolling_gen_average(
     """Mean of the latest generation samples, ignoring idle zeros and spikes."""
     if not history:
         return None
-    active = [sample for sample in history if sample > 0]
+    active = _active_samples(history)
     if len(active) < min_samples:
         return None
-    window = active[-ROLLING_AVG_SAMPLES:]
-    ordered = sorted(window)
-    median = statistics.median(ordered)
-    if median > 0:
-        typical = [sample for sample in window if sample <= median * _SPIKE_MULTIPLE]
-        if len(typical) >= max(1, len(window) // 2):
-            window = typical
+    window = _spike_filtered(active[-ROLLING_AVG_SAMPLES:])
+    if not window:
+        return None
     return sum(window) / len(window)
 
 
@@ -439,16 +467,86 @@ class ThroughputHistory:
         return len(self._samples)
 
 
-def format_avg_line(samples: list[float], poll_interval: float) -> Text | None:
-    """Format the rolling average line for the status panel."""
-    avg = rolling_gen_average(samples)
-    if avg is None:
+def sparkline_trend(samples: list[float], *, width: int = SPARKLINE_WIDTH) -> str | None:
+    """Compare the latest visible sample to the prior window: rising, falling, or steady."""
+    if width <= 0:
+        width = SPARKLINE_WIDTH
+    visible = _spike_filtered(samples[-width:])
+    if len(visible) < 4:
         return None
-    active = sum(1 for sample in samples if sample > 0)
-    window_s = min(active, ROLLING_AVG_SAMPLES) * poll_interval
+    last = visible[-1]
+    prior = visible[:-1]
+    base = sum(prior[-ROLLING_AVG_SAMPLES:]) / len(prior[-ROLLING_AVG_SAMPLES:])
+    if base <= 0:
+        return None
+    if last > base * _TREND_UP:
+        return "▲"
+    if last < base * _TREND_DOWN:
+        return "▼"
+    return "→"
+
+
+def _append_fitted_fields(line: Text, fields: list[tuple[str, str]], width: int) -> None:
+    used = 0
+    started = False
+    for text, style in fields:
+        piece = text
+        if len(piece) > width:
+            piece = piece[: width - 1] + "…" if width > 1 else piece[:width]
+        gap = 2 if started else 0
+        if started and used + gap + len(piece) > width:
+            line.append("\n")
+            used = 0
+            gap = 0
+            started = False
+        if gap:
+            line.append("  ")
+        line.append(piece, style=style)
+        used += gap + len(piece)
+        started = True
+
+
+def format_avg_line(
+    samples: list[float],
+    poll_interval: float,
+    width: int = SPARKLINE_WIDTH,
+) -> Text | None:
+    """Rolling avg on one line; peak/min/trend on a sparkline-width line below."""
+    active = _active_samples(samples)
+    if not active:
+        return None
+    if width <= 0:
+        width = SPARKLINE_WIDTH
+    avg = rolling_gen_average(samples)
     line = Text()
-    line.append(f"avg {avg:.1f} tok/s", style=ACCENT_STYLE)
-    line.append(f"  ({window_s:.0f}s rolling)", style="dim")
+    if avg is None:
+        _append_fitted_fields(line, [("avg —", DIM_STYLE)], width)
+    else:
+        window_s = min(len(active), ROLLING_AVG_SAMPLES) * poll_interval
+        _append_fitted_fields(
+            line,
+            [
+                (f"avg {avg:.1f} tok/s", ACCENT_STYLE),
+                (f"({window_s:.0f}s rolling)", DIM_STYLE),
+            ],
+            width,
+        )
+    visible = _spike_filtered(samples[-width:])
+    if not visible:
+        return line
+    stats: list[tuple[str, str]] = [
+        (f"peak {max(visible):.1f}", DIM_STYLE),
+        (f"min {min(visible):.1f}", DIM_STYLE),
+    ]
+    trend = sparkline_trend(samples, width=width)
+    if trend == "▲":
+        stats.append(("▲", OK_STYLE))
+    elif trend == "▼":
+        stats.append(("▼", ERR_STYLE))
+    elif trend == "→":
+        stats.append(("→", DIM_STYLE))
+    line.append("\n")
+    _append_fitted_fields(line, stats, width)
     return line
 
 
@@ -550,12 +648,38 @@ def render_prefill_progress(live: LiveThroughput, width: int = PREFILL_BAR_WIDTH
 
 def _bar_style(tps: float) -> str:
     if tps <= 0:
-        return "dim"
+        return DIM_STYLE
     if tps >= 20:
         return OK_STYLE
     if tps >= 5:
         return WARN
     return ERR
+
+
+def _spark_char(frac: float) -> str:
+    if frac <= 0:
+        return " "
+    levels = len(_SPARK_BLOCKS) - 1
+    level = min(levels, max(0, round(frac * levels)))
+    return _SPARK_BLOCKS[level]
+
+
+def _fill_char(frac: float) -> str:
+    if frac <= 0:
+        return " "
+    levels = len(_FILL_BLOCKS) - 1
+    level = min(levels, max(1, round(frac * levels)))
+    return _FILL_BLOCKS[level]
+
+
+def _axis_row(width: int) -> str:
+    if width <= 1:
+        return "─" * width
+    return "└" + "─" * (width - 2) + "┘"
+
+
+def _pad_left(view: list[float], width: int) -> list[float | None]:
+    return [None] * (width - len(view)) + list(view)
 
 
 def render_tps_sparkline(
@@ -565,52 +689,42 @@ def render_tps_sparkline(
     """Render recent tok/s as a fixed-width, right-aligned sparkline.
 
     New samples appear on the right; once full, older samples scroll off the left
-    (btop-style). Width is always exactly ``width`` characters so the line never
-    wraps or shifts the layout. A baseline axis renders below the bars.
+    (btop-style). Each plot row is always exactly ``width`` characters so the
+    line never wraps or shifts the layout. A baseline axis renders below the bars.
 
-    When the visible history has 20 or more samples, the sparkline is rendered
-    as a filled area chart: the line row on top, a faint fill row below it, and
-    the baseline axis on the bottom. This makes the trend read better at a
-    glance than a single line.
+    When the visible history has 20 or more samples, a faint fill row sits
+    between the line and the axis (one cell per sample, never wider than
+    ``width``).
     """
     if width <= 0:
         width = SPARKLINE_WIDTH
 
+    line = Text(no_wrap=True)
     if not samples:
-        line = Text(no_wrap=True)
-        line.append("▁" * width, style="dim")
+        line.append("▁" * width, style=DIM_STYLE)
         line.append("\n")
-        line.append("─" * width, style="dim")
+        line.append(_axis_row(width), style=DIM_STYLE)
         return line
 
     view = samples[-width:]
     scale = max(max(view), 1.0)
-    levels = len(_SPARK_BLOCKS) - 1
+    cells = _pad_left(view, width)
+    fill = len(view) >= _AREA_MIN_SAMPLES
 
-    line = Text(no_wrap=True)
-    for _ in range(width - len(view)):
-        line.append(" ", style="dim")
-    for tps in view:
-        if tps <= 0:
-            line.append(" ", style="dim")
-            continue
-        level = min(levels, round((tps / scale) * levels))
-        line.append(_SPARK_BLOCKS[level], style=_bar_style(tps))
+    for tps in cells:
+        if tps is None or tps <= 0:
+            line.append(" ", style=DIM_STYLE)
+        else:
+            line.append(_spark_char(tps / scale), style=_bar_style(tps))
 
-    if len(view) >= 20:
-        # Filled area chart: faint fill below the line, baseline axis below.
+    if fill:
         line.append("\n")
-        for _ in range(width - len(view)):
-            line.append(" ", style="dim")
-        for tps in view:
-            if tps <= 0:
-                line.append(" ", style="dim")
-                continue
-            level = min(levels, round((tps / scale) * levels))
-            line.append("▒" * max(1, level), style="cyan")
-        line.append("\n")
-        line.append("─" * width, style="dim")
-    else:
-        line.append("\n")
-        line.append("─" * width, style="dim")
+        for tps in cells:
+            if tps is None or tps <= 0:
+                line.append(" ", style=DIM_STYLE)
+            else:
+                line.append(_fill_char(tps / scale), style=f"dim {ACCENT}")
+
+    line.append("\n")
+    line.append(_axis_row(width), style=DIM_STYLE)
     return line

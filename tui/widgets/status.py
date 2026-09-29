@@ -25,7 +25,7 @@ from tui.data.throughput_history import (
     render_tps_sparkline,
 )
 from tui.paths import METRICS_POLL_INTERVAL
-from tui.theme import ACCENT, ACCENT_STYLE, DIM_STYLE, OK_STYLE, TEXT_MUTED, WARN_STYLE
+from tui.theme import ACCENT, ACCENT_STYLE, BOLD_STYLE, DIM_STYLE, ERR_STYLE, OK_STYLE, TEXT_MUTED, WARN_STYLE
 from tui.widgets.health import (
     fmt_uptime,
     generation_health,
@@ -105,6 +105,21 @@ def render_vram_gauge(g: GPUStats, label: str, style: str) -> Text:
     return line
 
 
+def format_generation_speed(gen_tps: float, width: int = SPARKLINE_WIDTH) -> Text:
+    """One-line live rate: t/s, health, ms/token, sized to the sparkline column."""
+    gen_label, gen_style = generation_health(gen_tps)
+    rate = f"{gen_tps:.1f} t/s"
+    extras = f" {gen_label} {(1000.0 / gen_tps):.1f} ms/token" if gen_tps > 0 else ""
+    speed = Text()
+    speed.append(health_dot(gen_style))
+    speed.append(" ")
+    speed.append(rate, style=gen_style)
+    if extras:
+        speed.append(extras, style=gen_style)
+    speed.no_wrap = speed.cell_len <= width
+    return speed
+
+
 def fmt_server_status_line(info: PidInfo | None, uptime: float) -> str:
     """Live `port • PID • up` line shown in the top header."""
     if info and info.alive:
@@ -169,17 +184,17 @@ class StatusPanel(Static):
             if info.remote:
                 state.append("  REMOTE", style=ACCENT_STYLE)
         else:
-            state = Text("○ NOT RUNNING", style="bold red")
-            state.append("  Press L to launch the selected model", style="dim")
+            state = Text("○ NOT RUNNING", style=ERR_STYLE)
+            state.append("  Press L to launch the selected model", style=DIM_STYLE)
 
-        launch_flag = Text("NEXT LAUNCH ", style="dim")
+        launch_flag = Text("NEXT LAUNCH ", style=DIM_STYLE)
         if self.next_remote:
             launch_flag.append("[REMOTE]", style=ACCENT_STYLE)
         else:
             launch_flag.append("[LOCAL]", style=OK_STYLE)
         launch_flag.append(f"  [LOG {log_verbosity_label(self.next_log_verbosity)}]", style=ACCENT_STYLE)
 
-        header = Table.grid(expand=True)
+        header = Table.grid(expand=True, padding=(0, 0))
         header.add_column(ratio=1)
         header.add_column(justify="right")
         header.add_row(state, launch_flag)
@@ -193,9 +208,9 @@ class StatusPanel(Static):
                 if slot:
                     slot_text = f"slot {slot}"
             if slot_text:
-                renderables.append(Text(f"{family}  •  {slot_text}", style=DIM_STYLE))
+                renderables.append(Text(f"{family}  •  {slot_text}", style=TEXT_MUTED))
             else:
-                renderables.append(Text(family, style=DIM_STYLE))
+                renderables.append(Text(family, style=TEXT_MUTED))
 
         throughput: list[Text] = []
         m = self.metrics
@@ -207,47 +222,39 @@ class StatusPanel(Static):
             if live.stage == "prefill":
                 throughput.append(render_prefill_progress(live))
             elif live.stage == "generating":
-                gen_label, gen_style = generation_health(gen)
-                speed = Text()
-                speed.append(health_dot(gen_style))
-                speed.append(" ")
-                speed.append(f"{gen:.1f} t/s ", style=gen_style)
-                speed.append("generation", style="dim")
-                if gen > 0:
-                    speed.append(f"  {gen_label}  {(1000.0 / gen):.1f} ms/token", style=gen_style)
-                throughput.append(speed)
+                throughput.append(format_generation_speed(gen))
             elif live.stage == "queued":
                 throughput.append(Text("waiting for a free slot", style=WARN_STYLE))
             else:
                 recap = format_last_request(live.last_request)
-                throughput.append(recap if recap is not None else Text("idle", style="dim"))
+                throughput.append(recap if recap is not None else Text("idle", style=DIM_STYLE))
             throughput.append(render_tps_sparkline(history, width=SPARKLINE_WIDTH))
             avg_line = format_avg_line(history, METRICS_POLL_INTERVAL)
             if avg_line is None:
-                avg_line = Text("avg —", style="dim")
+                avg_line = Text("avg —", style=DIM_STYLE)
                 if live.stage == "prefill":
-                    avg_line.append("  (waiting on generate)", style="dim")
+                    avg_line.append("  (waiting on generate)", style=DIM_STYLE)
             throughput.append(avg_line)
         else:
             empty = Text(justify="center")
-            empty.append("○ ", style="dim")
-            empty.append("Metrics unavailable", style="dim")
+            empty.append("○ ", style=DIM_STYLE)
+            empty.append("Metrics unavailable", style=TEXT_MUTED)
             empty.append("\n")
-            empty.append("Press L to launch the selected model", style="bold dim")
+            empty.append("Press L to launch the selected model", style=DIM_STYLE)
             throughput.append(empty)
         gpu_lines: list = []
         g = self.gpu
         if g and g.available:
-            title = Text(g.name, style="bold")
+            title = Text(g.name, style=BOLD_STYLE)
             title.append(
                 f"  {fmt_mem_mb(g.vram_used_mb)} / {fmt_mem_mb(g.vram_total_mb)} total",
-                style="dim",
+                style=DIM_STYLE,
             )
             gpu_lines.append(title)
             vram_label, vram_style = vram_health(g.vram_pct)
             gpu_lines.append(render_vram_gauge(g, vram_label, vram_style))
 
-            thermals = Text(f"{g.utilization_pct:.0f}% util  •  ", no_wrap=True)
+            thermals = Text(f"{g.utilization_pct:.0f}% util  •  ", no_wrap=True, style=TEXT_MUTED)
             if g.temp_c > 0:
                 temp_label, temp_style = temperature_health(g.temp_c)
                 thermals.append(health_dot(temp_style))
@@ -255,23 +262,23 @@ class StatusPanel(Static):
                 thermals.append(f"{g.temp_c:.0f}°C ", style=temp_style)
                 thermals.append(temp_label, style=temp_style)
             else:
-                thermals.append("temp n/a", style="dim")
+                thermals.append("temp n/a", style=DIM_STYLE)
             gpu_lines.append(thermals)
             if g.unified and g.dedicated_total_mb:
                 gpu_lines.append(
                     Text(
                         f"BAR {fmt_mem_mb(g.dedicated_used_mb)} / {fmt_mem_mb(g.dedicated_total_mb)}",
-                        style="dim",
+                        style=DIM_STYLE,
                         no_wrap=True,
                     )
                 )
             if g.processes:
                 gpu_lines.append(render_process_rows(g.processes))
             else:
-                gpu_lines.append(Text("no GPU processes", style="dim"))
+                gpu_lines.append(Text("no GPU processes", style=DIM_STYLE))
         else:
             gpu_empty = Text(justify="center")
-            gpu_empty.append("○ GPU stats unavailable", style="dim")
+            gpu_empty.append("○ GPU stats unavailable", style=TEXT_MUTED)
             gpu_lines.append(gpu_empty)
 
         telemetry = Table(
@@ -279,9 +286,13 @@ class StatusPanel(Static):
             expand=True,
             padding=(0, 1),
             show_edge=False,
+            pad_edge=False,
+            collapse_padding=True,
+            header_style=DIM_STYLE,
+            border_style=DIM_STYLE,
         )
-        telemetry.add_column("THROUGHPUT", ratio=1, style="white")
-        telemetry.add_column("GPU", ratio=1, style="white")
+        telemetry.add_column("THROUGHPUT", ratio=1)
+        telemetry.add_column("GPU", ratio=1)
         telemetry.add_row(Group(*throughput), Group(*gpu_lines))
         renderables.append(telemetry)
         return Group(*renderables)
