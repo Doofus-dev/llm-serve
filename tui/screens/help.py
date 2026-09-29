@@ -94,6 +94,7 @@ class HelpScreen(ModalScreen[None]):
                     "  E          Edit profile / preset\n"
                     "  P          Pick quantization\n"
                     "  N          New preset\n"
+                    "  C          Compare two presets\n"
                     "  D          Delete",
                     classes="help-row",
                 )

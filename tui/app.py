@@ -41,6 +41,7 @@ from tui.data.presets import (
     delete_preset,
     get_active_slot,
     get_preset,
+    list_presets_for_quant,
     load_presets,
     merge_identity_and_preset,
     next_free_slot,
@@ -77,6 +78,7 @@ from tui.screens.editors import (
 )
 from tui.screens.hub import HubScreen
 from tui.screens.help import HelpScreen
+from tui.screens.compare import PresetCompareScreen
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
@@ -832,6 +834,9 @@ class LLMServeApp(App):
         return self._focused_param
 
     def action_toggle_param_help(self) -> None:
+        if isinstance(self.screen, PresetCompareScreen):
+            self.screen.action_toggle_param_help()
+            return
         if not self._editor_mode or not self._help_panel:
             return
         self._help_visible = not self._help_visible
@@ -1193,6 +1198,47 @@ class LLMServeApp(App):
         set_active_preset(self.preset_store, model_name, quant, slot)
         save_presets(self.paths.presets_json, self.preset_store)
         self._reload_registry()
+
+    def action_compare_presets(self) -> None:
+        if self._editor_mode:
+            self.notify("Close the editor first", severity="warning")
+            return
+        model_name = self._selected_model()
+        if not model_name or model_name not in self.registry.models:
+            self.notify("Select a model or preset first", severity="warning")
+            return
+        quant = self._model_active_quant(model_name)
+        presets = list_presets_for_quant(self.preset_store, model_name, quant)
+        slots = sorted(presets)
+        if len(slots) < 2:
+            self.notify(
+                f"Need at least two presets on {model_name}/{quant} to compare",
+                severity="warning",
+            )
+            return
+        left_slot, right_slot = slots[0], slots[1]
+        data = self._selected_data()
+        if data and data[0] == "preset" and data[3] in presets:
+            left_slot = data[3]
+            right_slot = next(slot for slot in slots if slot != left_slot)
+        identity = self.registry.models[model_name].params
+
+        def on_saved() -> None:
+            self._reload_registry()
+
+        self.push_screen(
+            PresetCompareScreen(
+                model_name=model_name,
+                quant=quant,
+                identity=identity,
+                store=self.preset_store,
+                presets_path=self.paths.presets_json,
+                models_dir=self.paths.models_dir,
+                left_slot=left_slot,
+                right_slot=right_slot,
+                on_saved=on_saved,
+            )
+        )
 
     def action_open_hub(self) -> None:
         if self._editor_mode:
