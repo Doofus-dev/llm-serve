@@ -20,7 +20,7 @@ from tui.data.presets import (
     save_presets,
     set_preset,
 )
-from tui.screens.editors import ParamHelpPanel, PresetEditor
+from tui.screens.editors import ParamFocused, ParamHelpPanel, PresetEditor
 from tui.theme import ERR, OK, WARN
 from tui.widgets.action_bar import ActionBar
 
@@ -171,7 +171,6 @@ class PresetCompareScreen(ModalScreen[None]):
         self.right_slot = right_slot
         self.on_saved = on_saved
         self._help_visible = False
-        self._syncing_selects = False
         self._replacing = False
         self._replace_lock = asyncio.Lock()
 
@@ -191,21 +190,13 @@ class PresetCompareScreen(ModalScreen[None]):
             right = self.query_one("#cmp-right-slot", Select)
         except NoMatches:
             return
-        self._syncing_selects = True
-        try:
+        with self.prevent(Select.Changed):
             self._apply_select_options(
                 left, self._slot_options(exclude=self.right_slot), str(self.left_slot)
             )
             self._apply_select_options(
                 right, self._slot_options(exclude=self.left_slot), str(self.right_slot)
             )
-        except Exception:
-            self._syncing_selects = False
-            raise
-        self.call_after_refresh(self._finish_syncing_selects)
-
-    def _finish_syncing_selects(self) -> None:
-        self._syncing_selects = False
 
     def _apply_select_options(
         self, select: Select, options: list[tuple[str, str]], value: str
@@ -360,8 +351,11 @@ class PresetCompareScreen(ModalScreen[None]):
                 self.left_slot = slot
             else:
                 self.right_slot = slot
-            old = self._editor(side)
-            if old.slot == slot:
+            try:
+                old = self._editor(side)
+            except NoMatches:
+                old = None
+            if old is not None and old.slot == slot:
                 return
             self._replacing = True
             try:
@@ -369,11 +363,14 @@ class PresetCompareScreen(ModalScreen[None]):
                 other_side = "right" if side == "left" else "left"
                 other = self._editor(other_side)
                 new = self._make_editor(side, slot)
-                await old.remove()
+                if old is not None:
+                    await old.remove()
                 if side == "left":
                     await container.mount(new, before=other)
                 else:
                     await container.mount(new, after=other)
+            except NoMatches:
+                return
             finally:
                 self._replacing = False
             self.call_after_refresh(self._after_side_replaced)
@@ -383,8 +380,6 @@ class PresetCompareScreen(ModalScreen[None]):
         self._refresh_diff()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if self._syncing_selects:
-            return
         if event.select.id not in SLOT_SELECT_IDS:
             self._refresh_diff()
             return
@@ -396,15 +391,13 @@ class PresetCompareScreen(ModalScreen[None]):
             self._refresh_slot_selects()
             return
         if event.select.id == "cmp-left-slot":
-            if slot == self.left_slot or self._editor("left").slot == slot:
-                self.left_slot = slot
+            if slot == self.left_slot:
                 return
             self.left_slot = slot
             self._refresh_slot_selects()
             self._replace_side("left", slot)
             return
-        if slot == self.right_slot or self._editor("right").slot == slot:
-            self.right_slot = slot
+        if slot == self.right_slot:
             return
         self.right_slot = slot
         self._refresh_slot_selects()
@@ -433,9 +426,13 @@ class PresetCompareScreen(ModalScreen[None]):
         self._help_visible = not self._help_visible
         if self._help_visible:
             self.add_class("help-open")
-            panel = self.query_one("#compare-param-help", ParamHelpPanel)
             focused = self.focused
             param = getattr(focused, "param_name", None)
-            panel.show_param(param)
+            self.query_one("#compare-param-help", ParamHelpPanel).show_param(param)
         else:
             self.remove_class("help-open")
+
+    def on_param_focused(self, event: ParamFocused) -> None:
+        if not self._help_visible:
+            return
+        self.query_one("#compare-param-help", ParamHelpPanel).show_param(event.param)

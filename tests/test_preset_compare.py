@@ -200,6 +200,46 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(stored.name, "renamed-default")
 
+    async def test_compare_applies_latest_slot_during_replace(self) -> None:
+        self._add_slot(3, "coding")
+        self._add_slot(4, "fast")
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            left = screen.query_one("#cmp-left-slot", Select)
+            left.value = "3"
+            left.value = "4"
+            await pilot.pause(0.2)
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.3)
+            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 4)
+            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
+
+    async def test_compare_help_follows_field_focus(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app.query_one(ModelNav).focus()
+            app.action_compare_presets()
+            await pilot.pause(0.5)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetCompareScreen)
+            screen.query_one("#cmp-left-input_ctx").focus()
+            await pilot.pause(0.2)
+            screen.action_toggle_param_help()
+            help_text = str(screen.query_one("#compare-param-help #param-help-text").content)
+            self.assertIn("ctx", help_text)
+            screen.query_one("#cmp-left-input_gpu_layers").focus()
+            await pilot.pause(0.2)
+            help_text = str(screen.query_one("#compare-param-help #param-help-text").content)
+            self.assertIn("gpu_layers", help_text)
+            self.assertNotIn("ctx", help_text.split("\n")[0])
+
 
 if __name__ == "__main__":
     unittest.main()
