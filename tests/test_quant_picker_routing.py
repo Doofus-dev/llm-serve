@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from tui.data.hf import HubFile
 from tui.data.presets import get_active_slot, set_preset
-from tui.screens.editors import EditAliasDialog
+from tui.screens.editors import EditAliasDialog, ParamHelpPanel
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.widgets.nav import AliasNav, ModelNav
 from tests.support import Harness
@@ -237,6 +237,23 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertFalse(app._editor_mode)
+
+    async def test_f2_help_appears_under_focused_preset_field(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(120, 45)) as pilot:
+            model_name = next(iter(app.registry.models))
+            quant = app._model_active_quant(model_name)
+            app._edit_preset(model_name, quant, 1)
+            await pilot.pause()
+            self.assertTrue(app._editor_mode)
+            app.query_one("#input_ctx").focus()
+            await pilot.pause()
+            app.action_toggle_param_help()
+            await pilot.pause()
+            help_panel = app.query_one("#help_ctx", ParamHelpPanel)
+            self.assertIn("visible", help_panel.classes)
+            self.assertIn("ctx", str(help_panel.content))
+            self.assertNotIn("visible", app.query_one("#param-help", ParamHelpPanel).classes)
 
     async def test_launch_from_pinned_alias_preserves_alias_name(self) -> None:
         app = self.harness.app()

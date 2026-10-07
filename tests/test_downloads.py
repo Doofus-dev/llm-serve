@@ -17,7 +17,13 @@ def _job(filename: str, author: str = "author") -> DownloadJob:
         local_dir=Path("/tmp") / author,
         relative_file=f"{author}/{filename}",
     )
-    return DownloadJob(plan=plan, filename=filename, expected_bytes=1_000)
+    return DownloadJob(
+        plan=plan,
+        filename=filename,
+        expected_bytes=1_000,
+        display="Qwen 3.8",
+        model_slug="qwen38",
+    )
 
 
 class DownloadStateTests(unittest.TestCase):
@@ -31,48 +37,56 @@ class DownloadStateTests(unittest.TestCase):
 
     def test_status_line_available_immediately(self) -> None:
         mgr = DownloadManager()
-        mgr.state = DownloadState(
-            running=True,
-            filename="model.gguf",
-            expected_bytes=1_000_000,
-        )
-        mgr.state.status_line = mgr.format_status()
-        self.assertIn("Downloading model.gguf", mgr.state.status_line)
-        self.assertIn("0%", mgr.state.status_line)
+        mgr.enqueue(_job("model.gguf"))
+        line = mgr.state.status_line
+        self.assertIn("Downloading", line)
+        self.assertIn("model.gguf", line)
+        self.assertIn("Qwen 3.8", line)
 
-    def test_first_enqueue_starts_and_second_queues(self) -> None:
+    def test_each_enqueue_starts_immediately(self) -> None:
         mgr = DownloadManager()
         first = _job("a.gguf")
         second = _job("b.gguf")
         self.assertEqual(mgr.enqueue(first), "started")
-        self.assertEqual(mgr.enqueue(second), "queued")
-        self.assertEqual(mgr.queue_size, 2)
+        self.assertEqual(mgr.enqueue(second), "started")
+        self.assertEqual(mgr.active_count, 2)
         self.assertTrue(mgr.busy)
-        popped = mgr.pop_next()
-        self.assertIs(popped, first)
-        self.assertEqual(mgr.queue_size, 1)
-        self.assertEqual(mgr.state.queued, ("b.gguf",))
+        self.assertTrue(mgr.has_filename("a.gguf"))
+        self.assertTrue(mgr.has_filename("b.gguf"))
 
     def test_duplicate_file_is_rejected(self) -> None:
         mgr = DownloadManager()
         self.assertEqual(mgr.enqueue(_job("a.gguf")), "started")
         self.assertEqual(mgr.enqueue(_job("a.gguf")), "duplicate")
-        self.assertEqual(mgr.queue_size, 1)
+        self.assertEqual(mgr.active_count, 1)
 
-    def test_status_mentions_queued_files(self) -> None:
+    def test_status_lists_every_active_file(self) -> None:
         mgr = DownloadManager()
         mgr.enqueue(_job("a.gguf"))
-        mgr.pop_next()
-        mgr.state.running = True
-        mgr.state.filename = "a.gguf"
-        mgr.state.expected_bytes = 1_000_000
         mgr.enqueue(_job("b.gguf"))
-        mgr.enqueue(_job("c.gguf"))
         line = mgr.format_status()
-        self.assertIn("Downloading a.gguf", line)
-        self.assertIn("2 queued", line)
+        self.assertIn("2 files", line)
+        self.assertIn("a.gguf", line)
+        self.assertIn("b.gguf", line)
+
+    def test_progress_for_matches_filename(self) -> None:
+        mgr = DownloadManager()
+        mgr.enqueue(_job("Qwen3.8-27B-Q3_K_S.gguf"))
+        st = mgr.state
+        self.assertTrue(st.is_transferring("Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertFalse(st.is_transferring("other.gguf"))
+        self.assertIsNotNone(st.progress_for("Qwen3.8-27B-Q3_K_S.gguf"))
+
+    def test_unsubscribe_stops_notifications(self) -> None:
+        mgr = DownloadManager()
+        seen: list[int] = []
+        listener = lambda state: seen.append(state.active_count)
+        mgr.subscribe(listener)
+        mgr.enqueue(_job("a.gguf"))
+        mgr.unsubscribe(listener)
+        mgr.enqueue(_job("b.gguf"))
+        self.assertEqual(seen, [1])
 
 
 if __name__ == "__main__":
     unittest.main()
-

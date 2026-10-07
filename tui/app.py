@@ -118,7 +118,6 @@ class LLMServeApp(App):
         self._launch_time: float | None = None
         self._editor_mode: bool = False
         self._editor_widget: ProfileEditor | PresetEditor | None = None
-        self._help_panel: ParamHelpPanel | None = None
         self._help_visible: bool = False
         self._focused_param: str | None = None
         self._gen_history = ThroughputHistory(max_samples=METRICS_HISTORY_SAMPLES)
@@ -255,18 +254,14 @@ class LLMServeApp(App):
 
         self.call_later(apply)
 
-    @work
-    async def _process_download_queue(self) -> None:
-        while True:
-            job = self.download_manager.pop_next()
-            if job is None:
-                return
-            ok, message = await self.download_manager.run(job)
-            if ok:
-                if job.on_success:
-                    job.on_success()
-            elif job.on_error:
-                job.on_error(message)
+    @work(exclusive=False)
+    async def _run_download_job(self, job: DownloadJob) -> None:
+        ok, message = await self.download_manager.run(job)
+        if ok:
+            if job.on_success:
+                job.on_success()
+        elif job.on_error:
+            job.on_error(message)
 
     def _model_active_quant(self, model_name: str) -> str:
         cfg = self.registry.models.get(model_name)
@@ -333,6 +328,7 @@ class LLMServeApp(App):
             plan=plan,
             filename=filename,
             expected_bytes=expected_bytes,
+            model_slug=clone_from,
             clone_from=clone_from,
             display=display,
             on_success=_after_download,
@@ -340,14 +336,12 @@ class LLMServeApp(App):
         )
         result = self.download_manager.enqueue(job)
         if result == "duplicate":
-            self.notify(f"{filename} is already downloading or queued", severity="warning")
+            self.notify(f"{filename} is already downloading", severity="warning")
             return False
-        if result == "queued":
-            waiting = self.download_manager.queue_size
-            self.notify(f"Queued {filename} ({waiting} waiting)", timeout=4)
-        else:
-            self.notify(f"Downloading {filename}…", timeout=4)
-        self._process_download_queue()
+        n = self.download_manager.active_count
+        extra = f" ({n} in progress)" if n > 1 else ""
+        self.notify(f"Downloading {filename}{extra}…", timeout=4)
+        self._run_download_job(job)
         return True
 
     def action_pick_quant(self) -> None:
@@ -397,6 +391,7 @@ class LLMServeApp(App):
                 baselines_path=self.paths.baselines_json,
                 preferred_ctx=preferred_ctx,
                 on_download=on_download,
+                download_manager=self.download_manager,
             ),
             handle,
         )
@@ -803,24 +798,31 @@ class LLMServeApp(App):
 
     def on_param_focused(self, event: ParamFocused) -> None:
         self._focused_param = event.param
-        if self._help_panel and self._help_visible:
-            self._help_panel.show_param(event.param)
+        self._sync_param_help()
+
+    def _sync_param_help(self) -> None:
+        editor = self._editor_widget
+        if editor is None:
+            return
+        ParamHelpPanel.apply_visibility(
+            editor,
+            visible=self._help_visible,
+            param=self._focused_param if self._help_visible else None,
+            near=self.focused,
+        )
 
     def _enter_param_editor(self, editor: ProfileEditor | PresetEditor) -> None:
-        """Show model/preset editor with optional F2 help panel."""
+        """Show model/preset editor; F2 help sits under the focused field."""
         self.query_one("#status").display = False
         self.query_one("#config").display = False
         self.query_one("#logs").display = False
 
         editor.id = "editor-scroll"
-        help_panel = ParamHelpPanel(id="param-help")
 
         right = self.query_one("#right")
         right.mount(editor)
-        right.mount(help_panel)
 
         self._editor_widget = editor
-        self._help_panel = help_panel
         self._help_visible = False
         self._focused_param = None
         self._editor_mode = True
@@ -837,18 +839,14 @@ class LLMServeApp(App):
         if isinstance(self.screen, PresetCompareScreen):
             self.screen.action_toggle_param_help()
             return
-        if not self._editor_mode or not self._help_panel:
+        if not self._editor_mode or not self._editor_widget:
             return
         self._help_visible = not self._help_visible
-        right = self.query_one("#right")
         if self._help_visible:
-            right.add_class("help-open")
             param = self._current_focused_param()
             if param:
                 self._focused_param = param
-            self._help_panel.show_param(self._focused_param)
-        else:
-            right.remove_class("help-open")
+        self._sync_param_help()
         self._update_footer()
 
     def action_edit(self) -> None:
@@ -973,14 +971,9 @@ class LLMServeApp(App):
 
     def _exit_editor(self) -> None:
         """Exit editor mode and restore normal view."""
-        if self._help_panel:
-            self._help_panel.remove()
-            self._help_panel = None
         if self._editor_widget:
             self._editor_widget.remove()
             self._editor_widget = None
-        right = self.query_one("#right")
-        right.remove_class("help-open")
         self._help_visible = False
         self._focused_param = None
         self.query_one("#status").display = True

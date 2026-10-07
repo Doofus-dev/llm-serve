@@ -10,6 +10,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Focus
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import Button, Collapsible, Input, Label, Select, Static
 
 from tui.data.context_length import fmt_ctx_compact as fmt_ctx, resolve_context_length
@@ -188,6 +189,23 @@ class ParamEditorMixin:
         self.fields[param] = widget
         yield widget
 
+    def _yield_param_field(
+        self,
+        param: str,
+        value: object,
+        *,
+        label: str | None = None,
+        locked: bool = False,
+    ):
+        with Vertical(classes="param-field", id=self._field_id("field", param)):
+            with Horizontal(classes="param-row"):
+                if locked:
+                    yield Label(f"{param}  [dim]from model[/]", classes="param-label")
+                    yield Label(fmt_locked_value(value), classes="param-locked")
+                else:
+                    yield from self._yield_param_controls(param, value, label=label)
+            yield ParamHelpPanel(param_name=param, id=self._field_id("help", param))
+
     def _read_fields(self) -> dict[str, object]:
         values: dict[str, object] = {}
         for param, widget in self.fields.items():
@@ -222,30 +240,90 @@ class ConfirmDialog(ModalScreen[bool]):
         self.dismiss(event.button.id == "yes")
 
 
-class ParamHelpPanel(VerticalScroll):
-    """Bottom-half help panel showing docs for the focused parameter."""
+class ParamHelpPanel(Static):
+    """Compact F2 help shown under the focused editor field."""
 
     DEFAULT_TEXT = (
-        "[bold]Parameter Help[/]  [dim](F2 to close · Tab to a field)[/]\n\n"
-        "Focus an input to see what it does and how changing it affects the server."
+        "[bold]Parameter Help[/]  [dim](F2 to close · Tab to a field)[/]\n"
+        "Focus an input to see what it does."
     )
 
-    def compose(self) -> ComposeResult:
-        yield Static(self.DEFAULT_TEXT, id="param-help-text")
+    DEFAULT_CSS = """
+    ParamHelpPanel {
+        display: none;
+        height: auto;
+        max-height: 5;
+        margin: 0;
+        padding: 0 1;
+        border: round $accent;
+        background: $panel;
+        width: 1fr;
+        color: $foreground;
+        overflow-y: auto;
+    }
+    ParamHelpPanel.visible {
+        display: block;
+    }
+    """
+
+    def __init__(self, *args, param_name: str | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.param_name = param_name
 
     def on_mount(self) -> None:
         load_param_help()
+        self.show_param(self.param_name)
 
     def show_param(self, param: str | None) -> None:
-        text = self.query_one("#param-help-text", Static)
-        if not param:
-            text.update(self.DEFAULT_TEXT)
+        self.param_name = param if param is not None else self.param_name
+        shown = param if param is not None else self.param_name
+        if not shown:
+            self.update(self.DEFAULT_TEXT)
             return
-        help_text = get_param_help(param)
+        help_text = get_param_help(shown)
         if help_text:
-            text.update(f"[bold $accent]{param}[/]\n\n{help_text}")
+            self.update(f"[bold $accent]{shown}[/]  [dim]F2[/]\n{help_text}")
         else:
-            text.update(f"[bold $accent]{param}[/]\n\n[dim]No documentation found for this parameter.[/]")
+            self.update(
+                f"[bold $accent]{shown}[/]  [dim]F2[/]\n"
+                "[dim]No documentation found for this parameter.[/]"
+            )
+
+    @staticmethod
+    def apply_visibility(
+        root: Widget,
+        *,
+        visible: bool,
+        param: str | None,
+        near: Widget | None = None,
+    ) -> None:
+        """Show only the compact help attached to the focused field."""
+        field: Widget | None = None
+        editor: Widget | None = None
+        node = near
+        while node is not None:
+            classes = getattr(node, "classes", ())
+            if field is None and "param-field" in classes:
+                field = node
+            if type(node).__name__ in {"ProfileEditor", "PresetEditor"}:
+                editor = node
+                break
+            node = node.parent
+        for panel in root.query(ParamHelpPanel):
+            if not visible:
+                panel.remove_class("visible")
+                continue
+            if field is not None:
+                show = panel.parent is field
+            else:
+                show = panel.param_name is None and (
+                    editor is None or panel.parent is editor
+                )
+            if show:
+                panel.add_class("visible")
+                panel.show_param(param if panel.param_name else None)
+            else:
+                panel.remove_class("visible")
 
 
 class ProfileEditor(VerticalScroll):
@@ -268,26 +346,30 @@ class ProfileEditor(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Label(
             f"[bold]Edit Profile: {self.params.get('display', self.model_name)}[/bold]  "
-            "(Ctrl+S: save, Esc: cancel)"
+            "[dim]Ctrl+S save · Esc cancel · display name is the llm-serve id[/]"
         )
-        yield Label("[dim]Display name is what you pass to llm-serve[/dim]")
-        yield Label("Display name:", classes="field-label")
         self.display_input = EditorInput(
             value=str(self.params.get("display", "")),
             placeholder="Qwen 3.8",
             id="profile_display",
         )
-        yield self.display_input
-        yield Label("Port:", classes="field-label")
         self.port_input = EditorInput(value=str(self.params.get("port", 8081)), id="profile_port")
-        yield self.port_input
-        yield Label("Host:", classes="field-label")
         self.host_input = EditorInput(value=str(self.params.get("host", "127.0.0.1")), id="profile_host")
-        yield self.host_input
-        yield Label("Notes:", classes="field-label")
         self.notes_input = EditorInput(value=str(self.params.get("notes", "")), id="profile_notes")
-        yield self.notes_input
-        with ActionBar():
+        with Horizontal(classes="profile-row"):
+            yield Label("Display", classes="field-label")
+            yield self.display_input
+        with Horizontal(classes="profile-row"):
+            yield Label("Port", classes="field-label")
+            yield self.port_input
+        with Horizontal(classes="profile-row"):
+            yield Label("Host", classes="field-label")
+            yield self.host_input
+        with Horizontal(classes="profile-row"):
+            yield Label("Notes", classes="field-label")
+            yield self.notes_input
+        yield ParamHelpPanel(id="param-help")
+        with ActionBar(classes="editor-actions"):
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", id="cancel")
 
@@ -385,61 +467,50 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         if self.compare_mode:
             title_id = f"{self.id_prefix}title" if self.id_prefix else None
             yield Label(
-                f"[bold][{self.slot}] {self.preset.name}[/bold]  Ctrl+S saves this side",
+                f"[bold][{self.slot}] {self.preset.name}[/bold]  [dim]Ctrl+S this side · F2 help[/]",
                 id=title_id,
             )
         else:
             verb = "New" if self.is_new else "Edit"
             yield Label(
                 f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  "
-                "(Ctrl+S: save, Esc: cancel, F2: help)"
+                "[dim]Ctrl+S save · Esc cancel · F2 help beside the field[/]"
             )
-        yield Label("Preset name:", classes="field-label")
         name_id = f"{self.id_prefix}preset_name" if self.id_prefix else "preset_name"
         self.name_input = EditorInput(
             value=self.preset.name, placeholder="preset-name", id=name_id
         )
-        yield self.name_input
+        with Horizontal(classes="profile-row"):
+            yield Label("Name", classes="field-label")
+            yield self.name_input
+        yield ParamHelpPanel(id=f"{self.id_prefix}param-help" if self.id_prefix else "param-help")
 
         for group_name, param_names in PRESET_PARAM_GROUPS.items():
             with Collapsible(title=group_name, collapsed=False):
                 for i in range(0, len(param_names), 3):
                     row_params = param_names[i : i + 3]
-                    with Horizontal():
+                    with Horizontal(classes="param-group-row"):
                         for param in row_params:
                             if param in LOCKED_PARAMS:
                                 if param == "context_length":
                                     value = self.max_ctx if self.max_ctx is not None else self.identity.get(param, "")
                                 else:
                                     value = self.identity.get(param, "")
-                                with Vertical(
-                                    classes="param-field",
-                                    id=self._field_id("field", param),
-                                ):
-                                    yield Label(f"{param}  [dim]from model[/]", classes="param-label")
-                                    yield Label(fmt_locked_value(value), classes="param-locked")
+                                yield from self._yield_param_field(param, value, locked=True)
                                 continue
                             value = self.preset.params.get(param, "")
                             if param == "ctx" and self.max_ctx is not None:
-                                with Vertical(
-                                    classes="param-field",
-                                    id=self._field_id("field", param),
-                                ):
-                                    yield from self._yield_param_controls(
-                                        param,
-                                        value,
-                                        label=f"ctx  [dim]max {fmt_ctx(self.max_ctx)}[/]",
-                                    )
+                                yield from self._yield_param_field(
+                                    param,
+                                    value,
+                                    label=f"ctx  [dim]max {fmt_ctx(self.max_ctx)}[/]",
+                                )
                                 continue
-                            with Vertical(
-                                classes="param-field",
-                                id=self._field_id("field", param),
-                            ):
-                                yield from self._yield_param_controls(param, value)
+                            yield from self._yield_param_field(param, value)
 
         save_id = f"{self.id_prefix}save" if self.id_prefix else "save"
         cancel_id = f"{self.id_prefix}cancel" if self.id_prefix else "cancel"
-        with ActionBar():
+        with ActionBar(classes="editor-actions"):
             yield Button("Save", variant="success", id=save_id)
             if not self.compare_mode:
                 yield Button("Cancel", id=cancel_id)

@@ -873,15 +873,11 @@ class HubScreen(Screen):
             )
             if not started:
                 return
-            waiting = app.download_manager.queue_size
-            if waiting:
-                self._set_status(
-                    f"[bold $warning]QUEUED[/] {filename}  — {waiting} waiting"
-                )
-            else:
-                self._set_status(
-                    f"[bold $warning]DOWNLOADING[/] {filename}  — runs in background (close Hub anytime)"
-                )
+            n = app.download_manager.active_count
+            extra = f"  — {n} in progress" if n > 1 else ""
+            self._set_status(
+                f"[bold $warning]DOWNLOADING[/] {filename}{extra}  — runs in background (close Hub anytime)"
+            )
             return
 
         self._downloading = True

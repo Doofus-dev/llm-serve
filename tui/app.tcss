@@ -294,13 +294,48 @@ Button.-style-flat:disabled {
         margin: 0;
         padding: 0;
     }
-    #param-help { height: 50%; border-top: solid $secondary; padding: 0 1; display: none; }
-    #right.help-open #editor-scroll { height: 50%; }
-    #right.help-open #param-help { display: block; }
+
+    .param-group-row {
+        height: auto;
+        width: 1fr;
+        margin: 0;
+    }
+
+    .param-row,
+    .profile-row {
+        height: auto;
+        min-height: 1;
+        width: 1fr;
+        margin: 0;
+    }
+
+    .param-row .param-label,
+    .profile-row .field-label {
+        width: 18;
+        height: 1;
+        padding: 0 1 0 0;
+        content-align: left middle;
+    }
+
+    ActionBar.editor-actions {
+        min-height: 1;
+        height: 1;
+        padding: 0;
+        margin: 0 0 1 0;
+    }
+
+    ActionBar.editor-actions Button {
+        height: 1;
+        min-height: 1;
+        padding: 0 1;
+        margin: 0 1 0 0;
+        border: none;
+        background: $surface;
+    }
     
     .param-field {
         width: 1fr;
-        margin: 0 1;
+        margin: 0 1 0 0;
         height: auto;
     }
     

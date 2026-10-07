@@ -19,7 +19,7 @@ from tui.data.vram import (
     fmt_tps,
     status_symbol,
 )
-from tui.theme import OK
+from tui.theme import OK, WARN
 
 
 @dataclass(frozen=True)
@@ -130,6 +130,15 @@ def fmt_downloaded_cell(downloaded: bool) -> str:
     return f"[{OK}]{mark}[/]" if downloaded else mark
 
 
+def fmt_disk_cell(*, downloaded: bool, transferring: bool = False) -> str:
+    """Disk column: on-disk, in-flight, or missing."""
+    if downloaded:
+        return fmt_downloaded_cell(True)
+    if transferring:
+        return f"[{WARN}]⬇[/]"
+    return fmt_downloaded_cell(False)
+
+
 def quant_file_row_cells(row: QuantFileRow) -> tuple:
     """Cell values for the shared Disk + estimate file table."""
     return (
@@ -148,6 +157,7 @@ __all__ = [
     "build_quant_file_rows",
     "fmt_downloaded",
     "fmt_downloaded_cell",
+    "fmt_disk_cell",
     "fmt_size",
     "local_file_size",
     "quant_file_row_cells",

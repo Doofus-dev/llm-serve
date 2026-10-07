@@ -10,8 +10,9 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Label, Select, Static
+from textual.widgets import Button, DataTable, Label, ProgressBar, Select, Static
 
+from tui.data.downloads import DownloadManager, DownloadState
 from tui.data.context_length import (
     context_length_options,
     fmt_ctx_compact,
@@ -22,7 +23,12 @@ from tui.data.context_length import (
 from tui.data.gpu import GPUStats, query_gpu
 from tui.data.hf import HubFile, list_repo_ggufs
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
-from tui.data.quant_table import QuantFileRow, build_quant_file_rows, quant_file_row_cells
+from tui.data.quant_table import (
+    QuantFileRow,
+    build_quant_file_rows,
+    fmt_disk_cell,
+    quant_file_row_cells,
+)
 from tui.data.vram import fmt_memory_mb
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
 from tui.theme import ERR, OK, WARN
@@ -60,7 +66,24 @@ class QuantPickerScreen(ModalScreen[str | None]):
     }
 
     #quant-picker-status {
+        height: auto;
+        min-height: 1;
+    }
+
+    #quant-download-status {
+        height: auto;
+        min-height: 0;
+        color: $warning;
+    }
+
+    #quant-download-progress {
+        height: 0;
+        width: 1fr;
+    }
+
+    #quant-download-progress.visible {
         height: 1;
+        margin: 0 0 1 0;
     }
 
     #quant-context-controls {
@@ -99,7 +122,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
     }
 
     #quant-picker-help {
-        height: 2;
+        height: 3;
         color: $text-muted;
     }
     """
@@ -115,6 +138,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         baselines_path: Path | None = None,
         preferred_ctx: int | None = None,
         on_download: Callable[[str, str, int], None] | None = None,
+        download_manager: DownloadManager | None = None,
     ) -> None:
         super().__init__()
         self.model_name = model_name
@@ -125,6 +149,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self.baselines_path = baselines_path
         self.preferred_ctx = preferred_ctx
         self.on_download = on_download
+        self.download_manager = download_manager
         self._rows: list[QuantFileRow] = []
         self._files: list[HubFile] = []
         self._load_id = 0
@@ -139,6 +164,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         with Vertical(id="quant-picker"):
             yield Label("", id="quant-picker-title")
             yield Static("[dim]Loading quants…[/]", id="quant-picker-status")
+            yield Static("", id="quant-download-status")
+            yield ProgressBar(total=None, id="quant-download-progress", show_eta=False)
             with Horizontal(id="quant-context-controls"):
                 yield Label("Context:")
                 yield Select(
@@ -157,13 +184,14 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 yield Static("", id="hardware-summary")
             yield DataTable(id="quant-table", cursor_type="row", zebra_stripes=True)
             yield Static(
-                "[dim]←→ context · [ ] offload · Enter select · "
-                "● on disk · — queue download on select · "
+                "[dim]←→ context · [ ] offload · Enter select/download · "
+                "start as many quants as you want · "
+                f"[{OK}]●[/] on disk · [{WARN}]⬇[/] downloading · — missing · "
                 f"[{OK}]●[/] fit · [{WARN}]⚠[/] tight · [{ERR}]●[/] too large[/]",
                 id="quant-picker-help",
             )
             with ActionBar(id="quant-picker-actions"):
-                yield Button("Select", variant="primary", id="select")
+                yield Button("Select / Download", variant="primary", id="select")
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
@@ -184,6 +212,9 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self._render_estimate_controls()
         self._load_id += 1
         self._fetch_files(self._load_id)
+        if self.download_manager is not None:
+            self.download_manager.subscribe(self._on_download_state)
+            self._apply_download_state(self.download_manager.state)
 
     @staticmethod
     def _fmt_context(tokens: int) -> str:
@@ -294,6 +325,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
             table.move_cursor(row=cursor_row)
         else:
             status.update("[dim]No quants found for this repo[/]")
+        if self.download_manager is not None:
+            self._apply_download_state(self.download_manager.state)
 
     @work(thread=True)
     def _fetch_files(self, load_id: int) -> None:
@@ -410,6 +443,73 @@ class QuantPickerScreen(ModalScreen[str | None]):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self._confirm()
 
+    def on_unmount(self) -> None:
+        if self.download_manager is not None:
+            self.download_manager.unsubscribe(self._on_download_state)
+
+    def _on_download_state(self, state: DownloadState) -> None:
+        def apply() -> None:
+            if self.is_mounted:
+                self._apply_download_state(state)
+
+        try:
+            self.app.call_later(apply)
+        except Exception:
+            apply()
+
+    def _apply_download_state(self, state: DownloadState) -> None:
+        try:
+            status = self.query_one("#quant-download-status", Static)
+            bar = self.query_one("#quant-download-progress", ProgressBar)
+        except Exception:
+            return
+        mine = [
+            item
+            for item in state.jobs
+            if item.model_slug == self.model_name
+            or item.filename in {row.path for row in self._rows}
+        ]
+        others = [item for item in state.jobs if item not in mine]
+        if mine or others:
+            lines = []
+            if mine:
+                lines.append(state.status_line)
+            elif others:
+                lines.append(state.status_line)
+            if others and mine:
+                extra = ", ".join(item.label for item in others)
+                lines.append(f"[dim]Also downloading: {extra}[/]")
+            status.update("\n".join(lines) if lines else "")
+            total = state.progress_total
+            bar.add_class("visible")
+            if total:
+                bar.update(total=float(total), progress=float(state.used_bytes))
+            else:
+                bar.update(total=None, progress=0.0)
+        else:
+            status.update("")
+            bar.remove_class("visible")
+            bar.update(total=None)
+        self._refresh_disk_cells(state)
+
+    def _refresh_disk_cells(self, state: DownloadState) -> None:
+        if not self._rows:
+            return
+        try:
+            table = self.query_one("#quant-table", DataTable)
+        except Exception:
+            return
+        for row in self._rows:
+            transferring = state.is_transferring(row.path)
+            try:
+                table.update_cell(
+                    row.path,
+                    "disk",
+                    fmt_disk_cell(downloaded=row.downloaded, transferring=transferring),
+                )
+            except Exception:
+                continue
+
     def _confirm(self) -> None:
         picked = self._selected_row()
         if not picked:
@@ -418,7 +518,14 @@ class QuantPickerScreen(ModalScreen[str | None]):
         if picked.downloaded:
             self.dismiss(picked.quant_id)
             return
+        if self.download_manager is not None and self.download_manager.has_filename(
+            picked.path
+        ):
+            self.notify(f"{picked.path} is already downloading", severity="information")
+            return
         if self.on_download:
             self.on_download(self.model_name, picked.path, picked.size)
+            if self.download_manager is not None:
+                self._apply_download_state(self.download_manager.state)
             return
         self.notify("Download handler unavailable", severity="error")

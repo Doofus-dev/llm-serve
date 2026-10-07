@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 from tui.data.hf import DownloadPlan, download_files, fmt_size, local_download_bytes
 
-EnqueueResult = Literal["started", "queued", "duplicate"]
+EnqueueResult = Literal["started", "duplicate"]
 
 
 @dataclass
@@ -26,21 +26,58 @@ class DownloadJob:
     def key(self) -> str:
         return self.plan.relative_file or self.filename
 
+    @property
+    def label(self) -> str:
+        if self.display:
+            return f"{self.display} · {self.filename}"
+        return self.filename
+
+
+@dataclass
+class DownloadProgress:
+    key: str
+    filename: str
+    model_slug: str = ""
+    display: str = ""
+    used_bytes: int = 0
+    expected_bytes: int = 0
+    elapsed_s: int = 0
+    cli_line: str = ""
+
+    @property
+    def progress_pct(self) -> float | None:
+        if self.expected_bytes > 0 and self.used_bytes >= 0:
+            return min(100.0, 100.0 * self.used_bytes / self.expected_bytes)
+        return None
+
+    @property
+    def label(self) -> str:
+        if self.display:
+            return f"{self.display} · {self.filename}"
+        return self.filename
+
 
 @dataclass
 class DownloadState:
     running: bool = False
     filename: str = ""
+    model_slug: str = ""
+    display: str = ""
     status_line: str = ""
     used_bytes: int = 0
     expected_bytes: int = 0
     elapsed_s: int = 0
     cli_line: str = ""
     queued: tuple[str, ...] = ()
+    jobs: tuple[DownloadProgress, ...] = field(default_factory=tuple)
 
     @property
     def queued_count(self) -> int:
         return len(self.queued)
+
+    @property
+    def active_count(self) -> int:
+        return len(self.jobs)
 
     @property
     def progress_pct(self) -> float | None:
@@ -54,117 +91,155 @@ class DownloadState:
 
     @property
     def active(self) -> bool:
-        return self.running or bool(self.queued)
+        return self.running or bool(self.queued) or bool(self.jobs)
+
+    def progress_for(self, filename: str) -> DownloadProgress | None:
+        for item in self.jobs:
+            if item.filename == filename or item.key.endswith(f"/{filename}"):
+                return item
+        return None
+
+    def is_transferring(self, filename: str) -> bool:
+        return self.progress_for(filename) is not None
 
 
 class DownloadManager:
     def __init__(self) -> None:
         self.state = DownloadState()
-        self._queue: list[DownloadJob] = []
-        self._current: DownloadJob | None = None
+        self._active: dict[str, DownloadJob] = {}
+        self._progress: dict[str, DownloadProgress] = {}
         self._listeners: list[Callable[[DownloadState], None]] = []
 
     def subscribe(self, listener: Callable[[DownloadState], None]) -> None:
-        self._listeners.append(listener)
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def unsubscribe(self, listener: Callable[[DownloadState], None]) -> None:
+        try:
+            self._listeners.remove(listener)
+        except ValueError:
+            pass
 
     def _notify(self) -> None:
         for listener in list(self._listeners):
             listener(self.state)
 
-    def _sync_queue(self) -> None:
-        self.state.queued = tuple(job.filename for job in self._queue)
+    def _rebuild(self) -> None:
+        jobs = tuple(self._progress.values())
+        used = sum(item.used_bytes for item in jobs)
+        expected = sum(item.expected_bytes for item in jobs)
+        primary = jobs[0] if jobs else None
+        self.state = DownloadState(
+            running=bool(jobs),
+            filename=primary.filename if primary else "",
+            model_slug=primary.model_slug if primary else "",
+            display=primary.display if primary else "",
+            used_bytes=used,
+            expected_bytes=expected,
+            elapsed_s=max((item.elapsed_s for item in jobs), default=0),
+            cli_line=primary.cli_line if primary else "",
+            jobs=jobs,
+        )
+        self.state.status_line = self.format_status()
 
     @property
     def busy(self) -> bool:
-        return self.state.running or bool(self._queue) or self._current is not None
+        return bool(self._active)
 
     @property
     def queue_size(self) -> int:
-        return len(self._queue)
+        return max(0, len(self._active) - 1)
+
+    @property
+    def active_count(self) -> int:
+        return len(self._active)
 
     def has_job(self, key: str) -> bool:
-        if self._current is not None and self._current.key == key:
-            return True
-        return any(job.key == key for job in self._queue)
+        return key in self._active
+
+    def has_filename(self, filename: str) -> bool:
+        return any(job.filename == filename for job in self._active.values())
 
     def enqueue(self, job: DownloadJob) -> EnqueueResult:
-        """Add a job. Returns started, queued, or duplicate."""
+        """Register a job so it can start immediately. Duplicates are ignored."""
         if self.has_job(job.key):
             return "duplicate"
-        idle = not self.state.running and self._current is None and not self._queue
-        self._queue.append(job)
-        self._sync_queue()
-        if self.state.running:
-            self.state.status_line = self.format_status()
+        self._active[job.key] = job
+        self._progress[job.key] = DownloadProgress(
+            key=job.key,
+            filename=job.filename,
+            model_slug=job.model_slug or job.clone_from or "",
+            display=job.display or "",
+            expected_bytes=job.expected_bytes,
+        )
+        self._rebuild()
         self._notify()
-        return "started" if idle else "queued"
-
-    def pop_next(self) -> DownloadJob | None:
-        if not self._queue:
-            self._current = None
-            self._sync_queue()
-            self._notify()
-            return None
-        self._current = self._queue.pop(0)
-        self._sync_queue()
-        self._notify()
-        return self._current
+        return "started"
 
     def format_status(self) -> str:
         st = self.state
-        if not st.running and not st.queued:
+        if not st.jobs:
             return ""
-        if st.expected_bytes > 0:
-            pct = st.progress_pct or 0.0
-            size = f"{fmt_size(st.used_bytes)} / {fmt_size(st.expected_bytes)} ({pct:.0f}%)"
-        elif st.used_bytes:
-            size = fmt_size(st.used_bytes)
-        else:
-            size = "starting…"
-        extra = f"  {st.cli_line[:60]}" if st.cli_line else ""
-        waiting = f"  · {st.queued_count} queued" if st.queued_count else ""
-        name = st.filename or (st.queued[0] if st.queued else "download")
-        verb = "Downloading" if st.running else "Queued"
-        return f"{verb} {name}  {size}  {st.elapsed_s}s{extra}{waiting}"
+        parts: list[str] = []
+        for item in st.jobs:
+            if item.expected_bytes > 0:
+                pct = item.progress_pct or 0.0
+                size = (
+                    f"{fmt_size(item.used_bytes)} / "
+                    f"{fmt_size(item.expected_bytes)} ({pct:.0f}%)"
+                )
+            elif item.used_bytes:
+                size = fmt_size(item.used_bytes)
+            else:
+                size = "starting…"
+            extra = f"  {item.cli_line[:40]}" if item.cli_line else ""
+            parts.append(f"{item.label}  {size}{extra}")
+        if len(parts) == 1:
+            return f"Downloading {parts[0]}  {st.elapsed_s}s"
+        joined = "  ·  ".join(parts)
+        return f"Downloading {len(parts)} files  {st.elapsed_s}s  ·  {joined}"
 
     async def run(self, job: DownloadJob) -> tuple[bool, str]:
-        if self.state.running:
-            return False, "Another download is already running"
+        if job.key not in self._active:
+            if self.enqueue(job) == "duplicate" and job.key not in self._active:
+                return False, f"{job.filename} is already downloading"
 
-        self._current = job
-        self.state = DownloadState(
-            running=True,
-            filename=job.filename,
-            expected_bytes=job.expected_bytes,
-            queued=tuple(queued.filename for queued in self._queue),
-        )
-        self.state.status_line = self.format_status()
-        self._notify()
+        progress = self._progress.get(job.key)
+        if progress is None:
+            progress = DownloadProgress(
+                key=job.key,
+                filename=job.filename,
+                model_slug=job.model_slug or job.clone_from or "",
+                display=job.display or "",
+                expected_bytes=job.expected_bytes,
+            )
+            self._progress[job.key] = progress
+            self._rebuild()
+            self._notify()
 
         started = asyncio.get_running_loop().time()
 
         def on_line(line: str) -> None:
             text = line.strip()
             if text:
-                self.state.cli_line = text
+                progress.cli_line = text
 
         try:
             download_task = asyncio.create_task(download_files(job.plan, on_line=on_line))
             while not download_task.done():
-                self.state.used_bytes = local_download_bytes(job.plan)
-                self.state.elapsed_s = int(asyncio.get_running_loop().time() - started)
-                self.state.status_line = self.format_status()
+                progress.used_bytes = local_download_bytes(job.plan)
+                progress.elapsed_s = int(asyncio.get_running_loop().time() - started)
+                self._rebuild()
                 self._notify()
                 await asyncio.sleep(0.25)
             ok, message = download_task.result()
-            self.state.used_bytes = local_download_bytes(job.plan)
-            self.state.elapsed_s = int(asyncio.get_running_loop().time() - started)
-            self.state.status_line = self.format_status()
+            progress.used_bytes = local_download_bytes(job.plan)
+            progress.elapsed_s = int(asyncio.get_running_loop().time() - started)
+            self._rebuild()
             self._notify()
             return ok, message
         finally:
-            self._current = None
-            self.state.running = False
-            self._sync_queue()
-            self.state.status_line = self.format_status() if self._queue else ""
+            self._active.pop(job.key, None)
+            self._progress.pop(job.key, None)
+            self._rebuild()
             self._notify()
