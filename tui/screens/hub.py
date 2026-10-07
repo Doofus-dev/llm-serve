@@ -438,7 +438,7 @@ class HubScreen(Screen):
             self._set_status(message)
 
     def _download_locks_hub(self) -> bool:
-        """True only for the in-screen fallback worker, not the app queue."""
+        """True only for the in-screen fallback worker, not the app-level download manager."""
         from tui.app import LLMServeApp
 
         if isinstance(self.app, LLMServeApp):
