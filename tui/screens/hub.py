@@ -406,7 +406,7 @@ class HubScreen(Screen):
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
-                "● on disk · — queue download on select · Act. after a local run · "
+                "● on disk · — download on select · Act. after a local run · "
                 f"[{OK}]●[/] fit · [{WARN}]⚠[/] tight · [{ERR}]●[/] too large[/]",
                 id="hub-help",
             )
@@ -438,7 +438,7 @@ class HubScreen(Screen):
             self._set_status(message)
 
     def _download_locks_hub(self) -> bool:
-        """True only for the in-screen fallback worker, not the app queue."""
+        """True only for the in-screen fallback worker, not the app-level download manager."""
         from tui.app import LLMServeApp
 
         if isinstance(self.app, LLMServeApp):
@@ -873,15 +873,11 @@ class HubScreen(Screen):
             )
             if not started:
                 return
-            waiting = app.download_manager.queue_size
-            if waiting:
-                self._set_status(
-                    f"[bold $warning]QUEUED[/] {filename}  — {waiting} waiting"
-                )
-            else:
-                self._set_status(
-                    f"[bold $warning]DOWNLOADING[/] {filename}  — runs in background (close Hub anytime)"
-                )
+            n = app.download_manager.active_count
+            extra = f"  — {n} in progress" if n > 1 else ""
+            self._set_status(
+                f"[bold $warning]DOWNLOADING[/] {filename}{extra}  — runs in background (close Hub anytime)"
+            )
             return
 
         self._downloading = True

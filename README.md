@@ -8,7 +8,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 - **Interactive TUI** — Browse models and aliases, edit presets, download GGUFs from Hugging Face, and watch live decode speed plus per-process VRAM and RAM.
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
 - **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …). The TUI can compare and independently edit two slots of one model/quant.
-- **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, queue downloads.
+- **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, download one or more quants.
 - **One server** — A single tracked `llama-server`. Launch refuses if one is already running.
 - **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
 - **Setup** — `./setup.sh` installs a project `.venv`, clones and builds llama.cpp (CUDA / ROCm / CPU), and puts `llm-serve` on `PATH`.
@@ -108,7 +108,7 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`,
 |-----|--------|
 | **L** / **S** | Launch / stop |
 | **E** | Edit profile, preset, or rename alias |
-| **P** | Quant picker (switch file or queue a download) |
+| **P** | Quant picker (switch file or start a download) |
 | **C** | Compare two presets of the current model/quant |
 | **N** / **D** | New / delete (preset or alias, depending on focus) |
 | **1–5** | Activate that preset (or pin it on an alias) |
@@ -122,7 +122,7 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`,
 | **Tab** | Models ↔ Aliases |
 | **←/→** | On an alias: change target model |
 
-In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles field help from `param-help.conf`.
+In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles compact field help from `param-help.conf` next to the focused input.
 
 **C** on a model or preset opens compare for that quant (needs two slots). **Ctrl+S** saves the focused side, **Esc** closes, **F2** still toggles field help.
 
@@ -130,7 +130,7 @@ In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles fiel
 
 Need the `hf` CLI for browse/download. Local models still work without it.
 
-File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns from runs saved in `tui-baselines.json` (written while a server is up). Context and GPU-offload sliders change the estimates. Downloads are queued one at a time; keep Hub open until they finish. Gated repos need **Login** (Hugging Face token) — that is not API auth for llama-server.
+File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns from runs saved in `tui-baselines.json` (written while a server is up). Context and GPU-offload sliders change the estimates. You can start several quant downloads at once from Hub or the quant picker (● on disk, ⬇ downloading, — missing); they keep running if you close those screens. Gated repos need **Login** (Hugging Face token) — that is not API auth for llama-server.
 
 ## Configuration
 

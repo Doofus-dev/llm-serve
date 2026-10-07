@@ -182,7 +182,7 @@ class HelpScreen(ModalScreen[None]):
                 )
                 yield Static(
                     "• Press E on a model or preset to edit its parameters.\n"
-                    "  Use F1 inside the editor for parameter help.",
+                    "  Use F2 inside the editor for parameter help beside the field.",
                     classes="help-tip",
                 )
                 yield Static(

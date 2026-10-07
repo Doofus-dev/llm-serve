@@ -19,14 +19,17 @@ class DownloadBar(Vertical):
     }
 
     DownloadBar.visible {
-        height: 3;
+        height: auto;
+        min-height: 3;
+        max-height: 6;
         padding: 0 1;
         border-bottom: solid $warning;
         background: $surface-darken-1;
     }
 
     DownloadBar #download-label {
-        height: 1;
+        height: auto;
+        min-height: 1;
         color: $warning;
     }
 

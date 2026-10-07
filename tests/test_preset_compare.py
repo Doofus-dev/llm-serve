@@ -17,7 +17,7 @@ from tui.data.presets import (
     set_preset,
 )
 from tui.screens.compare import PresetCompareScreen, format_diff_summary
-from tui.screens.editors import ConfirmDialog, PresetEditor
+from tui.screens.editors import ConfirmDialog, ParamHelpPanel, PresetEditor
 from tui.widgets.nav import ModelNav
 
 
@@ -284,11 +284,17 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             screen.query_one("#cmp-left-input_ctx").focus()
             await pilot.pause(0.2)
             screen.action_toggle_param_help()
-            help_text = str(screen.query_one("#compare-param-help #param-help-text").content)
+            ctx_help = screen.query_one("#cmp-left-help_ctx", ParamHelpPanel)
+            self.assertIn("visible", ctx_help.classes)
+            help_text = str(ctx_help.content)
             self.assertIn("ctx", help_text)
+            layers_help = screen.query_one("#cmp-left-help_gpu_layers", ParamHelpPanel)
+            self.assertNotIn("visible", layers_help.classes)
             screen.query_one("#cmp-left-input_gpu_layers").focus()
             await pilot.pause(0.2)
-            help_text = str(screen.query_one("#compare-param-help #param-help-text").content)
+            self.assertIn("visible", layers_help.classes)
+            self.assertNotIn("visible", ctx_help.classes)
+            help_text = str(layers_help.content)
             self.assertIn("gpu_layers", help_text)
             self.assertNotIn("ctx", help_text.split("\n")[0])
 

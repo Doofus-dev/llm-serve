@@ -20,7 +20,7 @@ from tui.data.presets import (
     save_presets,
     set_preset,
 )
-from tui.screens.editors import ParamFocused, ParamHelpPanel, PresetEditor
+from tui.screens.editors import ParamFocused, ParamHelpPanel, ParamInput, ParamSelect, PresetEditor
 from tui.theme import ERR, OK, WARN
 from tui.widgets.action_bar import ActionBar
 
@@ -135,15 +135,6 @@ class PresetCompareScreen(ModalScreen[None]):
     }
     .param-field.diff-removed {
         border-left: solid $error;
-    }
-    #compare-param-help {
-        height: 8;
-        display: none;
-        border-top: solid $border;
-        padding: 0 1;
-    }
-    PresetCompareScreen.help-open #compare-param-help {
-        display: block;
     }
     """
 
@@ -282,7 +273,6 @@ class PresetCompareScreen(ModalScreen[None]):
                 yield self._make_editor("right", self.right_slot)
             with ActionBar():
                 yield Button("Close", id="close-compare")
-            yield ParamHelpPanel(id="compare-param-help")
 
     def on_mount(self) -> None:
         self.call_after_refresh(self._refresh_diff)
@@ -421,17 +411,27 @@ class PresetCompareScreen(ModalScreen[None]):
             node = node.parent
         self.app.notify("Focus a preset field, then Ctrl+S to save that side", severity="warning")
 
+    def _focused_param_name(self) -> str | None:
+        focused = self.focused
+        if isinstance(focused, (ParamInput, ParamSelect)):
+            return focused.param_name
+        return getattr(focused, "param_name", None)
+
+    def _sync_param_help(self) -> None:
+        ParamHelpPanel.apply_visibility(
+            self,
+            visible=self._help_visible,
+            param=self._focused_param_name() if self._help_visible else None,
+            near=self.focused,
+        )
+
     def action_toggle_param_help(self) -> None:
         self._help_visible = not self._help_visible
-        if self._help_visible:
-            self.add_class("help-open")
-            focused = self.focused
-            param = getattr(focused, "param_name", None)
-            self.query_one("#compare-param-help", ParamHelpPanel).show_param(param)
-        else:
-            self.remove_class("help-open")
+        self._sync_param_help()
 
     def on_param_focused(self, event: ParamFocused) -> None:
         if not self._help_visible:
             return
-        self.query_one("#compare-param-help", ParamHelpPanel).show_param(event.param)
+        ParamHelpPanel.apply_visibility(
+            self, visible=True, param=event.param, near=self.focused
+        )

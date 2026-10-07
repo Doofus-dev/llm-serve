@@ -11,6 +11,7 @@ from tui.data.gpu import GPUStats
 from tui.data.hf import HubFile
 from tui.data.quant_table import (
     build_quant_file_rows,
+    fmt_disk_cell,
     fmt_downloaded,
     fmt_downloaded_cell,
     quant_file_row_cells,
@@ -23,6 +24,7 @@ class QuantTableDownloadTests(unittest.TestCase):
         self.assertEqual(fmt_downloaded(False), "—")
         self.assertEqual(fmt_downloaded_cell(True), "[green]●[/]")
         self.assertEqual(fmt_downloaded_cell(False), "—")
+        self.assertEqual(fmt_disk_cell(downloaded=False, transferring=True), "[yellow]⬇[/]")
 
     def test_local_file_is_marked_downloaded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
