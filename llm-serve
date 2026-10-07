@@ -9,7 +9,7 @@
 #   llm-serve <model> --remote        bind 0.0.0.0 for LAN/Meshnet access
 #   llm-serve list                    list models, commands, and flags
 #   llm-serve status                  show running model info
-#   llm-serve stop                    stop the tracked server
+#   llm-serve stop                    stop the tracked (or first running) server
 #   llm-serve stop <model>            stop a specific model
 #   llm-serve update                  pull + rebuild llama.cpp (interactive)
 #   llm-serve update --yes            pull + rebuild without confirmation

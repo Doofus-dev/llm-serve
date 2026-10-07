@@ -9,7 +9,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
 - **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …). The TUI can compare and independently edit two slots of one model/quant.
 - **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, download one or more quants.
-- **Concurrent servers** — One `llama-server` per model, each on its own port. Launch another without stopping the first. `stop` with no argument still stops the tracked server; `stop <model>` stops that instance.
+- **Concurrent servers** — One `llama-server` per model, each on its own port. Launch another without stopping the first. `stop` with no argument stops the tracked server (or the first running instance if none is tracked); `stop <model>` stops that instance.
 - **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
 - **Setup** — `./setup.sh` installs a project `.venv`, clones and builds llama.cpp (CUDA / ROCm / CPU), and puts `llm-serve` on `PATH`.
 
@@ -63,7 +63,7 @@ llm-serve <model> --live       Foreground with live logs
 llm-serve <model> --dry-run    Print the llama-server command; do not start
 llm-serve <model> --remote     Bind 0.0.0.0
 llm-serve status               PID, port, VRAM, local/remote, last log lines
-llm-serve stop                 Stop the tracked server
+llm-serve stop                 Stop the tracked (or first running) server
 llm-serve stop <model>         Stop that model; others keep running
 llm-serve update               Pull and rebuild llama.cpp
 llm-serve update --yes         Same, no confirm
@@ -200,7 +200,7 @@ llm-serve/
 ├── patches/llama.cpp/     # Applied at build time
 ├── models/                # GGUFs as author/filename.gguf
 ├── llama.cpp/             # Clone + build
-├── logs/                  # llm-serve.log, .llm-serve.pid, instances/
+├── logs/                  # llm-serve.log, .llm-serve.pid, instances/ (<pid>.pid, <port>.log per extra server)
 └── .venv/
 ```
 
