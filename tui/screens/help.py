@@ -85,8 +85,8 @@ class HelpScreen(ModalScreen[None]):
                 )
                 yield Static(
                     "Run (models or aliases pane)\n"
-                    "  L          Launch server\n"
-                    "  S          Stop server",
+                    "  L          Launch (several at once)\n"
+                    "  S          Stop selected, or the tracked server",
                     classes="help-row",
                 )
                 yield Static(
@@ -127,7 +127,7 @@ class HelpScreen(ModalScreen[None]):
                 yield Label("Panels", classes="help-section")
                 yield Static(
                     "Top bar\n"
-                    "  Live server port, PID, and uptime, or not running.",
+                    "  Live port, PID, and uptime; several models show N running.",
                     classes="help-row",
                 )
                 yield Static(

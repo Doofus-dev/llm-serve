@@ -33,7 +33,7 @@ from tui.data.models_json import (
     unshared_model_file_paths,
     update_model,
 )
-from tui.data.pidfile import read_pid_file, remap_pid_preset_slots
+from tui.data.pidfile import list_instances, read_pid_file, remap_all_preset_slots
 from tui.data.presets import (
     MAX_PRESETS_PER_MODEL,
     compact_preset_slots,
@@ -63,7 +63,7 @@ from tui.data.throughput_history import (
     baseline_speed,
     sample_tps_for_history,
 )
-from tui.launch import LaunchError, launch_background, prepare_launch, stop_server
+from tui.launch import LaunchError, instance_matches, launch_background, prepare_launch, stop_server
 from tui.paths import METRICS_HISTORY_SAMPLES, METRICS_POLL_INTERVAL, AppPaths, default_paths
 from tui.screens.editors import (
     ConfirmDialog,
@@ -122,7 +122,6 @@ class LLMServeApp(App):
         self._focused_param: str | None = None
         self._gen_history = ThroughputHistory(max_samples=METRICS_HISTORY_SAMPLES)
         self._throughput_reader = ThroughputReader()
-        self._prev_running_key: str | None = None
         self.register_theme(
             Theme(
                 name="llm-serve",
@@ -423,9 +422,38 @@ class LLMServeApp(App):
             except (QueryError, NoMatches):
                 continue
 
+    def _model_key_for_instance(self, info) -> str | None:
+        running_alias = self.registry.aliases.get(info.model)
+        running_key = running_alias.model if running_alias else info.model
+        if running_key not in self.registry.models:
+            running_key = next(
+                (
+                    key
+                    for key, model in self.registry.models.items()
+                    if model.display == info.model
+                ),
+                None,
+            )
+        return running_key
+
     def _refresh_pid(self) -> None:
-        info = read_pid_file(self.paths.pid_file)
-        alive = info.alive if info else False
+        instances = list_instances(pid_file=self.paths.pid_file, log_dir=self.paths.log_dir)
+        tracked = read_pid_file(self.paths.pid_file)
+        info = tracked if tracked and tracked.alive else (instances[0] if instances else None)
+        alive = bool(info and info.alive)
+        running_keys = {
+            key
+            for item in instances
+            if (key := self._model_key_for_instance(item))
+        }
+        labels = {}
+        for item in instances:
+            key = self._model_key_for_instance(item)
+            labels[item.pid] = (
+                self.registry.models[key].display
+                if key in self.registry.models
+                else item.model
+            )
         if not self._editor_mode:
             try:
                 panel = self.query_one(StatusPanel)
@@ -448,29 +476,18 @@ class LLMServeApp(App):
                     panel.metrics = None
                     panel.props = None
                 panel.pid_info = info if alive else None
-                running_key = None
-                if alive and info:
-                    running_alias = self.registry.aliases.get(info.model)
-                    running_key = running_alias.model if running_alias else info.model
-                    if running_key not in self.registry.models:
-                        running_key = next(
-                            (
-                                key
-                                for key, model in self.registry.models.items()
-                                if model.display == info.model
-                            ),
-                            None,
-                        )
+                panel.instances = list(instances)
+                panel.instance_labels = labels
+                running_key = self._model_key_for_instance(info) if info else None
                 panel.model_display = (
                     self.registry.models[running_key].display
                     if running_key in self.registry.models
                     else None
                 )
                 nav = self.query_one(ModelNav)
-                nav.running_model = running_key
-                if nav.running_model != (self._prev_running_key if hasattr(self, '_prev_running_key') else None):
+                if nav.running_models != running_keys:
+                    nav.running_models = set(running_keys)
                     nav.refresh_cards()
-                self._prev_running_key = running_key
                 panel.quant_display = None
                 panel.preset_display = None
                 if alive and info:
@@ -504,6 +521,7 @@ class LLMServeApp(App):
         except (QueryError, NoMatches):
             return
         header.pid_info = info if alive else None
+        header.instances = list(instances)
         header.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
 
     async def _poll_metrics(self) -> None:
@@ -532,8 +550,8 @@ class LLMServeApp(App):
             panel = self.query_one(StatusPanel)
         except (QueryError, NoMatches):
             return
-        tracked = []
-        if panel.pid_info and panel.pid_info.alive:
+        tracked = [item.pid for item in panel.instances if item.alive]
+        if panel.pid_info and panel.pid_info.alive and panel.pid_info.pid not in tracked:
             tracked.append(panel.pid_info.pid)
         panel.gpu = query_gpu(tracked)
         self._record_baseline(panel)
@@ -784,12 +802,22 @@ class LLMServeApp(App):
         self._update_footer()
 
     def action_stop(self) -> None:
-        self._stop_worker()
+        model = self._selected_model()
+        instances = list_instances(pid_file=self.paths.pid_file, log_dir=self.paths.log_dir)
+        target = None
+        if model:
+            cfg = self.registry.models.get(model)
+            display = cfg.display if cfg else None
+            if any(instance_matches(item, model, display) for item in instances):
+                target = model
+        self._stop_worker(target)
 
     @work
-    async def _stop_worker(self) -> None:
+    async def _stop_worker(self, model: str | None = None) -> None:
         try:
-            message = await asyncio.to_thread(lambda: stop_server(paths=self.paths))
+            message = await asyncio.to_thread(
+                lambda: stop_server(model, paths=self.paths)
+            )
         except LaunchError as exc:
             self.notify(f"Stop error: {exc}", severity="error")
             return
@@ -1036,7 +1064,11 @@ class LLMServeApp(App):
         if aliases_changed:
             save_registry(self.paths.models_json, self.registry)
         if deleted_slot is not None or any(old != new for old, new in mapping.items()):
-            remap_pid_preset_slots(self.paths.pid_file, {(model_name, quant): mapping})
+            remap_all_preset_slots(
+                self.paths.pid_file,
+                self.paths.log_dir,
+                {(model_name, quant): mapping},
+            )
 
     def _new_preset_for_model(self, model_name: str) -> None:
         """Open the preset editor on the next free slot for this model's active quant."""
@@ -1072,8 +1104,8 @@ class LLMServeApp(App):
                 self.notify("Preset not found", severity="error")
                 return
 
-            pid_info = read_pid_file(self.paths.pid_file)
-            if pid_info and pid_info.alive and pid_info.model == model_name:
+            running = list_instances(pid_file=self.paths.pid_file, log_dir=self.paths.log_dir)
+            if any(item.model == model_name and item.alive for item in running):
                 if get_active_slot(self.preset_store, model_name, quant) == slot:
                     self.notify("Cannot delete preset while server is running with it", severity="error")
                     return
@@ -1113,8 +1145,8 @@ class LLMServeApp(App):
         if not model:
             self.notify("Select a model first", severity="warning")
             return
-        pid_info = read_pid_file(self.paths.pid_file)
-        if pid_info and pid_info.alive and pid_info.model == model:
+        running = list_instances(pid_file=self.paths.pid_file, log_dir=self.paths.log_dir)
+        if any(item.model == model and item.alive for item in running):
             self.notify("Stop this model before deleting it", severity="error")
             return
         

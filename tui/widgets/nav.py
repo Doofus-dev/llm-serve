@@ -29,7 +29,7 @@ class ModelNav(OptionList):
         self.preset_store = preset_store
         self.models_dir = models_dir
         self._option_data: dict[str, tuple] = {}
-        self.running_model: str | None = None
+        self.running_models: set[str] = set()
 
     def on_mount(self) -> None:
         self.refresh_cards()
@@ -60,7 +60,7 @@ class ModelNav(OptionList):
                 preset = get_preset(self.preset_store, name, active_q, slot)
                 if preset:
                     runtime_params = merge_identity_and_preset(model.params, preset)
-            is_running = name == self.running_model
+            is_running = name in self.running_models
             card = Text()
             card.append("● " if is_running else "○ ", style=OK if is_running else "dim")
             card.append(model.display, style=ACCENT_STYLE)

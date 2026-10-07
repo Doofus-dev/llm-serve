@@ -1,6 +1,8 @@
-"""Build llama-server argv and manage the single tracked process.
+"""Build llama-server argv and manage one or more tracked processes.
 
 CLI and TUI both call this module so preset flags live in one place.
+Each model is one llama-server on its own port. The legacy pid file is
+still the tracked server that ``stop`` with no argument targets.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -16,11 +19,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
+from tui.data.gpu import format_pid_vram, query_pid_vram_mb
 from tui.data.models_json import Registry, load_registry, resolve_model_key
 from tui.data.pidfile import (
-    clear_pid_file,
+    PidInfo,
+    forget_instance,
+    list_instances,
     read_pid_file,
-    write_pid_file,
+    record_instance,
 )
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
 from tui.data.presets import (
@@ -139,6 +145,40 @@ def _env_override(env: Mapping[str, str], key: str) -> str | None:
         return None
     value = env[key]
     return value if value != "" else None
+
+
+def port_is_listening(port: int, host: str = "127.0.0.1") -> bool:
+    probe = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    try:
+        with socket.create_connection((probe, port), timeout=0.05):
+            return True
+    except OSError:
+        return False
+
+
+def allocate_port(preferred: int, taken: set[int], host: str = "127.0.0.1") -> int:
+    """Next free port at or above ``preferred``, skipping tracked and bound ports."""
+    port = preferred if preferred > 0 else 8081
+    while port <= 65535:
+        if port not in taken and not port_is_listening(port, host):
+            return port
+        port += 1
+    raise LaunchError("no free TCP port available")
+
+
+def _set_plan_port(plan: LaunchPlan, port: int) -> None:
+    plan.port = port
+    args = plan.args
+    try:
+        idx = args.index("--port")
+        args[idx + 1] = str(port)
+    except (ValueError, IndexError):
+        args.extend(["--port", str(port)])
+
+
+def instance_matches(info: PidInfo, *names: str | None) -> bool:
+    wanted = {name for name in names if name}
+    return info.model in wanted
 
 
 def gpu_runtime_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -391,6 +431,8 @@ def prepare_launch(
 
     port_override = _env_override(env_map, "PORT")
     port = int(port_override) if port_override is not None else int(cfg.port)
+    taken = {info.port for info in list_instances(pid_file=paths.pid_file, log_dir=paths.log_dir)}
+    port = allocate_port(port, taken, host)
 
     verbosity_override = _env_override(env_map, "LOG_VERBOSITY")
     if verbosity_override is not None:
@@ -490,48 +532,25 @@ def _stop_pid(pid: int, *, wait: float = STOP_WAIT_SECONDS) -> None:
         return
 
 
-def stop_server(
-    model: str | None = None,
-    *,
-    paths: AppPaths | None = None,
-) -> str:
-    """Stop the tracked llama-server only (never pgrep unrelated processes)."""
-    paths = paths or default_paths()
-    info = read_pid_file(paths.pid_file)
-    if info is None:
-        return "No model running"
-
-    if not info.alive:
-        clear_pid_file(paths.pid_file)
-        return f"Stale PID file (PID {info.pid} not running)"
-
-    if model:
-        data = json.loads(paths.models_json.read_text())
-        resolved = resolve_model_key(data, model)
-        if resolved is None:
-            raise LaunchError(f"unknown model '{model}'")
-        registry = load_registry(paths.models_json, models_dir=paths.models_dir, migrate=False)
-        display = (
-            registry.models[resolved].display if resolved in registry.models else resolved
-        )
-        if info.model not in {resolved, display, model}:
-            return (
-                f"Model '{resolved}' is not running (currently running: {info.model})"
-            )
-
-    _stop_pid(info.pid)
-    clear_pid_file(paths.pid_file)
-    return f"Stopped {info.model} (PID {info.pid})"
+def _resolve_stop_names(model: str, paths: AppPaths) -> tuple[str, str]:
+    data = json.loads(paths.models_json.read_text())
+    resolved = resolve_model_key(data, model)
+    if resolved is None:
+        raise LaunchError(f"unknown model '{model}'")
+    registry = load_registry(paths.models_json, models_dir=paths.models_dir, migrate=False)
+    display = (
+        registry.models[resolved].display if resolved in registry.models else resolved
+    )
+    return resolved, display
 
 
-def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
-    paths = paths or default_paths()
-    info = read_pid_file(paths.pid_file)
-    if info is None:
-        return "No model running", 0
-    if not info.alive:
-        clear_pid_file(paths.pid_file)
-        return f"Stale PID file (PID {info.pid} not running)", 1
+def _vram_for_pid(vram_map: dict[int, float] | None, pid: int) -> str:
+    if vram_map is None:
+        return format_pid_vram(None)
+    return format_pid_vram(vram_map.get(pid))
+
+
+def _format_instance_uptime(info: PidInfo) -> str:
     try:
         started = int(info.ts)
         uptime = max(int(time.time()) - started, 0)
@@ -539,16 +558,107 @@ def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
         uptime = 0
     hours, rem = divmod(uptime, 3600)
     minutes, seconds = divmod(rem, 60)
+    return f"{hours}h {minutes}m {seconds}s"
+
+
+def _format_single_status(info: PidInfo, paths: AppPaths, vram: str) -> str:
     access = "Remote (0.0.0.0)" if info.remote else "Local"
     lines = [
         f"Running: {info.model}",
         f"  PID:    {info.pid}",
         f"  Port:   {info.port}",
         f"  Access: {access}",
-        f"  Uptime: {hours}h {minutes}m {seconds}s",
+        f"  Uptime: {_format_instance_uptime(info)}",
+        f"  VRAM:   {vram}",
         "",
         "Last log lines:",
     ]
+    if paths.log_file.is_file():
+        tail = tail_lines(paths.log_file, 10)
+        lines.extend(tail if tail else ["  (no log file)"])
+    else:
+        lines.append("  (no log file)")
+    return "\n".join(lines)
+
+
+def stop_server(
+    model: str | None = None,
+    *,
+    paths: AppPaths | None = None,
+) -> str:
+    """Stop one tracked llama-server (never pgrep unrelated processes).
+
+    With no argument, stops the legacy tracked pid-file server. With a
+    model name, stops matching instance(s) and leaves the others running.
+    """
+    paths = paths or default_paths()
+    instances = list_instances(pid_file=paths.pid_file, log_dir=paths.log_dir)
+    tracked = read_pid_file(paths.pid_file)
+
+    if model:
+        resolved, display = _resolve_stop_names(model, paths)
+        targets = [
+            info
+            for info in instances
+            if instance_matches(info, resolved, display, model)
+        ]
+        if not targets:
+            if not instances:
+                if tracked is not None and not tracked.alive:
+                    forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=tracked.pid)
+                    return f"Stale PID file (PID {tracked.pid} not running)"
+                return "No model running"
+            running = ", ".join(info.model for info in instances)
+            return (
+                f"Model '{resolved}' is not running (currently running: {running})"
+            )
+        messages = []
+        for info in targets:
+            _stop_pid(info.pid)
+            forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=info.pid)
+            messages.append(f"Stopped {info.model} (PID {info.pid})")
+        return "\n".join(messages)
+
+    if tracked is None:
+        return "No model running"
+    if not tracked.alive:
+        forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=tracked.pid)
+        return f"Stale PID file (PID {tracked.pid} not running)"
+
+    _stop_pid(tracked.pid)
+    forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=tracked.pid)
+    return f"Stopped {tracked.model} (PID {tracked.pid})"
+
+
+def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
+    paths = paths or default_paths()
+    instances = list_instances(pid_file=paths.pid_file, log_dir=paths.log_dir)
+    if not instances:
+        info = read_pid_file(paths.pid_file)
+        if info is None:
+            return "No model running", 0
+        if not info.alive:
+            forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=info.pid)
+            return f"Stale PID file (PID {info.pid} not running)", 1
+        instances = [info]
+
+    vram_map = query_pid_vram_mb()
+    if len(instances) == 1:
+        info = instances[0]
+        return _format_single_status(info, paths, _vram_for_pid(vram_map, info.pid)), 0
+
+    lines = [f"Running {len(instances)} models:", ""]
+    for info in instances:
+        quant = info.quant or "-"
+        slot = f"[{info.preset_slot}]" if info.preset_slot is not None else ""
+        preset = f"{quant} {slot}".strip()
+        vram = _vram_for_pid(vram_map, info.pid)
+        access = "remote" if info.remote else "local"
+        lines.append(
+            f"  {info.model}  {preset}  PID {info.pid}  port {info.port}  "
+            f"VRAM {vram}  {access}"
+        )
+    lines.extend(("", "Last log lines:"))
     if paths.log_file.is_file():
         tail = tail_lines(paths.log_file, 10)
         lines.extend(tail if tail else ["  (no log file)"])
@@ -579,11 +689,11 @@ def list_text(paths: AppPaths | None = None) -> str:
             "  llm-serve                      Open the interactive TUI",
             "  llm-serve --help               Show this model and command reference",
             "  llm-serve list                 Same as --help",
-            "  llm-serve <model>              Start model in background",
+            "  llm-serve <model>              Start model in background (can run several)",
             "  llm-serve <model> --live       Start model in foreground (live logs)",
-            "  llm-serve status               Show running model info",
+            "  llm-serve status               Show running model(s), ports, VRAM",
             "  llm-serve stop                 Stop the tracked server",
-            "  llm-serve stop <model>         Stop specific model",
+            "  llm-serve stop <model>         Stop that model; others keep running",
             "  llm-serve update               Pull + rebuild llama.cpp",
             "",
             "Env overrides:",
@@ -620,13 +730,15 @@ def launch_background(
 ) -> int:
     paths = paths or default_paths()
     existing = read_pid_file(paths.pid_file)
-    if existing and existing.alive:
-        raise LaunchError(
-            f"Model '{existing.model}' is already running (PID: {existing.pid}). "
-            "Stop it first with 'llm-serve stop'."
-        )
-    if existing:
-        clear_pid_file(paths.pid_file)
+    if existing and not existing.alive:
+        forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=existing.pid)
+
+    taken = {
+        info.port
+        for info in list_instances(pid_file=paths.pid_file, log_dir=paths.log_dir)
+    }
+    if plan.port in taken or port_is_listening(plan.port, plan.host):
+        _set_plan_port(plan, allocate_port(plan.port, taken, plan.host))
 
     paths.log_dir.mkdir(parents=True, exist_ok=True)
     rotate_log(paths.log_file)
@@ -643,8 +755,9 @@ def launch_background(
         log_handle.close()
 
     _write_launch_marker(paths.log_file, plan.model_key, proc.pid)
-    write_pid_file(
-        paths.pid_file,
+    record_instance(
+        pid_file=paths.pid_file,
+        log_dir=paths.log_dir,
         pid=proc.pid,
         model=plan.model_key,
         port=plan.port,
@@ -658,7 +771,7 @@ def launch_background(
             tail = ""
             if paths.log_file.is_file():
                 tail = "\n".join(tail_lines(paths.log_file, 10))
-            clear_pid_file(paths.pid_file)
+            forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=proc.pid)
             extra = f"\nLast log lines:\n{tail}" if tail else ""
             raise LaunchError(
                 f"llama-server exited immediately (PID: {proc.pid}).{extra}"
