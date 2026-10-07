@@ -24,6 +24,7 @@ from tui.data.models_json import Registry, load_registry, resolve_model_key
 from tui.data.pidfile import (
     PidInfo,
     forget_instance,
+    instance_log_file,
     list_instances,
     read_pid_file,
     record_instance,
@@ -561,6 +562,13 @@ def _format_instance_uptime(info: PidInfo) -> str:
     return f"{hours}h {minutes}m {seconds}s"
 
 
+def instance_log_path(pid: int, port: int, paths: AppPaths) -> Path:
+    tracked = read_pid_file(paths.pid_file)
+    if tracked is not None and tracked.pid == pid:
+        return paths.log_file
+    return instance_log_file(paths.log_dir, port)
+
+
 def _format_single_status(info: PidInfo, paths: AppPaths, vram: str) -> str:
     access = "Remote (0.0.0.0)" if info.remote else "Local"
     lines = [
@@ -573,8 +581,9 @@ def _format_single_status(info: PidInfo, paths: AppPaths, vram: str) -> str:
         "",
         "Last log lines:",
     ]
-    if paths.log_file.is_file():
-        tail = tail_lines(paths.log_file, 10)
+    log_file = instance_log_path(info.pid, info.port, paths)
+    if log_file.is_file():
+        tail = tail_lines(log_file, 10)
         lines.extend(tail if tail else ["  (no log file)"])
     else:
         lines.append("  (no log file)")
@@ -619,15 +628,19 @@ def stop_server(
             messages.append(f"Stopped {info.model} (PID {info.pid})")
         return "\n".join(messages)
 
-    if tracked is None:
+    if tracked is not None and tracked.alive:
+        target = tracked
+    elif instances:
+        target = instances[0]
+    elif tracked is None:
         return "No model running"
-    if not tracked.alive:
+    else:
         forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=tracked.pid)
         return f"Stale PID file (PID {tracked.pid} not running)"
 
-    _stop_pid(tracked.pid)
-    forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=tracked.pid)
-    return f"Stopped {tracked.model} (PID {tracked.pid})"
+    _stop_pid(target.pid)
+    forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=target.pid)
+    return f"Stopped {target.model} (PID {target.pid})"
 
 
 def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
@@ -658,12 +671,11 @@ def status_text(paths: AppPaths | None = None) -> tuple[str, int]:
             f"  {info.model}  {preset}  PID {info.pid}  port {info.port}  "
             f"VRAM {vram}  {access}"
         )
-    lines.extend(("", "Last log lines:"))
-    if paths.log_file.is_file():
-        tail = tail_lines(paths.log_file, 10)
+    for info in instances:
+        lines.extend(("", f"Last log lines ({info.model}, port {info.port}):"))
+        log_file = instance_log_path(info.pid, info.port, paths)
+        tail = tail_lines(log_file, 10) if log_file.is_file() else []
         lines.extend(tail if tail else ["  (no log file)"])
-    else:
-        lines.append("  (no log file)")
     return "\n".join(lines), 0
 
 
@@ -740,9 +752,14 @@ def launch_background(
     if plan.port in taken or port_is_listening(plan.port, plan.host):
         _set_plan_port(plan, allocate_port(plan.port, taken, plan.host))
 
-    paths.log_dir.mkdir(parents=True, exist_ok=True)
-    rotate_log(paths.log_file)
-    log_handle = paths.log_file.open("a")
+    tracked = read_pid_file(paths.pid_file)
+    if tracked is None or not tracked.alive:
+        log_file = paths.log_file
+    else:
+        log_file = instance_log_file(paths.log_dir, plan.port)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log(log_file)
+    log_handle = log_file.open("a")
     try:
         proc = subprocess.Popen(
             [str(plan.llama_server), *plan.args],
@@ -754,7 +771,7 @@ def launch_background(
     finally:
         log_handle.close()
 
-    _write_launch_marker(paths.log_file, plan.model_key, proc.pid)
+    _write_launch_marker(log_file, plan.model_key, proc.pid)
     record_instance(
         pid_file=paths.pid_file,
         log_dir=paths.log_dir,
@@ -769,8 +786,8 @@ def launch_background(
         time.sleep(failfast_seconds)
         if not _pid_alive(proc.pid):
             tail = ""
-            if paths.log_file.is_file():
-                tail = "\n".join(tail_lines(paths.log_file, 10))
+            if log_file.is_file():
+                tail = "\n".join(tail_lines(log_file, 10))
             forget_instance(pid_file=paths.pid_file, log_dir=paths.log_dir, pid=proc.pid)
             extra = f"\nLast log lines:\n{tail}" if tail else ""
             raise LaunchError(

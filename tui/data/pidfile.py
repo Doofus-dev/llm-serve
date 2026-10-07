@@ -41,6 +41,10 @@ def instance_file(log_dir: Path, pid: int) -> Path:
     return instances_dir(log_dir) / f"{pid}.pid"
 
 
+def instance_log_file(log_dir: Path, port: int) -> Path:
+    return instances_dir(log_dir) / f"{port}.log"
+
+
 def read_pid_file(path: Path) -> PidInfo | None:
     try:
         parts = path.read_text().split()

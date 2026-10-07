@@ -63,7 +63,14 @@ from tui.data.throughput_history import (
     baseline_speed,
     sample_tps_for_history,
 )
-from tui.launch import LaunchError, instance_matches, launch_background, prepare_launch, stop_server
+from tui.launch import (
+    LaunchError,
+    instance_log_path,
+    instance_matches,
+    launch_background,
+    prepare_launch,
+    stop_server,
+)
 from tui.paths import METRICS_HISTORY_SAMPLES, METRICS_POLL_INTERVAL, AppPaths, default_paths
 from tui.screens.editors import (
     ConfirmDialog,
@@ -115,7 +122,6 @@ class LLMServeApp(App):
         self.client: ServerClient | None = None
         self.remote_launch: bool = self.settings.remote_launch
         self.log_verbosity: int = self.settings.log_verbosity
-        self._launch_time: float | None = None
         self._editor_mode: bool = False
         self._editor_widget: ProfileEditor | PresetEditor | None = None
         self._help_visible: bool = False
@@ -436,6 +442,13 @@ class LLMServeApp(App):
             )
         return running_key
 
+    @staticmethod
+    def _uptime_for(info) -> float:
+        try:
+            return max(time.time() - int(info.ts), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _refresh_pid(self) -> None:
         instances = list_instances(pid_file=self.paths.pid_file, log_dir=self.paths.log_dir)
         tracked = read_pid_file(self.paths.pid_file)
@@ -460,7 +473,6 @@ class LLMServeApp(App):
             except (QueryError, NoMatches):
                 panel = None
             if panel is not None:
-                was_alive = panel.pid_info.alive if panel.pid_info else False
                 prev = panel.pid_info
                 switched = bool(
                     alive
@@ -500,8 +512,6 @@ class LLMServeApp(App):
                     panel.quant_display = quant or None
                     if slot is not None:
                         panel.preset_display = f"[{slot}]"
-                if alive and not was_alive:
-                    self._launch_time = time.time()
                 if alive and info:
                     if self.client is None or self.client.base != f"http://127.0.0.1:{info.port}":
                         if self.client:
@@ -515,14 +525,14 @@ class LLMServeApp(App):
 
                             asyncio.ensure_future(_safe_close())
                         self.client = ServerClient("127.0.0.1", info.port)
-                panel.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
+                panel.uptime = self._uptime_for(info) if alive else 0.0
         try:
             header = self.query_one(StatusHeader)
         except (QueryError, NoMatches):
             return
         header.pid_info = info if alive else None
         header.instances = list(instances)
-        header.uptime = (time.time() - self._launch_time) if (alive and self._launch_time) else 0.0
+        header.uptime = self._uptime_for(info) if alive else 0.0
 
     async def _poll_metrics(self) -> None:
         self._refresh_pid()
@@ -558,7 +568,14 @@ class LLMServeApp(App):
 
     def _poll_log(self) -> None:
         try:
-            self.query_one(LogPanel).poll_file(self.paths.log_file)
+            panel = self.query_one(StatusPanel)
+            info = panel.pid_info
+            log_file = (
+                instance_log_path(info.pid, info.port, self.paths)
+                if info is not None
+                else self.paths.log_file
+            )
+            self.query_one(LogPanel).poll_file(log_file)
         except (QueryError, NoMatches):
             return
 

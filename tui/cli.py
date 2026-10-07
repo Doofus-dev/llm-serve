@@ -7,6 +7,7 @@ import sys
 
 from tui.launch import (
     LaunchError,
+    instance_log_path,
     launch_background,
     launch_foreground,
     list_text,
@@ -77,8 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             launch_foreground(plan)
 
         pid = launch_background(plan, paths=paths)
-        print(f"Started {plan.model_key} in background (PID: {pid})")
-        print(f"Logs:   {paths.log_file}")
+        print(f"Started {plan.model_key} in background (PID: {pid}, port: {plan.port})")
+        print(f"Logs:   {instance_log_path(pid, plan.port, paths)}")
         print()
         print("Use 'llm-serve status' to check")
         print("Use 'llm-serve stop' to stop")

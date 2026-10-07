@@ -26,6 +26,7 @@ class LogPanel(RichLog):
             **kwargs,
         )
         self._tailer = LogTailer()
+        self._polled_path: Path | None = None
         self._events: list[LogEvent] = []
         self._show_info = False
         self._empty_shown = False
@@ -52,6 +53,12 @@ class LogPanel(RichLog):
         return self._show_info or not is_unformatted_event(event)
 
     def poll_file(self, path: Path) -> None:
+        if self._polled_path != path:
+            self._polled_path = path
+            self._tailer.reset()
+            self._events.clear()
+            self._last_strip_count = 0
+            self._empty_shown = False
         try:
             exists = path.exists()
             new_events, full_reload = self._tailer.poll(path)

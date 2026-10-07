@@ -13,6 +13,7 @@ from tui.launch import (
     allocate_port,
     apply_env_overrides,
     build_server_args,
+    instance_log_path,
     launch_background,
     prepare_launch,
     rotate_log,
@@ -216,6 +217,39 @@ class ProcessTests(unittest.TestCase):
         )
         self.assertEqual([info.pid for info in remaining], [pid2])
         self.assertFalse(self.harness.paths.pid_file.exists())
+
+    def test_repeated_stop_without_args_reaches_untracked_instance(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        stop_server(paths=self.harness.paths)
+        message = stop_server(paths=self.harness.paths)
+        self.assertIn("Stopped", message)
+        self.assertIn(str(pid2), message)
+        self.assertEqual(
+            list_instances(
+                pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+            ),
+            [],
+        )
+        self.assertEqual(stop_server(paths=self.harness.paths), "No model running")
+
+    def test_each_instance_logs_to_its_own_file(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid1 = launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        log1 = instance_log_path(pid1, first.port, self.harness.paths)
+        log2 = instance_log_path(pid2, second.port, self.harness.paths)
+        self.assertEqual(log1, self.harness.paths.log_file)
+        self.assertNotEqual(log1, log2)
+        text1 = log1.read_text()
+        text2 = log2.read_text()
+        self.assertIn(f"PID {pid1}", text1)
+        self.assertNotIn(f"PID {pid2}", text1)
+        self.assertIn(f"PID {pid2}", text2)
+        self.assertNotIn(f"PID {pid1}", text2)
 
     def test_port_allocation_skips_running_instance_port(self) -> None:
         first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
