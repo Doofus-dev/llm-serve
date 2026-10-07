@@ -28,11 +28,11 @@ def _job(filename: str, author: str = "author") -> DownloadJob:
 
 class DownloadStateTests(unittest.TestCase):
     def test_progress_pct_when_total_known(self) -> None:
-        st = DownloadState(running=True, used_bytes=500, expected_bytes=1000)
+        st = DownloadState(used_bytes=500, expected_bytes=1000)
         self.assertAlmostEqual(st.progress_pct or 0, 50.0)
 
     def test_progress_pct_none_without_total(self) -> None:
-        st = DownloadState(running=True, used_bytes=500, expected_bytes=0)
+        st = DownloadState(used_bytes=500, expected_bytes=0)
         self.assertIsNone(st.progress_pct)
 
     def test_status_line_available_immediately(self) -> None:
@@ -51,8 +51,8 @@ class DownloadStateTests(unittest.TestCase):
         self.assertEqual(mgr.enqueue(second), "started")
         self.assertEqual(mgr.active_count, 2)
         self.assertTrue(mgr.busy)
-        self.assertTrue(mgr.has_filename("a.gguf"))
-        self.assertTrue(mgr.has_filename("b.gguf"))
+        self.assertTrue(mgr.has_job("author/a.gguf"))
+        self.assertTrue(mgr.has_job("author/b.gguf"))
 
     def test_duplicate_file_is_rejected(self) -> None:
         mgr = DownloadManager()
@@ -69,13 +69,21 @@ class DownloadStateTests(unittest.TestCase):
         self.assertIn("a.gguf", line)
         self.assertIn("b.gguf", line)
 
-    def test_progress_for_matches_filename(self) -> None:
+    def test_progress_for_matches_repo_qualified_key(self) -> None:
         mgr = DownloadManager()
-        mgr.enqueue(_job("Qwen3.8-27B-Q3_K_S.gguf"))
+        mgr.enqueue(_job("Qwen3.8-27B-Q3_K_S.gguf", author="one"))
         st = mgr.state
-        self.assertTrue(st.is_transferring("Qwen3.8-27B-Q3_K_S.gguf"))
-        self.assertFalse(st.is_transferring("other.gguf"))
-        self.assertIsNotNone(st.progress_for("Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertTrue(st.is_transferring("one/Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertFalse(st.is_transferring("two/Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertFalse(st.is_transferring("Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertFalse(st.is_transferring("one/other.gguf"))
+        self.assertIsNotNone(st.progress_for("one/Qwen3.8-27B-Q3_K_S.gguf"))
+
+    def test_same_filename_from_different_authors_is_not_a_duplicate(self) -> None:
+        mgr = DownloadManager()
+        self.assertEqual(mgr.enqueue(_job("m.gguf", author="one")), "started")
+        self.assertEqual(mgr.enqueue(_job("m.gguf", author="two")), "started")
+        self.assertEqual(mgr.active_count, 2)
 
     def test_unsubscribe_stops_notifications(self) -> None:
         mgr = DownloadManager()

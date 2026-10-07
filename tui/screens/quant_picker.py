@@ -21,7 +21,7 @@ from tui.data.context_length import (
     resolve_context_length,
 )
 from tui.data.gpu import GPUStats, query_gpu
-from tui.data.hf import HubFile, list_repo_ggufs
+from tui.data.hf import HubFile, list_repo_ggufs, repo_author
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
 from tui.data.quant_table import (
     QuantFileRow,
@@ -151,6 +151,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self.on_download = on_download
         self.download_manager = download_manager
         self._rows: list[QuantFileRow] = []
+        self._tracked_keys: set[str] = set()
         self._files: list[HubFile] = []
         self._load_id = 0
         self.gpu = GPUStats()
@@ -261,15 +262,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             table = self.query_one("#quant-table", DataTable)
         except Exception:
             return
-        self._rows = build_quant_file_rows(
-            self._files,
-            gpu=self.gpu,
-            context_tokens=self.context_tokens,
-            offload_ratio=self.offload_ratio,
-            baselines_path=self.baselines_path,
-            models_dir=self.models_dir,
-            author=self._repo_author(),
-        )
+        self._rows = self._build_rows()
         for row in self._rows:
             try:
                 table.update_cell(row.path, "act_vram", row.act_vram)
@@ -279,14 +272,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
             except Exception:
                 continue
 
-    def _repo_author(self) -> str:
-        source = self.cfg.params.get("source")
-        if isinstance(source, dict):
-            return str(source.get("author") or "")
-        return ""
-
-    def _refresh_table(self) -> None:
-        self._rows = build_quant_file_rows(
+    def _build_rows(self) -> list[QuantFileRow]:
+        return build_quant_file_rows(
             self._files,
             gpu=self.gpu,
             context_tokens=self.context_tokens,
@@ -295,6 +282,20 @@ class QuantPickerScreen(ModalScreen[str | None]):
             models_dir=self.models_dir,
             author=self._repo_author(),
         )
+
+    def _download_key(self, path: str) -> str:
+        source = self.cfg.params.get("source")
+        repo = str(source.get("repo") or "") if isinstance(source, dict) else ""
+        return f"{repo_author(repo)}/{path}"
+
+    def _repo_author(self) -> str:
+        source = self.cfg.params.get("source")
+        if isinstance(source, dict):
+            return str(source.get("author") or "")
+        return ""
+
+    def _refresh_table(self) -> None:
+        self._rows = self._build_rows()
 
         table = self.query_one("#quant-table", DataTable)
         table.clear(columns=True)
@@ -463,23 +464,12 @@ class QuantPickerScreen(ModalScreen[str | None]):
             bar = self.query_one("#quant-download-progress", ProgressBar)
         except Exception:
             return
-        mine = [
-            item
-            for item in state.jobs
-            if item.model_slug == self.model_name
-            or item.filename in {row.path for row in self._rows}
-        ]
-        others = [item for item in state.jobs if item not in mine]
-        if mine or others:
-            lines = []
-            if mine:
-                lines.append(state.status_line)
-            elif others:
-                lines.append(state.status_line)
-            if others and mine:
-                extra = ", ".join(item.label for item in others)
-                lines.append(f"[dim]Also downloading: {extra}[/]")
-            status.update("\n".join(lines) if lines else "")
+        current = {item.key for item in state.jobs}
+        if self._tracked_keys - current and self._files:
+            self._rows = self._build_rows()
+        self._tracked_keys = current
+        if state.jobs:
+            status.update(state.status_line)
             total = state.progress_total
             bar.add_class("visible")
             if total:
@@ -500,7 +490,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         except Exception:
             return
         for row in self._rows:
-            transferring = state.is_transferring(row.path)
+            transferring = state.is_transferring(self._download_key(row.path))
             try:
                 table.update_cell(
                     row.path,
@@ -518,8 +508,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         if picked.downloaded:
             self.dismiss(picked.quant_id)
             return
-        if self.download_manager is not None and self.download_manager.has_filename(
-            picked.path
+        if self.download_manager is not None and self.download_manager.has_job(
+            self._download_key(picked.path)
         ):
             self.notify(f"{picked.path} is already downloading", severity="information")
             return

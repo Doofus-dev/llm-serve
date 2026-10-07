@@ -406,7 +406,7 @@ class HubScreen(Screen):
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
-                "● on disk · — queue download on select · Act. after a local run · "
+                "● on disk · — download on select · Act. after a local run · "
                 f"[{OK}]●[/] fit · [{WARN}]⚠[/] tight · [{ERR}]●[/] too large[/]",
                 id="hub-help",
             )

@@ -59,7 +59,6 @@ class DownloadProgress:
 
 @dataclass
 class DownloadState:
-    running: bool = False
     filename: str = ""
     model_slug: str = ""
     display: str = ""
@@ -68,12 +67,7 @@ class DownloadState:
     expected_bytes: int = 0
     elapsed_s: int = 0
     cli_line: str = ""
-    queued: tuple[str, ...] = ()
     jobs: tuple[DownloadProgress, ...] = field(default_factory=tuple)
-
-    @property
-    def queued_count(self) -> int:
-        return len(self.queued)
 
     @property
     def active_count(self) -> int:
@@ -91,16 +85,16 @@ class DownloadState:
 
     @property
     def active(self) -> bool:
-        return self.running or bool(self.queued) or bool(self.jobs)
+        return bool(self.jobs)
 
-    def progress_for(self, filename: str) -> DownloadProgress | None:
+    def progress_for(self, key: str) -> DownloadProgress | None:
         for item in self.jobs:
-            if item.filename == filename or item.key.endswith(f"/{filename}"):
+            if item.key == key:
                 return item
         return None
 
-    def is_transferring(self, filename: str) -> bool:
-        return self.progress_for(filename) is not None
+    def is_transferring(self, key: str) -> bool:
+        return self.progress_for(key) is not None
 
 
 class DownloadManager:
@@ -130,7 +124,6 @@ class DownloadManager:
         expected = sum(item.expected_bytes for item in jobs)
         primary = jobs[0] if jobs else None
         self.state = DownloadState(
-            running=bool(jobs),
             filename=primary.filename if primary else "",
             model_slug=primary.model_slug if primary else "",
             display=primary.display if primary else "",
@@ -147,18 +140,11 @@ class DownloadManager:
         return bool(self._active)
 
     @property
-    def queue_size(self) -> int:
-        return max(0, len(self._active) - 1)
-
-    @property
     def active_count(self) -> int:
         return len(self._active)
 
     def has_job(self, key: str) -> bool:
         return key in self._active
-
-    def has_filename(self, filename: str) -> bool:
-        return any(job.filename == filename for job in self._active.values())
 
     def enqueue(self, job: DownloadJob) -> EnqueueResult:
         """Register a job so it can start immediately. Duplicates are ignored."""
