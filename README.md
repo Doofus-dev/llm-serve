@@ -1,6 +1,6 @@
 # llm-serve
 
-A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a quant and preset, and start one `llama-server` — from the TUI or the command line.
+A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a quant and preset, and start one or more `llama-server` processes — from the TUI or the command line.
 
 ## What it does
 
@@ -9,7 +9,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
 - **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …). The TUI can compare and independently edit two slots of one model/quant.
 - **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, download one or more quants.
-- **One server** — A single tracked `llama-server`. Launch refuses if one is already running.
+- **Concurrent servers** — One `llama-server` per model, each on its own port. Launch another without stopping the first. `stop` with no argument stops the tracked server (or the first running instance if none is tracked); `stop <model>` stops that instance.
 - **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
 - **Setup** — `./setup.sh` installs a project `.venv`, clones and builds llama.cpp (CUDA / ROCm / CPU), and puts `llm-serve` on `PATH`.
 
@@ -62,9 +62,9 @@ llm-serve <model>              Start in the background
 llm-serve <model> --live       Foreground with live logs
 llm-serve <model> --dry-run    Print the llama-server command; do not start
 llm-serve <model> --remote     Bind 0.0.0.0
-llm-serve status               PID, port, local/remote, last log lines
-llm-serve stop                 Stop the tracked server
-llm-serve stop <model>         Stop only if that model is running
+llm-serve status               PID, port, VRAM, local/remote, last log lines
+llm-serve stop                 Stop the tracked (or first running) server
+llm-serve stop <model>         Stop that model; others keep running
 llm-serve update               Pull and rebuild llama.cpp
 llm-serve update --yes         Same, no confirm
 ```
@@ -102,7 +102,7 @@ After setup, `~/.local/bin/llm-serve` points at the repo script, so the TUI and 
 └────────────────────┴─ translated server log ────────────────────┘
 ```
 
-The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05`, or `not running`. The running line shows family, quant, and preset slot: `RUNNING  Qwen 3.5  Q8_0  [1]`. **R** and **V** set remote and log verbosity for the *next* launch (saved in `tui-settings.json`).
+The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05` when one model is up, or `N running  •  :8081 :8082` when several are. The running line shows family, quant, and preset slot: `RUNNING  Qwen 3.5  Q8_0  [1]`. **L** can start another model on a free port. **S** stops the selected running model, or the tracked server if the selection is not running. **R** and **V** set remote and log verbosity for the *next* launch (saved in `tui-settings.json`).
 
 | Key | Action |
 |-----|--------|
@@ -200,7 +200,7 @@ llm-serve/
 ├── patches/llama.cpp/     # Applied at build time
 ├── models/                # GGUFs as author/filename.gguf
 ├── llama.cpp/             # Clone + build
-├── logs/                  # llm-serve.log, .llm-serve.pid
+├── logs/                  # llm-serve.log, .llm-serve.pid, instances/ (<pid>.pid, <port>.log per extra server)
 └── .venv/
 ```
 
@@ -225,7 +225,7 @@ Binds `0.0.0.0` and prints reachable URLs. Only use this on a trusted LAN or pri
 
 **Non-GGUF models?** No. llama.cpp GGUF only.
 
-**Several models at once?** No. One PID file, one server.
+**Several models at once?** Yes. Each model is its own `llama-server` on a distinct port. `llm-serve status` lists them with per-PID VRAM when `nvidia-smi` is available.
 
 **vLLM or another backend?** No.
 

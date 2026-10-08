@@ -6,23 +6,26 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tui.launch import (
     LaunchError,
+    allocate_port,
     apply_env_overrides,
     build_server_args,
+    instance_log_path,
     launch_background,
     prepare_launch,
     rotate_log,
     status_text,
     stop_server,
 )
-from tui.data.pidfile import write_pid_file
+from tui.data.gpu import query_pid_vram_mb
+from tui.data.pidfile import list_instances, write_pid_file
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
 from tui.data.presets import PARAM_TO_ENV
 
-from tests.support import DISPLAY, MODEL_SLUG, QUANT, Harness
+from tests.support import DISPLAY, MODEL_SLUG, OTHER_SLUG, QUANT, Harness
 
 
 class EnvOverrideTests(unittest.TestCase):
@@ -119,8 +122,13 @@ class ProcessTests(unittest.TestCase):
     def tearDown(self) -> None:
         from tui.data.pidfile import read_pid_file
 
-        info = read_pid_file(self.harness.paths.pid_file)
-        if info is not None and info.pid != os.getpid() and info.alive:
+        for info in list_instances(
+            pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+        ):
+            if info.pid != os.getpid() and info.alive:
+                stop_server(info.model, paths=self.harness.paths)
+        leftover = read_pid_file(self.harness.paths.pid_file)
+        if leftover is not None and leftover.pid != os.getpid() and leftover.alive:
             stop_server(paths=self.harness.paths)
         self.harness.cleanup()
 
@@ -162,6 +170,139 @@ class ProcessTests(unittest.TestCase):
             stop_server("no-such-model", paths=self.harness.paths)
         self.assertTrue(self.harness.paths.pid_file.exists())
         self.harness.paths.pid_file.unlink()
+
+    def test_concurrent_launch_tracks_two_ports(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid1 = launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        self.assertNotEqual(pid1, pid2)
+        self.assertNotEqual(first.port, second.port)
+        instances = list_instances(
+            pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+        )
+        models = {info.model for info in instances}
+        ports = {info.port for info in instances}
+        self.assertEqual(models, {MODEL_SLUG, OTHER_SLUG})
+        self.assertEqual(ports, {first.port, second.port})
+        text, code = status_text(paths=self.harness.paths)
+        self.assertEqual(code, 0)
+        self.assertIn(MODEL_SLUG, text)
+        self.assertIn(OTHER_SLUG, text)
+
+    def test_stop_one_instance_leaves_the_other(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid1 = launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        message = stop_server(OTHER_SLUG, paths=self.harness.paths)
+        self.assertIn("Stopped", message)
+        self.assertIn(OTHER_SLUG, message)
+        remaining = list_instances(
+            pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+        )
+        self.assertEqual([info.pid for info in remaining], [pid1])
+        self.assertTrue(any(info.model == MODEL_SLUG for info in remaining))
+        self.assertFalse(any(info.pid == pid2 for info in remaining))
+
+    def test_stop_without_args_only_stops_tracked(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid1 = launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        message = stop_server(paths=self.harness.paths)
+        self.assertIn(MODEL_SLUG, message)
+        remaining = list_instances(
+            pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+        )
+        self.assertEqual([info.pid for info in remaining], [pid2])
+        self.assertFalse(self.harness.paths.pid_file.exists())
+
+    def test_repeated_stop_without_args_reaches_untracked_instance(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        stop_server(paths=self.harness.paths)
+        message = stop_server(paths=self.harness.paths)
+        self.assertIn("Stopped", message)
+        self.assertIn(str(pid2), message)
+        self.assertEqual(
+            list_instances(
+                pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+            ),
+            [],
+        )
+        self.assertEqual(stop_server(paths=self.harness.paths), "No model running")
+
+    def test_each_instance_logs_to_its_own_file(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid1 = launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        second = prepare_launch(OTHER_SLUG, paths=self.harness.paths)
+        pid2 = launch_background(second, paths=self.harness.paths, failfast_seconds=0.2)
+        log1 = instance_log_path(pid1, first.port, self.harness.paths)
+        log2 = instance_log_path(pid2, second.port, self.harness.paths)
+        self.assertEqual(log1, self.harness.paths.log_file)
+        self.assertNotEqual(log1, log2)
+        text1 = log1.read_text()
+        text2 = log2.read_text()
+        self.assertIn(f"PID {pid1}", text1)
+        self.assertNotIn(f"PID {pid2}", text1)
+        self.assertIn(f"PID {pid2}", text2)
+        self.assertNotIn(f"PID {pid1}", text2)
+
+    def test_port_allocation_skips_running_instance_port(self) -> None:
+        first = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        launch_background(first, paths=self.harness.paths, failfast_seconds=0.2)
+        again = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        self.assertNotEqual(again.port, first.port)
+        pid = launch_background(again, paths=self.harness.paths, failfast_seconds=0.2)
+        instances = list_instances(
+            pid_file=self.harness.paths.pid_file, log_dir=self.harness.paths.log_dir
+        )
+        self.assertEqual(len(instances), 2)
+        self.assertEqual({info.port for info in instances}, {first.port, again.port})
+        self.assertTrue(any(info.pid == pid for info in instances))
+
+    def test_status_vram_from_nvidia_smi_and_degrades(self) -> None:
+        plan = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        pid = launch_background(plan, paths=self.harness.paths, failfast_seconds=0.2)
+        with patch("tui.launch.query_pid_vram_mb", return_value={pid: 8192.0}):
+            text, code = status_text(paths=self.harness.paths)
+        self.assertEqual(code, 0)
+        self.assertIn("VRAM", text)
+        self.assertIn("8.0G", text)
+        with patch("tui.launch.query_pid_vram_mb", return_value=None):
+            text, _ = status_text(paths=self.harness.paths)
+        self.assertIn("n/a", text)
+        with patch("tui.launch.query_pid_vram_mb", return_value={}):
+            text, _ = status_text(paths=self.harness.paths)
+        self.assertIn("n/a", text)
+
+
+class PortAllocationTests(unittest.TestCase):
+    def test_allocate_port_skips_taken(self) -> None:
+        port = allocate_port(8081, {8081}, "127.0.0.1")
+        self.assertNotEqual(port, 8081)
+        self.assertGreater(port, 8081)
+
+
+class VramQueryTests(unittest.TestCase):
+    def test_query_pid_vram_sums_rows_and_degrades_when_missing(self) -> None:
+        csv = (
+            "pid, process_name, used_memory [MiB]\n"
+            "10, /usr/bin/llama-server, 8192 MiB\n"
+            "10, /usr/bin/llama-server, 1024 MiB\n"
+        )
+        result = Mock(returncode=0, stdout=csv)
+        with patch("tui.data.gpu.subprocess.run", return_value=result):
+            by_pid = query_pid_vram_mb()
+        self.assertEqual(by_pid[10], 9216.0)
+        with patch("tui.data.gpu.subprocess.run", side_effect=FileNotFoundError):
+            self.assertIsNone(query_pid_vram_mb())
+        failed = Mock(returncode=1, stdout="")
+        with patch("tui.data.gpu.subprocess.run", return_value=failed):
+            self.assertIsNone(query_pid_vram_mb())
 
 
 class RotateLogTests(unittest.TestCase):

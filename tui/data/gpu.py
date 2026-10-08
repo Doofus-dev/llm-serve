@@ -271,6 +271,44 @@ def _drm_vram_mb(pid: int) -> float:
     return total
 
 
+NVIDIA_PID_VRAM_CMD = (
+    "nvidia-smi",
+    "--query-compute-apps=pid,process_name,used_memory",
+    "--format=csv",
+)
+
+
+def query_pid_vram_mb() -> dict[int, float] | None:
+    """Per-PID GPU memory in MiB from nvidia-smi, or None if unavailable.
+
+    Same PID on multiple GPUs is summed. Missing nvidia-smi, a failed
+    query, or a timeout degrades to None so callers can show n/a.
+    """
+    try:
+        result = subprocess.run(
+            list(NVIDIA_PID_VRAM_CMD),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    by_pid: dict[int, float] = {}
+    for proc in parse_nvidia_compute_apps(result.stdout):
+        by_pid[proc.pid] = by_pid.get(proc.pid, 0.0) + proc.vram_mb
+    return by_pid
+
+
+def format_pid_vram(mb: float | None) -> str:
+    if mb is None or mb <= 0:
+        return "n/a"
+    if mb >= 1024:
+        return f"{mb / 1024:.1f}G"
+    return f"{mb:.0f}M"
+
+
 def _query_nvidia_compute_apps() -> list[ProcessMem]:
     try:
         result = subprocess.run(

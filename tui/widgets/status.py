@@ -120,10 +120,25 @@ def format_generation_speed(gen_tps: float, width: int = SPARKLINE_WIDTH) -> Tex
     return speed
 
 
-def fmt_server_status_line(info: PidInfo | None, uptime: float) -> str:
+def fmt_server_status_line(
+    info: PidInfo | None,
+    uptime: float,
+    instances: list[PidInfo] | None = None,
+) -> str:
     """Live `port • PID • up` line shown in the top header."""
+    extras = [item for item in (instances or []) if item.alive]
     if info and info.alive:
-        return f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(uptime)}"
+        extras = [item for item in extras if item.pid != info.pid]
+        if not extras:
+            return f"port {info.port}  •  PID {info.pid}  •  up {fmt_uptime(uptime)}"
+        ports = " ".join(f":{item.port}" for item in [info, *extras])
+        return f"{1 + len(extras)} running  •  {ports}"
+    if extras:
+        if len(extras) == 1:
+            only = extras[0]
+            return f"port {only.port}  •  PID {only.pid}  •  up {fmt_uptime(uptime)}"
+        ports = " ".join(f":{item.port}" for item in extras)
+        return f"{len(extras)} running  •  {ports}"
     return "not running"
 
 
@@ -144,19 +159,23 @@ class StatusHeader(Static):
     """
 
     pid_info: reactive[PidInfo | None] = reactive(None)
+    instances: reactive[list[PidInfo]] = reactive([])
     uptime: reactive[float] = reactive(0.0)
 
     def render(self) -> Text:
         info = self.pid_info
-        if info and info.alive:
-            return Text(fmt_server_status_line(info, self.uptime), style=ACCENT)
-        return Text("not running", style=TEXT_MUTED)
+        line = fmt_server_status_line(info, self.uptime, self.instances)
+        if line == "not running":
+            return Text("not running", style=TEXT_MUTED)
+        return Text(line, style=ACCENT)
 
 
 class StatusPanel(Static):
     """Live status + throughput + GPU."""
 
     pid_info: reactive[PidInfo | None] = reactive(None)
+    instances: reactive[list[PidInfo]] = reactive([])
+    instance_labels: reactive[dict[int, str]] = reactive({})
     model_display: reactive[str | None] = reactive(None)
     quant_display: reactive[str | None] = reactive(None)
     preset_display: reactive[str | None] = reactive(None)
@@ -211,6 +230,35 @@ class StatusPanel(Static):
                 renderables.append(Text(f"{family}  •  {slot_text}", style=TEXT_MUTED))
             else:
                 renderables.append(Text(family, style=TEXT_MUTED))
+
+        alive_instances = [item for item in self.instances if item.alive]
+        if len(alive_instances) > 1:
+            vram_by_pid: dict[int, float] = {}
+            if self.gpu:
+                for proc in self.gpu.processes:
+                    vram_by_pid[proc.pid] = vram_by_pid.get(proc.pid, 0.0) + proc.vram_mb
+            table = Table(
+                box=None,
+                expand=True,
+                padding=(0, 1),
+                show_edge=False,
+                show_header=True,
+                pad_edge=False,
+                collapse_padding=True,
+            )
+            table.add_column("MODEL", ratio=2, no_wrap=True, overflow="ellipsis")
+            table.add_column("PORT", justify="right", no_wrap=True, width=6)
+            table.add_column("PRESET", no_wrap=True, width=12)
+            table.add_column("VRAM", justify="right", no_wrap=True, width=6)
+            for item in alive_instances:
+                label = self.instance_labels.get(item.pid) or item.model
+                preset = item.quant or "-"
+                if item.preset_slot is not None:
+                    preset = f"{preset} [{item.preset_slot}]"
+                used = vram_by_pid.get(item.pid)
+                vram = fmt_mem_mb(used) if used else "n/a"
+                table.add_row(label, str(item.port), preset, vram)
+            renderables.append(table)
 
         throughput: list[Text] = []
         m = self.metrics
