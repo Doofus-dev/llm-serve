@@ -93,7 +93,13 @@ from tui.screens.editors import (
 )
 from tui.screens.hub import HubScreen
 from tui.screens.help import HelpScreen
+from tui.data.compare_metrics import resolve_default_preset
 from tui.screens.compare import PresetCompareScreen
+from tui.screens.preset_compare_page import (
+    PresetComparePage,
+    PresetCompareSide,
+    identity_for_quant,
+)
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
@@ -152,6 +158,9 @@ class LLMServeApp(App):
                 variables={
                     "border": "#3a4046",
                     "text-muted": "#8a929c",
+                    "ok": "#58c06d",
+                    "warn": "#d8a63f",
+                    "err": "#d9534f",
                 },
             )
         )
@@ -788,6 +797,11 @@ class LLMServeApp(App):
             )
             extra = f" (+{len(clamped) - 3} more)" if len(clamped) > 3 else ""
             self.notify(f"Capped preset context: {bits}{extra}", severity="warning")
+        for screen in self.screen_stack:
+            if isinstance(screen, PresetComparePage):
+                screen.store = self.preset_store
+                screen.registry = self.registry
+                screen.refresh_measured_columns()
         self._update_footer()
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
@@ -1406,6 +1420,115 @@ class LLMServeApp(App):
             )
         )
 
+    def action_compare_selected(self) -> None:
+        if self._editor_mode:
+            self.notify("Close the editor first", severity="warning")
+            return
+        data = self._selected_data()
+        if data is None or data[0] not in ("model", "preset"):
+            self.notify("Select a preset first", severity="warning")
+            return
+        if data[0] == "preset":
+            _, model_name, quant, slot = data
+        else:
+            model_name = data[1]
+            if model_name not in self.registry.models:
+                self.notify("Select a preset first", severity="warning")
+                return
+            quant = self._model_active_quant(model_name)
+            slot = get_active_slot(self.preset_store, model_name, quant)
+            if slot is None:
+                self.notify("Select a preset first", severity="warning")
+                return
+        if model_name not in self.registry.models:
+            self.notify(f"Model '{model_name}' not found", severity="error")
+            return
+        selected_preset = get_preset(self.preset_store, model_name, quant, slot)
+        if selected_preset is None:
+            self.notify("Select a preset first", severity="warning")
+            return
+
+        left = PresetCompareSide(
+            model=model_name,
+            quant=quant,
+            slot=slot,
+            identity=identity_for_quant(self.registry.models[model_name], quant),
+            preset=selected_preset,
+            role="selected",
+        )
+
+        try:
+            panel = self.query_one(StatusPanel)
+            pid_info = panel.pid_info
+            live = panel.live_throughput
+            history = list(panel.gen_tps_history or [])
+            gpu_name = panel.gpu.name if panel.gpu else ""
+        except (QueryError, NoMatches):
+            pid_info = None
+            live = None
+            history = None
+            gpu_name = ""
+
+        if pid_info is not None and pid_info.alive:
+            running_key = self._model_key_for_instance(pid_info)
+            if not running_key or running_key not in self.registry.models:
+                self.notify("Running model not found", severity="warning")
+                return
+            running_quant = pid_info.quant or self._model_active_quant(running_key)
+            running_slot = pid_info.preset_slot
+            if running_slot is None:
+                running_slot = get_active_slot(
+                    self.preset_store, running_key, running_quant
+                )
+            if running_slot is None:
+                self.notify("No default preset", severity="warning")
+                return
+            running_preset = get_preset(
+                self.preset_store, running_key, running_quant, running_slot
+            )
+            if running_preset is None:
+                self.notify("No default preset", severity="warning")
+                return
+            right = PresetCompareSide(
+                model=running_key,
+                quant=running_quant,
+                slot=running_slot,
+                identity=identity_for_quant(
+                    self.registry.models[running_key], running_quant
+                ),
+                preset=running_preset,
+                role="running",
+            )
+        else:
+            default = resolve_default_preset(self.preset_store, model_name, quant)
+            if default is None:
+                self.notify("No default preset", severity="warning")
+                return
+            right = PresetCompareSide(
+                model=model_name,
+                quant=quant,
+                slot=default.slot,
+                identity=identity_for_quant(self.registry.models[model_name], quant),
+                preset=default,
+                role="default",
+            )
+            live = None
+            history = None
+
+        self.push_screen(
+            PresetComparePage(
+                left=left,
+                right=right,
+                models_dir=self.paths.models_dir,
+                baselines_path=self.paths.baselines_json,
+                store=self.preset_store,
+                registry=self.registry,
+                live=live,
+                history=history,
+                gpu_name=gpu_name,
+            )
+        )
+
     def action_open_hub(self) -> None:
         if self._editor_mode:
             self.notify("Close the editor first", severity="warning")
@@ -1431,7 +1554,7 @@ class LLMServeApp(App):
         self.push_screen(HelpScreen())
 
     def notify(self, message: str, *, title: str = "", severity: str = "information",
-               timeout: float | None = None, **kwargs):
+               timeout: float | None = 4.0, **kwargs):
         if timeout is not None:
             try:
                 return super().notify(message, title=title, severity=severity,
