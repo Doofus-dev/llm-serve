@@ -474,4 +474,17 @@ Button.-style-flat:disabled {
         margin: 0;
         padding: 0;
     }
+
+.notification {
+    background: $panel 55%;
+}
+.notification--success {
+    background: $ok 45%;
+}
+.notification--warning {
+    background: $warn 45%;
+}
+.notification--error {
+    background: $err 45%;
+}
     
