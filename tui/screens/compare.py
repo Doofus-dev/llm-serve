@@ -32,6 +32,18 @@ def _fmt_side(value: str) -> str:
     return value if value else "—"
 
 
+def _direction_style(left_val: str, right_val: str) -> str:
+    """Color a changed value by direction: higher is green, lower is red."""
+    try:
+        left_num = float(left_val)
+        right_num = float(right_val)
+    except (TypeError, ValueError):
+        return WARN
+    if right_num == left_num:
+        return WARN
+    return OK if right_num > left_num else ERR
+
+
 def format_diff_summary(
     left_name: str,
     right_name: str,
@@ -55,9 +67,21 @@ def format_diff_summary(
             continue
         lines.append(f"  [{color}]{labels[kind]}[/]")
         for param, (left_val, right_val) in items.items():
-            lines.append(
-                f"    [{color}]{param}[/]  {_fmt_side(left_val)} → {_fmt_side(right_val)}"
-            )
+            if kind == "changed":
+                right_style = _direction_style(left_val, right_val)
+                left_style = (
+                    WARN
+                    if right_style == WARN
+                    else (ERR if right_style == OK else OK)
+                )
+                lines.append(
+                    f"    {param}  [{left_style}]{_fmt_side(left_val)}[/] → "
+                    f"[{right_style}]{_fmt_side(right_val)}[/]"
+                )
+            else:
+                lines.append(
+                    f"    [{color}]{param}[/]  {_fmt_side(left_val)} → {_fmt_side(right_val)}"
+                )
     if len(lines) == 1 and left_name == right_name:
         lines.append("  [dim]no differences[/]")
     elif len(lines) == 1:

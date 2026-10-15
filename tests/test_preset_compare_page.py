@@ -18,6 +18,7 @@ from tui.data.compare_metrics import (
 from tui.data.pidfile import write_pid_file
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
 from tui.data.presets import get_preset, load_presets, save_presets, set_preset
+from tui.screens.compare import format_diff_summary
 from tui.screens.preset_compare_page import PresetComparePage
 from tui.theme import ERR, OK
 from tui.widgets.nav import ModelNav
@@ -195,6 +196,59 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             metrics = self._metrics(screen)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
+
+    def _config_grid(self, screen) -> str:
+        return str(screen.query_one("#pcp-config-grid").content)
+
+    async def test_column_grid_pairs_values(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            self._select_preset(app, MODEL_SLUG, 2)
+            app.action_compare_selected()
+            await pilot.pause(0.4)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetComparePage)
+            grid = self._config_grid(screen)
+            self.assertIn("Model", grid)
+            self.assertIn("Quant", grid)
+            self.assertIn("Preset", grid)
+            self.assertIn("Max context", grid)
+            self.assertIn("RUNTIME CONFIG", grid)
+            self.assertIn("ctx", grid)
+            self.assertIn("gpu_layers", grid)
+
+    async def test_arrow_keys_cycle_right_preset(self) -> None:
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            self._select_preset(app, MODEL_SLUG, 2)
+            app.action_compare_selected()
+            await pilot.pause(0.4)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetComparePage)
+            self.assertEqual(screen.right.slot, 1)
+            await pilot.press("down")
+            await pilot.pause(0.2)
+            self.assertEqual(screen.right.slot, 2)
+            await pilot.press("down")
+            await pilot.pause(0.2)
+            self.assertEqual(screen.right.slot, 1)
+            await pilot.press("up")
+            await pilot.pause(0.2)
+            self.assertEqual(screen.right.slot, 2)
+            grid = self._config_grid(screen)
+            self.assertIn("max-ctx", grid)
+
+    def test_diff_summary_colors_changed_values_by_direction(self) -> None:
+        summary = format_diff_summary(
+            "a",
+            "b",
+            {"ctx": 8192, "gpu_layers": 99},
+            {"ctx": 16384, "gpu_layers": 99},
+        )
+        self.assertIn(f"ctx  [{ERR}]8192[/] → [{OK}]16384[/]", summary)
+        self.assertNotIn("gpu_layers", summary)
 
     async def test_cross_model_shows_caveat(self) -> None:
         write_pid_file(
