@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical
 from textual.css.query import NoMatches
+from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label, Static
 from rich.text import Text
@@ -21,10 +21,15 @@ from tui.data.compare_metrics import (
     resolve_baseline,
 )
 from tui.data.models_json import ModelConfig, Registry
-from tui.data.presets import Preset, PresetStore, get_preset
+from tui.data.presets import (
+    Preset,
+    PresetStore,
+    get_preset,
+    list_presets_for_quant,
+)
 from tui.screens.compare import format_diff_summary
 from tui.widgets.action_bar import ActionBar
-from tui.widgets.config import build_preset_grid
+from tui.widgets.config import build_preset_column
 
 
 @dataclass
@@ -58,6 +63,8 @@ class PresetComparePage(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close_page", "Back"),
+        Binding("up", "cycle_preset(-1)", "Previous"),
+        Binding("down", "cycle_preset(1)", "Next"),
     ]
 
     CSS = """\
@@ -82,24 +89,17 @@ class PresetComparePage(ModalScreen[None]):
         padding: 0 1;
         color: $text-muted;
     }
-    #pcp-columns {
-        height: 1fr;
-        width: 1fr;
-    }
-    .pcp-side {
-        width: 1fr;
-        height: 1fr;
-        padding: 0 1;
-        border: round $border;
-        background: $panel;
-    }
-    .pcp-side-title {
+    #pcp-config-title {
         height: auto;
         color: $accent;
         text-style: bold;
+        border: round $border;
+        background: $panel;
     }
-    .pcp-side-grid {
+    #pcp-config-grid {
         height: auto;
+        padding: 0 1;
+        background: $panel;
     }
     #pcp-metrics {
         height: auto;
@@ -109,20 +109,17 @@ class PresetComparePage(ModalScreen[None]):
         border: round $border;
         background: $panel;
     }
-    #pcp-diff-wrap {
-        height: auto;
-        max-height: 10;
-    }
     #pcp-diff {
         height: auto;
+        max-height: 10;
         padding: 0 1;
-        color: $foreground;
         border: round $border;
         background: $panel;
     }
     #pcp-help {
         height: auto;
         color: $text-muted;
+        min-height: 1;
     }
     """
 
@@ -154,18 +151,12 @@ class PresetComparePage(ModalScreen[None]):
         with Vertical(id="pcp-root"):
             yield Label("", id="pcp-title")
             yield Static("", id="pcp-status")
-            with Horizontal(id="pcp-columns"):
-                with VerticalScroll(classes="pcp-side", id="pcp-left"):
-                    yield Static("", classes="pcp-side-title", id="pcp-left-title")
-                    yield Static("", classes="pcp-side-grid", id="pcp-left-grid")
-                with VerticalScroll(classes="pcp-side", id="pcp-right"):
-                    yield Static("", classes="pcp-side-title", id="pcp-right-title")
-                    yield Static("", classes="pcp-side-grid", id="pcp-right-grid")
+            yield Static("", id="pcp-config-title")
+            yield Static("", id="pcp-config-grid")
             yield Static("", id="pcp-metrics")
-            with VerticalScroll(id="pcp-diff-wrap"):
-                yield Static("", id="pcp-diff")
+            yield Static("", id="pcp-diff")
             yield Static(
-                "[dim]Esc back · green = better · red = worse[/]",
+                "[dim]Esc back · ↑↓ flip preset · green = better · red = worse[/]",
                 id="pcp-help",
             )
             with ActionBar(id="pcp-actions"):
@@ -173,6 +164,14 @@ class PresetComparePage(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self.call_after_refresh(self.refresh_measured_columns)
+
+    def on_key(self, event: Key) -> None:
+        """Cycle presets with arrow keys regardless of widget focus."""
+        if event.key in {"up", "down"}:
+            direction = 1 if event.key == "down" else -1
+            self.action_cycle_preset(direction)
+            event.stop()
+            event.prevent_default()
 
     def refresh_measured_columns(self) -> None:
         """Reload baselines / presets and redraw grids, metrics, and diff."""
@@ -193,24 +192,29 @@ class PresetComparePage(ModalScreen[None]):
                     self.registry.models[side.model], side.quant
                 )
 
+    def _right_options(self) -> list[int]:
+        """Comparable right-side slots: all presets of the same model/quant."""
+        if self.store is None:
+            return []
+        return sorted(
+            list_presets_for_quant(self.store, self.left.model, self.left.quant)
+        )
+
     def _fill_content(self) -> None:
         try:
             title = self.query_one("#pcp-title", Label)
             status = self.query_one("#pcp-status", Static)
-            left_title = self.query_one("#pcp-left-title", Static)
-            right_title = self.query_one("#pcp-right-title", Static)
-            left_grid = self.query_one("#pcp-left-grid", Static)
-            right_grid = self.query_one("#pcp-right-grid", Static)
+            config_title = self.query_one("#pcp-config-title", Static)
+            config_grid = self.query_one("#pcp-config-grid", Static)
             metrics = self.query_one("#pcp-metrics", Static)
             diff = self.query_one("#pcp-diff", Static)
         except NoMatches:
             return
 
         left_display = str(self.left.identity.get("display") or self.left.model)
-        right_display = str(self.right.identity.get("display") or self.right.model)
         title.update(
-            f"[bold]Compare presets[/]  {left_display}/{self.left.quant}  vs  "
-            f"{right_display}/{self.right.quant}"
+            f"[bold]Compare presets[/]  [bold cyan]{self.left.preset.name}[/]  vs  "
+            f"[bold cyan]{self.right.preset.name}[/]  [dim]{left_display}/{self.left.quant}[/]"
         )
         if self.left.model != self.right.model:
             status.update(
@@ -219,13 +223,18 @@ class PresetComparePage(ModalScreen[None]):
         else:
             status.update("")
 
-        left_title.update(Text(self.left.title, style="bold cyan"))
-        right_title.update(Text(self.right.title, style="bold cyan"))
-        left_grid.update(
-            build_preset_grid(self.left.identity, self.left.preset, self.models_dir)
+        config_title.update(
+            Text(
+                f"{self.left.title}  vs  {self.right.title}",
+                style="bold cyan",
+            )
         )
-        right_grid.update(
-            build_preset_grid(self.right.identity, self.right.preset, self.models_dir)
+        config_grid.update(
+            build_preset_column(
+                (self.left.identity, self.left.preset),
+                (self.right.identity, self.right.preset),
+                self.models_dir,
+            )
         )
 
         baselines = (
@@ -274,6 +283,30 @@ class PresetComparePage(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "pcp-back":
             self.action_close_page()
+
+    def action_cycle_preset(self, direction: int) -> None:
+        """Flip the right side to the next/previous preset of the same quant."""
+        if self.store is None:
+            return
+        options = self._right_options()
+        if not options:
+            self.notify(
+                "No other presets to compare against", severity="warning"
+            )
+            return
+        current = next(
+            (i for i, slot in enumerate(options) if slot == self.right.slot), None
+        )
+        if current is None:
+            current = 0
+        index = (current + direction) % len(options)
+        slot = options[index]
+        preset = get_preset(self.store, self.left.model, self.left.quant, slot)
+        if preset is None:
+            return
+        self.right.slot = slot
+        self.right.preset = preset
+        self.refresh_measured_columns()
 
     def action_close_page(self) -> None:
         self.dismiss(None)

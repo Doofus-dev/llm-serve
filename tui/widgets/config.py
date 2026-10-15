@@ -95,6 +95,40 @@ def _paired_markup(rows: list[tuple[str, object]]) -> list[str]:
     return lines
 
 
+def _markup_pair(label: str, left_value: object, right_value: object) -> str:
+    """One row of a side-by-side pair: label, then left and right values."""
+    left_text = f"[{WARN_STYLE}]{escape(str(left_value))}[/]" if left_value != "" else "[dim]—[/]"
+    right_text = f"[{WARN_STYLE}]{escape(str(right_value))}[/]" if right_value != "" else "[dim]—[/]"
+    return f"{_markup_label(label)}  {left_text}  {right_text}"
+
+
+def build_preset_column(
+    left: tuple[dict, Preset],
+    right: tuple[dict, Preset],
+    models_dir: Path | None,
+) -> str:
+    """Side-by-side rich markup: each row shows label, left value, right value."""
+    left_fields = _identity_fields(left[0], left[1], models_dir)
+    right_fields = _identity_fields(right[0], right[1], models_dir)
+    field_names = ("Model", "Quant", "Preset", "Author", "Max context", "File")
+    lines = [
+        _markup_pair(name, left_fields[name], right_fields[name]) for name in field_names
+    ]
+    left_settings = _runtime_settings(left[0], left[1])
+    right_settings = _runtime_settings(right[0], right[1])
+    rows: dict[str, tuple[object, object]] = {key: (value, "") for key, value in left_settings}
+    for key, value in right_settings:
+        if key in rows:
+            rows[key] = (rows[key][0], value)
+        else:
+            rows[key] = ("", value)
+    lines.append("")
+    lines.append("[bold dim]RUNTIME CONFIG[/]")
+    for key, (left_value, right_value) in rows.items():
+        lines.append(_markup_pair(key, left_value, right_value))
+    return "\n".join(lines)
+
+
 def build_preset_grid(
     identity: dict, preset: Preset, models_dir: Path | None
 ) -> str:
