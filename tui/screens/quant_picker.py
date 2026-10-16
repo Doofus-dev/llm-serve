@@ -41,6 +41,7 @@ from tui.data.quant_table import (
 )
 from tui.data.vram import fmt_memory_mb
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
+from tui.widgets.nav import EYEBALL
 from tui.theme import ERR, OK, WARN
 
 
@@ -414,8 +415,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         table.add_column("Quant / file", width=28, key="file")
         table.add_column("File size", width=9, key="size")
         table.add_column("Est. VRAM", width=16, key="vram")
-        table.add_column("Act. VRAM off", width=13, key="act_vram_off")
-        table.add_column("Act. VRAM on", width=12, key="act_vram_on")
+        table.add_column("Act. VRAM", width=13, key="act_vram_off")
+        table.add_column(f"Act. VRAM {EYEBALL}", width=13, key="act_vram_on")
         table.add_column("Est. t/s", width=9, key="speed")
         table.add_column("Act. t/s", width=8, key="act_speed")
 

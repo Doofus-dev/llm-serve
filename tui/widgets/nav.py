@@ -48,7 +48,7 @@ class VisionEyeball(Static):
     VisionEyeball {
         width: auto;
         height: 1;
-        min-width: 2;
+        min-width: 3;
         padding: 0 1 0 0;
         content-align: left middle;
     }
@@ -69,7 +69,9 @@ class VisionEyeball(Static):
     """
 
     def __init__(self, model_name: str, state: str) -> None:
-        label = f"{EYEBALL}!" if state == "missing" else EYEBALL
+        # Trailing space matches the missing "!" so on/off keep the same box
+        # and the hammer never sits flush against the eyeball.
+        label = f"{EYEBALL}!" if state == "missing" else f"{EYEBALL} "
         super().__init__(label, classes=f"vision-{state}", markup=False)
         self.model_name = model_name
         self.state = state
@@ -89,7 +91,7 @@ class ToolsBadge(Static):
         width: auto;
         height: 1;
         min-width: 2;
-        padding: 0;
+        padding: 0 0 0 1;
         color: magenta;
         content-align: left middle;
     }

@@ -329,6 +329,21 @@ class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
             harness.cleanup()
 
 
+class VisionEyeballSpacingTests(unittest.TestCase):
+    def test_on_off_and_missing_share_the_same_label_width(self) -> None:
+        from rich.cells import cell_len
+        from tui.widgets.nav import EYEBALL, VisionEyeball
+
+        missing = VisionEyeball("demo", "missing")
+        on = VisionEyeball("demo", "on")
+        off = VisionEyeball("demo", "off")
+        self.assertEqual(missing.content, f"{EYEBALL}!")
+        self.assertEqual(on.content, f"{EYEBALL} ")
+        self.assertEqual(off.content, f"{EYEBALL} ")
+        self.assertEqual(cell_len(str(missing.content)), cell_len(str(on.content)))
+        self.assertEqual(cell_len(str(on.content)), cell_len(str(off.content)))
+
+
 class ModelNavCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         from tests.support import Harness

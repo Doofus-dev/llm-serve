@@ -16,6 +16,7 @@ from textual.widgets import Button, DataTable, Input, Label, Select, Static, Swi
 from textual.worker import Worker, WorkerState
 
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
+from tui.widgets.nav import EYEBALL
 from tui.data.baselines import latest_baseline_ctx, load_baselines
 from tui.data.context_length import (
     context_length_options,
@@ -770,8 +771,8 @@ class HubScreen(Screen):
         table.add_column("Quant / file", width=24, key="file")
         table.add_column("File size", width=9, key="size")
         table.add_column("Est. VRAM", width=16, key="vram")
-        table.add_column("Act. VRAM off", width=13, key="act_vram_off")
-        table.add_column("Act. VRAM on", width=12, key="act_vram_on")
+        table.add_column("Act. VRAM", width=13, key="act_vram_off")
+        table.add_column(f"Act. VRAM {EYEBALL}", width=13, key="act_vram_on")
         table.add_column("Est. t/s", width=9, key="speed")
         table.add_column("Act. t/s", width=8, key="act_speed")
         self._rows = build_quant_file_rows(
