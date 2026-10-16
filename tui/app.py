@@ -19,7 +19,12 @@ from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selec
 from tui.data.baselines import RunBaseline, record_baseline
 from tui.data.downloads import DownloadJob, DownloadManager
 from tui.data.gpu import query_gpu
-from tui.data.capabilities import apply_mmproj_identity, pick_mmproj_filename
+from tui.data.capabilities import (
+    apply_mmproj_identity,
+    mmproj_filename_for,
+    pick_mmproj_filename,
+)
+from tui.data.quant import is_mmproj_gguf
 from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
 from tui.data.models_json import (
     AliasTarget,
@@ -300,6 +305,28 @@ class LLMServeApp(App):
 
         def _after_download() -> None:
             from tui.data.gguf import read_gguf_architecture
+            from tui.data.models_json import find_model_by_repo, load_registry, save_registry
+
+            if is_mmproj_gguf(filename):
+                reg = load_registry(self.paths.models_json, models_dir=self.paths.models_dir)
+                slug = find_model_by_repo(reg, repo)
+                if slug is None and clone_from in reg.models:
+                    source = reg.models[clone_from].params.get("source")
+                    if isinstance(source, dict) and source.get("repo") == repo:
+                        slug = clone_from
+                cfg = reg.models.get(slug) if slug else None
+                if cfg is not None:
+                    apply_mmproj_identity(
+                        cfg.params,
+                        author=plan.author,
+                        mmproj_filename=Path(filename).name,
+                    )
+                    save_registry(self.paths.models_json, reg)
+                self._reload_registry()
+                self.notify(f"Downloaded vision projector {Path(filename).name}")
+                if on_complete:
+                    on_complete()
+                return
 
             base_params = dict(self.registry.models[clone_from].params)
             source = build_source_metadata(plan, filename)
@@ -318,8 +345,6 @@ class LLMServeApp(App):
             )
             mmproj_name = pick_mmproj_filename(plan.filenames, quant_filename=filename)
             if mmproj_name:
-                from tui.data.models_json import load_registry, save_registry
-
                 reg = load_registry(self.paths.models_json, models_dir=self.paths.models_dir)
                 cfg = reg.models.get(slug)
                 if cfg is not None:
@@ -379,15 +404,17 @@ class LLMServeApp(App):
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
             extra_files: list[str] = []
-            mmproj_rel = str(cfg.params.get("mmproj") or "")
-            mmproj_name = Path(mmproj_rel).name if mmproj_rel else pick_mmproj_filename(
-                [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
-                quant_filename=filename,
-            )
-            if mmproj_name:
-                local = self.paths.models_dir / (mmproj_rel or f"{source.get('author', '')}/{mmproj_name}")
-                if not local.is_file():
-                    extra_files.append(mmproj_name)
+            if not is_mmproj_gguf(filename):
+                mmproj_rel = str(cfg.params.get("mmproj") or "")
+                mmproj_name = mmproj_filename_for(
+                    cfg.params,
+                    [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
+                    quant_filename=filename,
+                )
+                if mmproj_name:
+                    local = self.paths.models_dir / (mmproj_rel or f"{source.get('author', '')}/{mmproj_name}")
+                    if not local.is_file():
+                        extra_files.append(mmproj_name)
             plan = build_download_plan(
                 source["repo"],
                 filename,

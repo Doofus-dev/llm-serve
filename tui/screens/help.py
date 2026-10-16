@@ -188,8 +188,9 @@ class HelpScreen(ModalScreen[None]):
                 yield Static(
                     "• Press H to open the Hub and browse/download models\n"
                     "  from Hugging Face. Caps chips show vision (needs a\n"
-                    "  mmproj sidecar) and tools. Downloading a quant also\n"
-                    "  fetches the projector; launch passes --mmproj.",
+                    "  mmproj sidecar) and tools. Use Download vision when\n"
+                    "  the projector is missing, and the Vision switch to\n"
+                    "  pass or skip --mmproj on launch.",
                     classes="help-tip",
                 )
                 yield Static(

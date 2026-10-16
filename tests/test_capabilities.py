@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
 from tui.data.capabilities import (
     capabilities_from_files,
     capabilities_from_hf,
+    is_vision_enabled,
+    mmproj_filename_for,
     pick_mmproj_filename,
     resolve_capabilities,
+    vision_projector_ready,
 )
 from tui.data.hf import HubFile, HubRepo, build_download_plan
 from tui.data.models_json import merge_repo_catalog
@@ -130,6 +134,48 @@ class DownloadPlanExtraTests(unittest.TestCase):
         )
 
 
+class VisionToggleTests(unittest.TestCase):
+    def test_defaults_on(self) -> None:
+        self.assertTrue(is_vision_enabled({}))
+        self.assertTrue(is_vision_enabled({"vision_enabled": True}))
+        self.assertFalse(is_vision_enabled({"vision_enabled": False}))
+        self.assertFalse(is_vision_enabled({"vision_enabled": "off"}))
+
+    def test_recorded_mmproj_name_wins(self) -> None:
+        params = {"mmproj": "bartowski/mmproj-Qwen3.8-27B-bf16.gguf"}
+        self.assertEqual(
+            mmproj_filename_for(params, ["mmproj-Qwen3.8-27B-f16.gguf"]),
+            "mmproj-Qwen3.8-27B-bf16.gguf",
+        )
+
+    def test_ready_when_file_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            path = models_dir / "bartowski" / "mmproj-Qwen3.8-27B-f16.gguf"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"gguf")
+            params = {"mmproj": "bartowski/mmproj-Qwen3.8-27B-f16.gguf"}
+            name, ready = vision_projector_ready(params, models_dir)
+            self.assertEqual(name, "mmproj-Qwen3.8-27B-f16.gguf")
+            self.assertTrue(ready)
+
+    def test_missing_projector_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            params = {"mmproj": "bartowski/mmproj-Qwen3.8-27B-f16.gguf"}
+            name, ready = vision_projector_ready(params, Path(tmp))
+            self.assertEqual(name, "mmproj-Qwen3.8-27B-f16.gguf")
+            self.assertFalse(ready)
+
+    def test_identity_keeps_vision_enabled(self) -> None:
+        from tui.data.preset_template import identity_from_seed
+
+        identity = identity_from_seed(
+            {"display": "Qwen", "vision_enabled": False, "gpu_layers": 99}
+        )
+        self.assertFalse(identity["vision_enabled"])
+        self.assertNotIn("gpu_layers", identity)
+
+
 class LaunchMmprojTests(unittest.TestCase):
     def test_mmproj_flag_is_passed(self) -> None:
         from tui.data.preset_template import DEFAULT_PRESET_PARAMS
@@ -152,6 +198,49 @@ class LaunchMmprojTests(unittest.TestCase):
             "--mmproj",
             "/tmp/mmproj-f16.gguf",
         ])
+
+    def test_prepare_launch_omits_mmproj_when_vision_off(self) -> None:
+        from tests.support import MODEL_SLUG, Harness
+        from tui.launch import prepare_launch
+
+        harness = Harness()
+        try:
+            models_dir = harness.paths.models_dir
+            mmproj = models_dir / "demo" / "mmproj-Demo-f16.gguf"
+            mmproj.write_bytes(b"gguf")
+            app = harness.app()
+            cfg = app.registry.models[MODEL_SLUG]
+            cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+            cfg.params["vision_enabled"] = False
+            from tui.data.models_json import save_registry
+
+            save_registry(harness.paths.models_json, app.registry)
+            plan = prepare_launch(MODEL_SLUG, paths=harness.paths)
+            self.assertNotIn("--mmproj", plan.args)
+        finally:
+            harness.cleanup()
+
+    def test_prepare_launch_passes_mmproj_when_vision_on(self) -> None:
+        from tests.support import MODEL_SLUG, Harness
+        from tui.launch import prepare_launch
+
+        harness = Harness()
+        try:
+            models_dir = harness.paths.models_dir
+            mmproj = models_dir / "demo" / "mmproj-Demo-f16.gguf"
+            mmproj.write_bytes(b"gguf")
+            app = harness.app()
+            cfg = app.registry.models[MODEL_SLUG]
+            cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+            cfg.params["vision_enabled"] = True
+            from tui.data.models_json import save_registry
+
+            save_registry(harness.paths.models_json, app.registry)
+            plan = prepare_launch(MODEL_SLUG, paths=harness.paths)
+            self.assertIn("--mmproj", plan.args)
+            self.assertEqual(plan.args[plan.args.index("--mmproj") + 1], str(mmproj))
+        finally:
+            harness.cleanup()
 
 
 class HubRepoTagParseTests(unittest.TestCase):

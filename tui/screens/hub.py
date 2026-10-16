@@ -12,7 +12,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import QueryError
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, DataTable, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
 
 from tui.widgets.action_bar import ActionBar, ACTION_BUTTON_CSS
@@ -30,8 +30,11 @@ from tui.data.capabilities import (
     badge_markup,
     capabilities_from_hf,
     capabilities_from_payload,
+    is_vision_enabled,
+    mmproj_filename_for,
     pick_mmproj_filename,
     resolve_capabilities,
+    vision_projector_ready,
 )
 from tui.data.hf import (
     HF_INSTALL_HINT,
@@ -60,6 +63,7 @@ from tui.data.models_json import (
     downloaded_repo_ids,
     find_model_by_repo,
     load_registry,
+    save_registry,
 )
 from tui.data.quant import family_display
 from tui.data.quant_table import (
@@ -256,6 +260,25 @@ class HubScreen(Screen):
         margin: 0 1;
     }
 
+    #vision-label {
+        width: auto;
+        height: 3;
+        content-align: left middle;
+        margin: 0 1 0 1;
+    }
+
+    #vision-toggle {
+        width: auto;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+
+    #download-vision {
+        min-width: 18;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+
     #hub-help {
         height: 1;
         min-height: 1;
@@ -368,6 +391,7 @@ class HubScreen(Screen):
         self._syncing_controls = False
         self._filters_ready = False
         self._file_caps = ModelCapabilities()
+        self._session_vision_enabled = True
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
@@ -413,6 +437,9 @@ class HubScreen(Screen):
                     allow_blank=False,
                 )
                 yield Static("", id="hardware-summary")
+                yield Label("Vision:", id="vision-label")
+                yield Switch(value=True, id="vision-toggle")
+                yield Button("Download vision", id="download-vision")
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
@@ -428,6 +455,7 @@ class HubScreen(Screen):
         self._update_context_options()
         self.query_one("#context-controls").display = False
         self.query_one("#hub-table", DataTable).focus()
+        self._refresh_vision_controls()
         self._search_from_filters()
         self._filters_ready = True
 
@@ -478,6 +506,7 @@ class HubScreen(Screen):
         self.query_one("#back", Button).disabled = True
         self.query_one("#select", Button).label = "Open / download"
         self._refresh_hub_title()
+        self._refresh_vision_controls()
         self._render_repo_table()
         self.query_one("#hub-table", DataTable).focus()
 
@@ -491,6 +520,7 @@ class HubScreen(Screen):
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
         self._refresh_hub_title()
+        self._refresh_vision_controls()
         self._update_context_options(repo.context_length)
         self._file_load_id += 1
         self._load_files(repo, self._file_load_id)
@@ -624,6 +654,85 @@ class HubScreen(Screen):
             "B: back · Esc: close[/]"
         )
 
+    def _registered_cfg(self):
+        if not self.selected_repo:
+            return None
+        existing = find_model_by_repo(self.registry, self.selected_repo.id)
+        if not existing:
+            return None
+        return self.registry.models.get(existing)
+
+    def _vision_params(self) -> dict:
+        cfg = self._registered_cfg()
+        return dict(cfg.params) if cfg is not None else {}
+
+    def _refresh_vision_controls(self) -> None:
+        try:
+            label = self.query_one("#vision-label", Label)
+            toggle = self.query_one("#vision-toggle", Switch)
+            button = self.query_one("#download-vision", Button)
+        except QueryError:
+            return
+        if self.mode != "files" or not self.selected_repo:
+            label.display = False
+            toggle.display = False
+            button.display = False
+            return
+        params = self._vision_params()
+        name, on_disk = vision_projector_ready(params, self.models_dir, self.files)
+        show = bool(self._file_caps.vision or name)
+        label.display = show
+        toggle.display = show
+        button.display = show and bool(name) and not on_disk
+        enabled = (
+            is_vision_enabled(params)
+            if params
+            else self._session_vision_enabled
+        )
+        self._syncing_controls = True
+        try:
+            toggle.value = enabled
+        finally:
+            self._syncing_controls = False
+
+    def _persist_vision_enabled(self, enabled: bool) -> None:
+        self._session_vision_enabled = enabled
+        cfg = self._registered_cfg()
+        if cfg is not None:
+            cfg.params["vision_enabled"] = bool(enabled)
+            save_registry(self.models_json_path, self.registry)
+        self._refresh_hub_title()
+        self._refresh_vision_controls()
+
+    def _download_vision(self) -> None:
+        if not self.selected_repo:
+            self.notify("Open a repo first", severity="warning")
+            return
+        params = self._vision_params()
+        name = mmproj_filename_for(params, self.files)
+        if not name:
+            self.notify("No vision projector found for this repo", severity="warning")
+            return
+        _, on_disk = vision_projector_ready(params, self.models_dir, self.files)
+        if on_disk:
+            self.notify("Vision projector is already on disk")
+            self._refresh_vision_controls()
+            return
+        cfg = self._registered_cfg()
+        if cfg is not None:
+            self._start_download((cfg.display, cfg.name), name)
+            return
+        default_name = self._default_profile_name(self.selected_repo, name)
+        existing = next(iter(self.registry.models), None)
+        if existing:
+            clone = self.registry.models[existing]
+            self._start_download((clone.display, existing), name)
+            return
+        self.app.push_screen(
+            DownloadProfileDialog(self.registry, default_name),
+            lambda result: self._start_download(result, name),
+        )
+
     def _render_repo_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
@@ -675,6 +784,7 @@ class HubScreen(Screen):
         for row in self._rows:
             table.add_row(*quant_file_row_cells(row), key=row.path)
         self._refresh_hub_title()
+        self._refresh_vision_controls()
 
     def _log(self, message: str) -> None:
         if self._downloading:
@@ -773,6 +883,7 @@ class HubScreen(Screen):
         max_ctx = self.selected_repo.context_length if self.selected_repo else None
         ctx_note = f" · max context {self._fmt_context(max_ctx)}" if max_ctx else ""
         self._log(f"Found {len(files)} GGUF files{ctx_note}")
+        self._refresh_vision_controls()
         self.query_one("#hub-table", DataTable).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -786,6 +897,13 @@ class HubScreen(Screen):
             self.action_back()
         elif event.button.id == "select":
             self._handle_select()
+        elif event.button.id == "download-vision":
+            self._download_vision()
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if self._syncing_controls or event.switch.id != "vision-toggle":
+            return
+        self._persist_vision_enabled(bool(event.value))
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing_controls:
@@ -889,11 +1007,14 @@ class HubScreen(Screen):
         display_name, clone_from = profile
         all_names = [f.path for f in self.files]
         extra_files: list[str] = []
-        mmproj = pick_mmproj_filename(self.files, quant_filename=filename)
-        if mmproj:
-            local_mmproj = self.models_dir / self.selected_repo.author / mmproj
-            if not local_mmproj.is_file():
-                extra_files.append(mmproj)
+        from tui.data.quant import is_mmproj_gguf
+
+        if not is_mmproj_gguf(filename):
+            mmproj = pick_mmproj_filename(self.files, quant_filename=filename)
+            if mmproj:
+                local_mmproj = self.models_dir / self.selected_repo.author / mmproj
+                if not local_mmproj.is_file():
+                    extra_files.append(mmproj)
         plan = build_download_plan(
             self.selected_repo.id,
             filename,

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Callable
 
@@ -10,7 +9,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Label, ProgressBar, Select, Static
+from textual.widgets import Button, DataTable, Label, ProgressBar, Select, Static, Switch
 
 from tui.data.downloads import DownloadManager, DownloadState
 from tui.data.context_length import (
@@ -25,8 +24,11 @@ from tui.data.capabilities import (
     apply_mmproj_identity,
     badge_markup,
     capabilities_from_payload,
+    is_vision_enabled,
+    mmproj_filename_for,
     pick_mmproj_filename,
     resolve_capabilities,
+    vision_projector_ready,
 )
 from tui.data.hf import HubFile, fetch_repo_info, list_repo_ggufs, repo_author
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
@@ -129,6 +131,24 @@ class QuantPickerScreen(ModalScreen[str | None]):
         align: left middle;
     }
 
+    #vision-label {
+        width: auto;
+        height: 3;
+        content-align: left middle;
+        margin: 0 1 0 0;
+    }
+
+    #vision-toggle {
+        width: auto;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+
+    #download-vision {
+        min-width: 18;
+        margin: 0 1 0 0;
+    }
+
     #quant-picker-help {
         height: 3;
         color: $text-muted;
@@ -201,6 +221,9 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 id="quant-picker-help",
             )
             with ActionBar(id="quant-picker-actions"):
+                yield Label("Vision", id="vision-label")
+                yield Switch(value=True, id="vision-toggle")
+                yield Button("Download vision", id="download-vision")
                 yield Button("Select / Download", variant="primary", id="select")
                 yield Button("Cancel", id="cancel")
 
@@ -217,6 +240,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         )
         self._render_estimate_controls()
         self._update_title()
+        self._refresh_vision_controls()
         self._load_id += 1
         self._fetch_files(self._load_id)
         if self.download_manager is not None:
@@ -319,7 +343,66 @@ class QuantPickerScreen(ModalScreen[str | None]):
         if max_ctx is not None:
             title += f"  [dim]max ctx {fmt_ctx_compact(max_ctx)}[/]"
         title += f"  {self._caps_markup}"
+        if not is_vision_enabled(self.cfg.params):
+            title += "  [dim]vision off[/]"
         self.query_one("#quant-picker-title", Label).update(title)
+
+    def _refresh_vision_controls(self) -> None:
+        caps = resolve_capabilities(
+            params=self.cfg.params,
+            files=self._files,
+            repo_id=self._repo_id(),
+        )
+        name, on_disk = vision_projector_ready(
+            self.cfg.params, self.models_dir, self._files
+        )
+        show = bool(caps.vision or name)
+        try:
+            label = self.query_one("#vision-label", Label)
+            toggle = self.query_one("#vision-toggle", Switch)
+            button = self.query_one("#download-vision", Button)
+        except Exception:
+            return
+        label.display = show
+        toggle.display = show
+        button.display = show and bool(name) and not on_disk
+        self._syncing_controls = True
+        try:
+            toggle.value = is_vision_enabled(self.cfg.params)
+        finally:
+            self._syncing_controls = False
+
+    def _persist_vision_enabled(self, enabled: bool) -> None:
+        self.cfg.params["vision_enabled"] = bool(enabled)
+        save_registry(self.registry_path, self.registry)
+        self._update_title()
+        self._refresh_vision_controls()
+
+    def _download_vision(self) -> None:
+        name = mmproj_filename_for(self.cfg.params, self._files)
+        if not name:
+            self.notify("No vision projector found for this model", severity="warning")
+            return
+        _, on_disk = vision_projector_ready(self.cfg.params, self.models_dir, self._files)
+        if on_disk:
+            self.notify("Vision projector is already on disk")
+            self._refresh_vision_controls()
+            return
+        if self.download_manager is not None and self.download_manager.has_job(
+            self._download_key(name)
+        ):
+            self.notify(f"{name} is already downloading", severity="information")
+            return
+        size = next(
+            (item.size for item in self._files if Path(item.path).name == Path(name).name),
+            0,
+        )
+        if self.on_download:
+            self.on_download(self.model_name, name, size)
+            if self.download_manager is not None:
+                self._apply_download_state(self.download_manager.state)
+            return
+        self.notify("Download handler unavailable", severity="error")
 
     def _refresh_table(self) -> None:
         self._rows = self._build_rows()
@@ -420,6 +503,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             return
         self._files = files
         self._update_title()
+        self._refresh_vision_controls()
         if error and not files:
             self.query_one("#quant-picker-status", Static).update(
                 f"[bold $error]{error}[/]"
@@ -465,6 +549,11 @@ class QuantPickerScreen(ModalScreen[str | None]):
             self.offload_ratio = float(event.value)
             self._refresh_table()
 
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if self._syncing_controls or event.switch.id != "vision-toggle":
+            return
+        self._persist_vision_enabled(bool(event.value))
+
     def _selected_row(self) -> QuantFileRow | None:
         table = self.query_one("#quant-table", DataTable)
         if table.cursor_row is None or not self._rows:
@@ -483,6 +572,9 @@ class QuantPickerScreen(ModalScreen[str | None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
+            return
+        if event.button.id == "download-vision":
+            self._download_vision()
             return
         self._confirm()
 
@@ -525,6 +617,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             status.update("")
             bar.remove_class("visible")
             bar.update(total=None)
+            self._refresh_vision_controls()
         self._refresh_disk_cells(state)
 
     def _refresh_disk_cells(self, state: DownloadState) -> None:

@@ -7,12 +7,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tui.data.hf import HubFile
+from tui.data.models_json import save_registry
 from tui.data.presets import get_active_slot, set_preset
 from tui.screens.editors import EditAliasDialog, ParamHelpPanel
 from tui.screens.quant_picker import QuantPickerScreen
+from textual.widgets import Button, Input, Switch
 from tui.widgets.nav import AliasNav, ModelNav
 from tests.support import Harness
-from textual.widgets import Input
 
 
 class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +73,51 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
                 screen._refresh_table()
 
                 self.assertEqual(screen.query_one("#quant-table").row_count, 2)
+
+    async def test_vision_download_button_shows_when_projector_missing(self) -> None:
+        app = self.harness.app()
+        model_name = next(iter(app.registry.models))
+        cfg = app.registry.models[model_name]
+        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+        cfg.params["capabilities"] = {"vision": True, "tools": False}
+        save_registry(app.paths.models_json, app.registry)
+        with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
+            async with app.run_test(size=(120, 45)) as pilot:
+                nav = app.query_one(ModelNav)
+                self._select_model(nav, model_name)
+                await pilot.press("p")
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, QuantPickerScreen)
+                screen._files = [HubFile(path="mmproj-Demo-f16.gguf", size=12)]
+                screen._refresh_vision_controls()
+                button = screen.query_one("#download-vision", Button)
+                toggle = screen.query_one("#vision-toggle", Switch)
+                self.assertTrue(button.display)
+                self.assertTrue(toggle.display)
+                screen._persist_vision_enabled(False)
+                self.assertFalse(screen.cfg.params["vision_enabled"])
+
+    async def test_vision_download_button_hides_when_projector_on_disk(self) -> None:
+        app = self.harness.app()
+        model_name = next(iter(app.registry.models))
+        cfg = app.registry.models[model_name]
+        mmproj = app.paths.models_dir / "demo" / "mmproj-Demo-f16.gguf"
+        mmproj.write_bytes(b"gguf")
+        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+        cfg.params["capabilities"] = {"vision": True, "tools": False}
+        save_registry(app.paths.models_json, app.registry)
+        with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
+            async with app.run_test(size=(120, 45)) as pilot:
+                nav = app.query_one(ModelNav)
+                self._select_model(nav, model_name)
+                await pilot.press("p")
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, QuantPickerScreen)
+                screen._refresh_vision_controls()
+                self.assertFalse(screen.query_one("#download-vision", Button).display)
+                self.assertTrue(screen.query_one("#vision-toggle", Switch).display)
 
     async def test_number_key_activates_matching_preset_on_model_card(self) -> None:
         app = self.harness.app()

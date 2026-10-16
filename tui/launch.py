@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
-from tui.data.capabilities import local_mmproj_path
+from tui.data.capabilities import is_vision_enabled, local_mmproj_path
 from tui.data.gpu import format_pid_vram, query_pid_vram_mb
 from tui.data.models_json import Registry, load_registry, resolve_model_key
 from tui.data.pidfile import (
@@ -470,9 +470,11 @@ def prepare_launch(
     if not model_path.is_file():
         raise LaunchError(f"model not found at {model_path}")
 
-    mmproj_path = local_mmproj_path(cfg.params, paths.models_dir)
-    if mmproj_path is not None:
-        params["mmproj_path"] = str(mmproj_path)
+    mmproj_path = None
+    if is_vision_enabled(cfg.params):
+        mmproj_path = local_mmproj_path(cfg.params, paths.models_dir)
+        if mmproj_path is not None:
+            params["mmproj_path"] = str(mmproj_path)
 
     args = build_server_args(
         model_path=model_path,

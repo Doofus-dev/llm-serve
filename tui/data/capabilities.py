@@ -303,3 +303,41 @@ def apply_mmproj_identity(
         params["mmproj"] = rel
     if caps is not None:
         params["capabilities"] = caps.to_json()
+
+
+def is_vision_enabled(params: Mapping[str, Any] | None) -> bool:
+    """User toggle. Defaults on so a present projector is used."""
+    if not params:
+        return True
+    raw = params.get("vision_enabled")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def mmproj_filename_for(
+    params: Mapping[str, Any] | None = None,
+    files: Sequence[object] = (),
+    *,
+    quant_filename: str | None = None,
+) -> str | None:
+    """Best projector name from recorded identity, then Hub/local file list."""
+    recorded = Path(str((params or {}).get("mmproj") or "")).name
+    if recorded and is_mmproj_gguf(recorded):
+        return recorded
+    return pick_mmproj_filename(files, quant_filename=quant_filename)
+
+
+def vision_projector_ready(
+    params: Mapping[str, Any] | None,
+    models_dir: Path,
+    files: Sequence[object] = (),
+) -> tuple[str | None, bool]:
+    """Return (mmproj filename, True if that file is on disk)."""
+    name = mmproj_filename_for(params, files)
+    path = local_mmproj_path(params or {}, models_dir, extra_files=[name] if name else ())
+    if path is not None:
+        return path.name, True
+    return name, False
