@@ -224,6 +224,26 @@ def pick_mmproj_filename(
     return sorted(candidates, key=score)[0]
 
 
+def _family_hint(params: Mapping[str, Any]) -> str | None:
+    """Filename used to keep projector lookup on this model family."""
+    for value in (
+        Path(str(params.get("mmproj") or "")).name,
+        Path(str(params.get("file") or "")).name,
+    ):
+        if value:
+            return value
+    quants = params.get("quants")
+    if isinstance(quants, dict):
+        active = str(params.get("active_quant") or "")
+        entry = quants.get(active) if active else None
+        if isinstance(entry, dict) and entry.get("filename"):
+            return str(entry.get("filename"))
+        for item in quants.values():
+            if isinstance(item, dict) and item.get("filename"):
+                return str(item.get("filename"))
+    return None
+
+
 def local_mmproj_path(
     params: Mapping[str, Any],
     models_dir: Path,
@@ -276,9 +296,17 @@ def local_mmproj_path(
             continue
         seen.add(resolved)
         unique.append(path)
+    hint = _family_hint(params)
+    if hint:
+        fam = family_key(hint)
+        matched = [path for path in unique if fam and fam in family_key(path.name)]
+        unique = matched
     if not unique:
         return None
-    picked = pick_mmproj_filename([path.name for path in unique])
+    picked = pick_mmproj_filename(
+        [path.name for path in unique],
+        quant_filename=hint,
+    )
     if not picked:
         return unique[0]
     for path in unique:

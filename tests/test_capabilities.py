@@ -10,6 +10,7 @@ from tui.data.capabilities import (
     capabilities_from_files,
     capabilities_from_hf,
     is_vision_enabled,
+    local_mmproj_path,
     mmproj_filename_for,
     pick_mmproj_filename,
     resolve_capabilities,
@@ -158,6 +159,33 @@ class VisionToggleTests(unittest.TestCase):
             name, ready = vision_projector_ready(params, models_dir)
             self.assertEqual(name, "mmproj-Qwen3.8-27B-f16.gguf")
             self.assertTrue(ready)
+
+    def test_local_mmproj_ignores_other_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            folder = models_dir / "bartowski"
+            folder.mkdir(parents=True)
+            (folder / "mmproj-Qwen_Qwen2.5-VL-7B-Instruct-bf16.gguf").write_bytes(b"gguf")
+            params = {
+                "mmproj": "bartowski/mmproj-Qwen3.8-27B-bf16.gguf",
+                "file": "bartowski/Qwen3.8-27B-Q3_K_S.gguf",
+                "source": {"author": "bartowski"},
+            }
+            self.assertIsNone(local_mmproj_path(params, models_dir))
+
+    def test_local_mmproj_picks_matching_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            folder = models_dir / "bartowski"
+            folder.mkdir(parents=True)
+            (folder / "mmproj-Qwen_Qwen2.5-VL-7B-Instruct-bf16.gguf").write_bytes(b"gguf")
+            match = folder / "mmproj-Qwen3.8-27B-f16.gguf"
+            match.write_bytes(b"gguf")
+            params = {
+                "file": "bartowski/Qwen3.8-27B-Q3_K_S.gguf",
+                "source": {"author": "bartowski"},
+            }
+            self.assertEqual(local_mmproj_path(params, models_dir), match)
 
     def test_missing_projector_is_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
