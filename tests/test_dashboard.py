@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import unittest
 
 from rich.console import Console
 
 from tui.widgets.config import ConfigPanel
 from tui.widgets.health import generation_health, temperature_health, vram_health
-from tui.widgets.status import StatusHeader, StatusPanel, format_generation_speed
+from tui.widgets.status import (
+    StatusHeader,
+    StatusPanel,
+    format_generation_speed,
+    format_instance_preset_column,
+    format_preset_display,
+)
 from tui.data.throughput_history import LastRequest, LiveThroughput, SPARKLINE_WIDTH
 from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo, write_pid_file
@@ -122,14 +129,14 @@ class DashboardTests(unittest.TestCase):
         )
         panel.model_display = "Qwen 3.6"
         panel.quant_display = "Q8_0"
-        panel.preset_display = "[1]"
+        panel.preset_display = "[1] default"
 
         rendered = render_text(panel.render())
 
-        self.assertIn("RUNNING  Qwen 3.6  Q8_0  [1]  REMOTE", rendered)
+        self.assertIn("RUNNING  Qwen 3.6  Q8_0  [1] default  REMOTE", rendered)
         self.assertNotIn("qwen36-27b-bartowski", rendered)
 
-    def test_status_panel_hot_bar_shows_family_and_slot_not_path(self) -> None:
+    def test_status_panel_hot_bar_shows_family_quant_and_preset_name(self) -> None:
         panel = StatusPanel()
         panel.pid_info = PidInfo(
             pid=os.getpid(),
@@ -138,22 +145,79 @@ class DashboardTests(unittest.TestCase):
             ts="",
         )
         panel.model_display = "Qwen 3.8"
-        panel.quant_display = "Q8_0"
-        panel.preset_display = "[2]"
+        panel.quant_display = "Q3_K_S"
+        panel.preset_display = "[5] 120K-HighPower"
         panel.uptime = 65
         panel.props = {
             "model_alias": "coding",
-            "model_path": "/home/doofus/models/Qwen3.8-27B-Q8_0.gguf",
+            "model_path": "/home/doofus/models/Qwen3.8-27B-Q3_K_S.gguf",
         }
 
         rendered = render_text(panel.render())
 
-        self.assertIn("Qwen 3.8  •  slot 2", rendered)
+        self.assertIn("RUNNING  Qwen 3.8  Q3_K_S  [5] 120K-HighPower", rendered)
+        self.assertIn("Qwen 3.8  •  Q3_K_S  •  [5] 120K-HighPower", rendered)
+        self.assertNotIn("slot 5", rendered)
         self.assertNotIn("alias coding", rendered)
-        self.assertNotIn("Qwen3.8-27B-Q8_0.gguf", rendered)
+        self.assertNotIn("Qwen3.8-27B-Q3_K_S.gguf", rendered)
         self.assertNotIn("port 8080", rendered)
         self.assertNotIn(f"PID {os.getpid()}", rendered)
         self.assertNotIn("up 0:01:05", rendered)
+
+    def test_format_preset_display_includes_name(self) -> None:
+        self.assertEqual(format_preset_display(5, "120K-HighPower"), "[5] 120K-HighPower")
+        self.assertEqual(format_preset_display(1, "  "), "[1]")
+        self.assertIsNone(format_preset_display(None, "default"))
+        self.assertEqual(
+            format_instance_preset_column("Q3_K_S", 5, "120K-HighPower"),
+            "Q3_K_S [5] 120K-HighPower",
+        )
+        self.assertEqual(format_instance_preset_column("Q8_0", 2, None), "Q8_0 [2]")
+
+    def test_status_panel_multi_instance_preset_column_includes_name(self) -> None:
+        panel = StatusPanel()
+        self_pid = os.getpid()
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            primary = PidInfo(
+                pid=self_pid,
+                model="qwen38-27b-bartowski",
+                port=8080,
+                ts="",
+                quant="Q3_K_S",
+                preset_slot=5,
+            )
+            extra = PidInfo(
+                pid=child.pid,
+                model="other-model",
+                port=8081,
+                ts="",
+                quant="Q8_0",
+                preset_slot=1,
+            )
+            panel.pid_info = primary
+            panel.instances = [primary, extra]
+            panel.instance_labels = {
+                primary.pid: "Qwen 3.8",
+                extra.pid: "Other",
+            }
+            panel.instance_preset_names = {
+                primary.pid: "120K-HighPower",
+                extra.pid: "default",
+            }
+            panel.model_display = "Qwen 3.8"
+            panel.quant_display = "Q3_K_S"
+            panel.preset_display = "[5] 120K-HighPower"
+
+            rendered = render_text(panel.render())
+            collapsed = " ".join(rendered.split())
+
+            self.assertIn("Q3_K_S [5] 120K-HighPower", collapsed)
+            self.assertIn("Q8_0 [1] default", collapsed)
+            self.assertIn("PRESET", collapsed)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
     def test_status_header_shows_live_status_or_not_running(self) -> None:
         header = StatusHeader()
@@ -326,6 +390,87 @@ class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
                 app._refresh_pid()
                 self.assertIn("not running", render_text(header.render()))
         finally:
+            harness.cleanup()
+
+    async def test_refresh_pid_shows_quant_and_preset_name(self) -> None:
+        from tests.support import DISPLAY, MODEL_SLUG, QUANT, Harness
+        from tui.data.presets import get_preset, save_presets
+
+        harness = Harness()
+        try:
+            app = harness.app()
+            async with app.run_test(size=(120, 40)):
+                preset = get_preset(app.preset_store, MODEL_SLUG, QUANT, 1)
+                self.assertIsNotNone(preset)
+                preset.name = "120K-HighPower"
+                save_presets(harness.paths.presets_json, app.preset_store)
+                write_pid_file(
+                    harness.paths.pid_file,
+                    pid=os.getpid(),
+                    model=MODEL_SLUG,
+                    port=8080,
+                    quant=QUANT,
+                    preset_slot=1,
+                    remote=False,
+                )
+                app._refresh_pid()
+                panel = app.query_one(StatusPanel)
+                self.assertEqual(panel.quant_display, QUANT)
+                self.assertEqual(panel.preset_display, "[1] 120K-HighPower")
+                rendered = render_text(panel.render())
+                self.assertIn(f"RUNNING  {DISPLAY}  {QUANT}  [1] 120K-HighPower", rendered)
+                self.assertIn(f"{DISPLAY}  •  {QUANT}  •  [1] 120K-HighPower", rendered)
+        finally:
+            harness.cleanup()
+
+    async def test_refresh_pid_multi_instance_preset_column_includes_name(self) -> None:
+        from tests.support import MODEL_SLUG, OTHER_DISPLAY, OTHER_SLUG, QUANT, Harness
+        from tui.data.pidfile import record_instance
+        from tui.data.presets import get_preset, save_presets
+
+        harness = Harness()
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            app = harness.app()
+            async with app.run_test(size=(120, 40)):
+                primary_preset = get_preset(app.preset_store, MODEL_SLUG, QUANT, 1)
+                other_preset = get_preset(app.preset_store, OTHER_SLUG, QUANT, 1)
+                self.assertIsNotNone(primary_preset)
+                self.assertIsNotNone(other_preset)
+                primary_preset.name = "120K-HighPower"
+                other_preset.name = "coding"
+                save_presets(harness.paths.presets_json, app.preset_store)
+                record_instance(
+                    pid_file=harness.paths.pid_file,
+                    log_dir=harness.paths.log_dir,
+                    pid=os.getpid(),
+                    model=MODEL_SLUG,
+                    port=8080,
+                    quant=QUANT,
+                    preset_slot=1,
+                    remote=False,
+                )
+                record_instance(
+                    pid_file=harness.paths.pid_file,
+                    log_dir=harness.paths.log_dir,
+                    pid=child.pid,
+                    model=OTHER_SLUG,
+                    port=8081,
+                    quant=QUANT,
+                    preset_slot=1,
+                    remote=False,
+                )
+                app._refresh_pid()
+                panel = app.query_one(StatusPanel)
+                self.assertEqual(panel.instance_preset_names[os.getpid()], "120K-HighPower")
+                self.assertEqual(panel.instance_preset_names[child.pid], "coding")
+                collapsed = " ".join(render_text(panel.render()).split())
+                self.assertIn(f"{QUANT} [1] 120K-HighPower", collapsed)
+                self.assertIn(f"{QUANT} [1] coding", collapsed)
+                self.assertIn(OTHER_DISPLAY, collapsed)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
             harness.cleanup()
 
 

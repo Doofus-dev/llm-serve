@@ -99,7 +99,7 @@ from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
 from tui.widgets.log_panel import LogPanel
 from tui.widgets.nav import AliasNav, ModelNav
-from tui.widgets.status import StatusHeader, StatusPanel
+from tui.widgets.status import StatusHeader, StatusPanel, format_preset_display
 
 
 class LLMServeApp(App):
@@ -512,6 +512,20 @@ class LLMServeApp(App):
             )
         return running_key
 
+    def _preset_name_for(
+        self,
+        model_key: str | None,
+        quant: str | None,
+        slot: int | None,
+    ) -> str | None:
+        if not model_key or not quant or slot is None:
+            return None
+        preset = get_preset(self.preset_store, model_key, quant, slot)
+        if preset is None:
+            return None
+        name = (preset.name or "").strip()
+        return name or None
+
     @staticmethod
     def _uptime_for(info) -> float:
         try:
@@ -530,6 +544,7 @@ class LLMServeApp(App):
             if (key := self._model_key_for_instance(item))
         }
         labels = {}
+        preset_names = {}
         for item in instances:
             key = self._model_key_for_instance(item)
             labels[item.pid] = (
@@ -537,6 +552,9 @@ class LLMServeApp(App):
                 if key in self.registry.models
                 else item.model
             )
+            name = self._preset_name_for(key, item.quant, item.preset_slot)
+            if name:
+                preset_names[item.pid] = name
         if not self._editor_mode:
             try:
                 panel = self.query_one(StatusPanel)
@@ -560,6 +578,7 @@ class LLMServeApp(App):
                 panel.pid_info = info if alive else None
                 panel.instances = list(instances)
                 panel.instance_labels = labels
+                panel.instance_preset_names = preset_names
                 running_key = self._model_key_for_instance(info) if info else None
                 panel.model_display = (
                     self.registry.models[running_key].display
@@ -584,7 +603,12 @@ class LLMServeApp(App):
                             slot = get_active_slot(self.preset_store, running_key, quant)
                     panel.quant_display = quant or None
                     if slot is not None:
-                        panel.preset_display = f"[{slot}]"
+                        name = None
+                        if info is not None:
+                            name = preset_names.get(info.pid)
+                        if name is None:
+                            name = self._preset_name_for(running_key, quant, slot)
+                        panel.preset_display = format_preset_display(slot, name)
                 if alive and info:
                     if self.client is None or self.client.base != f"http://127.0.0.1:{info.port}":
                         if self.client:

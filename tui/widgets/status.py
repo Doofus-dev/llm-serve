@@ -120,6 +120,30 @@ def format_generation_speed(gen_tps: float, width: int = SPARKLINE_WIDTH) -> Tex
     return speed
 
 
+def format_preset_display(slot: int | None, name: str | None = None) -> str | None:
+    """Preset slot label for STATUS, e.g. ``[5] 120K-HighPower``."""
+    if slot is None:
+        return None
+    label = f"[{slot}]"
+    cleaned = (name or "").strip()
+    if cleaned:
+        return f"{label} {cleaned}"
+    return label
+
+
+def format_instance_preset_column(
+    quant: str | None,
+    slot: int | None,
+    name: str | None = None,
+) -> str:
+    """PRESET column for the multi-instance STATUS table."""
+    quant_text = quant or "-"
+    preset = format_preset_display(slot, name)
+    if preset:
+        return f"{quant_text} {preset}"
+    return quant_text
+
+
 def fmt_server_status_line(
     info: PidInfo | None,
     uptime: float,
@@ -176,6 +200,7 @@ class StatusPanel(Static):
     pid_info: reactive[PidInfo | None] = reactive(None)
     instances: reactive[list[PidInfo]] = reactive([])
     instance_labels: reactive[dict[int, str]] = reactive({})
+    instance_preset_names: reactive[dict[int, str]] = reactive({})
     model_display: reactive[str | None] = reactive(None)
     quant_display: reactive[str | None] = reactive(None)
     preset_display: reactive[str | None] = reactive(None)
@@ -221,15 +246,12 @@ class StatusPanel(Static):
         renderables: list = [header]
         if info and info.alive:
             family = self.model_display or info.model
-            slot_text = None
+            bits = [family]
+            if self.quant_display:
+                bits.append(self.quant_display)
             if self.preset_display:
-                slot = str(self.preset_display).strip("[]")
-                if slot:
-                    slot_text = f"slot {slot}"
-            if slot_text:
-                renderables.append(Text(f"{family}  •  {slot_text}", style=TEXT_MUTED))
-            else:
-                renderables.append(Text(family, style=TEXT_MUTED))
+                bits.append(self.preset_display)
+            renderables.append(Text("  •  ".join(bits), style=TEXT_MUTED))
 
         alive_instances = [item for item in self.instances if item.alive]
         if len(alive_instances) > 1:
@@ -248,13 +270,15 @@ class StatusPanel(Static):
             )
             table.add_column("MODEL", ratio=2, no_wrap=True, overflow="ellipsis")
             table.add_column("PORT", justify="right", no_wrap=True, width=6)
-            table.add_column("PRESET", no_wrap=True, width=12)
+            table.add_column("PRESET", no_wrap=True, overflow="ellipsis", min_width=16, ratio=2)
             table.add_column("VRAM", justify="right", no_wrap=True, width=6)
             for item in alive_instances:
                 label = self.instance_labels.get(item.pid) or item.model
-                preset = item.quant or "-"
-                if item.preset_slot is not None:
-                    preset = f"{preset} [{item.preset_slot}]"
+                preset = format_instance_preset_column(
+                    item.quant,
+                    item.preset_slot,
+                    self.instance_preset_names.get(item.pid),
+                )
                 used = vram_by_pid.get(item.pid)
                 vram = fmt_mem_mb(used) if used else "n/a"
                 table.add_row(label, str(item.port), preset, vram)
