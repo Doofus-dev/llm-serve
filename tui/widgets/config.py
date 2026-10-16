@@ -95,11 +95,24 @@ def _paired_markup(rows: list[tuple[str, object]]) -> list[str]:
     return lines
 
 
-def _markup_pair(label: str, left_value: object, right_value: object) -> str:
-    """One row of a side-by-side pair: label, then left and right values."""
-    left_text = f"[{WARN_STYLE}]{escape(str(left_value))}[/]" if left_value != "" else "[dim]—[/]"
-    right_text = f"[{WARN_STYLE}]{escape(str(right_value))}[/]" if right_value != "" else "[dim]—[/]"
-    return f"{_markup_label(label)}  {left_text}  {right_text}"
+def _markup_pair(
+    label: str,
+    left_value: object,
+    right_value: object,
+    label_w: int,
+    left_w: int,
+) -> str:
+    """One aligned row: label, left value, right value with computed column widths."""
+    left_str = "" if left_value == "" else str(left_value)
+    right_str = "" if right_value == "" else str(right_value)
+    # Pad plain text to column width, then apply markup
+    label_padded = f"{label:<{label_w}}"
+    left_padded = f"{left_str:<{left_w}}" if left_str else "—"
+    right_padded = right_str
+    label_part = f"[{ACCENT}]{escape(label_padded)}[/]"
+    left_part = f"[{WARN_STYLE}]{escape(left_padded)}[/]" if left_str else "[dim]—[/]"
+    right_part = f"[{WARN_STYLE}]{escape(right_padded)}[/]" if right_str else "[dim]—[/]"
+    return f"{label_part}  {left_part}  {right_part}"
 
 
 def build_preset_column(
@@ -111,9 +124,6 @@ def build_preset_column(
     left_fields = _identity_fields(left[0], left[1], models_dir)
     right_fields = _identity_fields(right[0], right[1], models_dir)
     field_names = ("Model", "Quant", "Preset", "Author", "Max context", "File")
-    lines = [
-        _markup_pair(name, left_fields[name], right_fields[name]) for name in field_names
-    ]
     left_settings = _runtime_settings(left[0], left[1])
     right_settings = _runtime_settings(right[0], right[1])
     rows: dict[str, tuple[object, object]] = {key: (value, "") for key, value in left_settings}
@@ -122,11 +132,92 @@ def build_preset_column(
             rows[key] = (rows[key][0], value)
         else:
             rows[key] = ("", value)
+
+    # Compute column widths separately for identity and runtime sections
+    identity_rows = [(name, left_fields[name], right_fields[name]) for name in field_names]
+    runtime_rows = [(key, lv, rv) for key, (lv, rv) in rows.items()]
+
+    id_label_w = max(len(name) for name, _, _ in identity_rows)
+    id_left_w = max(len(str(lv)) if lv != "" else 1 for _, lv, _ in identity_rows)
+    id_left_w = max(id_left_w, len("—"))
+
+    rt_label_w = max(len(name) for name, _, _ in runtime_rows) if runtime_rows else 0
+    rt_left_w = max(
+        (len(str(lv)) if lv != "" else 1 for _, lv, _ in runtime_rows), default=1
+    )
+    rt_left_w = max(rt_left_w, len("—"))
+
+    lines: list[str] = []
+    for name, lv, rv in identity_rows:
+        lines.append(_markup_pair(name, lv, rv, id_label_w, id_left_w))
     lines.append("")
     lines.append("[bold dim]RUNTIME CONFIG[/]")
-    for key, (left_value, right_value) in rows.items():
-        lines.append(_markup_pair(key, left_value, right_value))
+    for key, lv, rv in runtime_rows:
+        lines.append(_markup_pair(key, lv, rv, rt_label_w, rt_left_w))
     return "\n".join(lines)
+
+
+def build_preset_column_wide(
+    left: tuple[dict, Preset],
+    right: tuple[dict, Preset],
+    models_dir: Path | None,
+    width: int,
+) -> str:
+    """Two-column layout: identity fields on left, runtime config on right."""
+    left_fields = _identity_fields(left[0], left[1], models_dir)
+    right_fields = _identity_fields(right[0], right[1], models_dir)
+    field_names = ("Model", "Quant", "Preset", "Author", "Max context", "File")
+    left_settings = _runtime_settings(left[0], left[1])
+    right_settings = _runtime_settings(right[0], right[1])
+    rows: dict[str, tuple[object, object]] = {key: (value, "") for key, value in left_settings}
+    for key, value in right_settings:
+        if key in rows:
+            rows[key] = (rows[key][0], value)
+        else:
+            rows[key] = ("", value)
+
+    # Identity rows (left column)
+    identity_rows = [(name, left_fields[name], right_fields[name]) for name in field_names]
+    # Runtime rows (right column)
+    runtime_rows = [(key, lv, rv) for key, (lv, rv) in rows.items()]
+
+    # Compute widths for each column independently
+    id_label_w = max(len(name) for name, _, _ in identity_rows)
+    id_left_w = max(len(str(lv)) if lv != "" else 1 for _, lv, _ in identity_rows)
+    id_left_w = max(id_left_w, 1)
+
+    rt_label_w = max(len(name) for name, _, _ in runtime_rows)
+    rt_left_w = max(len(str(lv)) if lv != "" else 1 for _, lv, _ in runtime_rows)
+    rt_left_w = max(rt_left_w, 1)
+
+    # Estimate column widths (label + 2 + left + 2 + right)
+    id_col_w = id_label_w + 2 + id_left_w + 2 + max(
+        len(str(rv)) if rv != "" else 1 for _, _, rv in identity_rows
+    )
+    rt_col_w = rt_label_w + 2 + rt_left_w + 2 + max(
+        len(str(rv)) if rv != "" else 1 for _, _, rv in runtime_rows
+    )
+
+    # If total width fits, render two columns side by side
+    gap = 4
+    if id_col_w + gap + rt_col_w <= width:
+        id_lines = [_markup_pair(name, lv, rv, id_label_w, id_left_w) for name, lv, rv in identity_rows]
+        rt_lines = [_markup_pair(key, lv, rv, rt_label_w, rt_left_w) for key, lv, rv in runtime_rows]
+        # Pad shorter column to match height
+        max_h = max(len(id_lines), len(rt_lines))
+        while len(id_lines) < max_h:
+            id_lines.append("")
+        while len(rt_lines) < max_h:
+            rt_lines.append("")
+        lines = []
+        for i in range(max_h):
+            left_part = f"{id_lines[i]:<{id_col_w}}"
+            right_part = rt_lines[i]
+            lines.append(f"{left_part}{' ' * gap}{right_part}")
+        return "\n".join(lines)
+    else:
+        # Fall back to single-column layout
+        return build_preset_column(left, right, models_dir)
 
 
 def build_preset_grid(

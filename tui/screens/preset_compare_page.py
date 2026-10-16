@@ -7,7 +7,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import ScrollableContainer, Vertical
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.screen import ModalScreen
@@ -29,7 +29,7 @@ from tui.data.presets import (
 )
 from tui.screens.compare import format_diff_summary
 from tui.widgets.action_bar import ActionBar
-from tui.widgets.config import build_preset_column
+from tui.widgets.config import build_preset_column, build_preset_column_wide
 
 
 @dataclass
@@ -70,7 +70,6 @@ class PresetComparePage(ModalScreen[None]):
     CSS = """\
     PresetComparePage {
         background: $surface;
-        align: center middle;
     }
     #pcp-root {
         height: 100%;
@@ -82,6 +81,11 @@ class PresetComparePage(ModalScreen[None]):
         color: $accent;
         padding: 0 1;
         border-bottom: solid $border;
+    }
+    #pcp-scroll {
+        height: 1fr;
+        width: 100%;
+        overflow-y: auto;
     }
     #pcp-status {
         height: auto;
@@ -103,7 +107,6 @@ class PresetComparePage(ModalScreen[None]):
     }
     #pcp-metrics {
         height: auto;
-        max-height: 12;
         padding: 0 1;
         color: $foreground;
         border: round $border;
@@ -111,7 +114,6 @@ class PresetComparePage(ModalScreen[None]):
     }
     #pcp-diff {
         height: auto;
-        max-height: 10;
         padding: 0 1;
         border: round $border;
         background: $panel;
@@ -150,19 +152,21 @@ class PresetComparePage(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="pcp-root"):
             yield Label("", id="pcp-title")
-            yield Static("", id="pcp-status")
-            yield Static("", id="pcp-config-title")
-            yield Static("", id="pcp-config-grid")
-            yield Static("", id="pcp-metrics")
-            yield Static("", id="pcp-diff")
+            with ScrollableContainer(id="pcp-scroll"):
+                yield Static("", id="pcp-status")
+                yield Static("", id="pcp-config-title")
+                yield Static("", id="pcp-config-grid")
+                yield Static("", id="pcp-metrics")
+                yield Static("", id="pcp-diff")
             yield Static(
-                "[dim]Esc back · ↑↓ flip preset · green = better · red = worse[/]",
+                "[dim]Esc back · ↑↓ flip preset · scroll to view · green = better · red = worse[/]",
                 id="pcp-help",
             )
             with ActionBar(id="pcp-actions"):
                 yield Button("Back", id="pcp-back")
 
     def on_mount(self) -> None:
+        self.query_one("#pcp-scroll", ScrollableContainer).can_focus = False
         self.call_after_refresh(self.refresh_measured_columns)
 
     def on_key(self, event: Key) -> None:
@@ -229,13 +233,25 @@ class PresetComparePage(ModalScreen[None]):
                 style="bold cyan",
             )
         )
-        config_grid.update(
-            build_preset_column(
-                (self.left.identity, self.left.preset),
-                (self.right.identity, self.right.preset),
-                self.models_dir,
+        # Use two-column layout when terminal is wide enough
+        width = self.app.size.width
+        if width >= 100:
+            config_grid.update(
+                build_preset_column_wide(
+                    (self.left.identity, self.left.preset),
+                    (self.right.identity, self.right.preset),
+                    self.models_dir,
+                    width,
+                )
             )
-        )
+        else:
+            config_grid.update(
+                build_preset_column(
+                    (self.left.identity, self.left.preset),
+                    (self.right.identity, self.right.preset),
+                    self.models_dir,
+                )
+            )
 
         baselines = (
             load_baselines(self.baselines_path) if self.baselines_path else []

@@ -214,7 +214,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Quant", grid)
             self.assertIn("Preset", grid)
             self.assertIn("Max context", grid)
-            self.assertIn("RUNTIME CONFIG", grid)
+            # Wide layout (width >= 100) puts identity and runtime side by side
+            # without a "RUNTIME CONFIG" header; narrow layout has one.
             self.assertIn("ctx", grid)
             self.assertIn("gpu_layers", grid)
 
