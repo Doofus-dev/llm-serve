@@ -152,7 +152,7 @@ class PresetComparePage(ModalScreen[None]):
                 yield Static("", id="pcp-config-title")
                 yield Static("", id="pcp-config-grid")
             yield Static(
-                "[dim]Esc back · ↑↓ flip preset · scroll to view · green = better · red = worse[/]",
+                "[dim]Esc back · ↑↓ cycle selected preset · running stays · green = better · red = worse[/]",
                 id="pcp-help",
             )
             with ActionBar(id="pcp-actions"):
@@ -189,13 +189,20 @@ class PresetComparePage(ModalScreen[None]):
                     self.registry.models[side.model], side.quant
                 )
 
-    def _right_options(self) -> list[int]:
-        """Comparable right-side slots: all presets of the same model/quant."""
+    def _cycle_side(self) -> PresetCompareSide:
+        """The side arrows move. Running stays pinned; otherwise cycle the right."""
+        if self.left.role == "running":
+            return self.right
+        if self.right.role == "running":
+            return self.left
+        return self.right
+
+    def _cycle_options(self) -> list[int]:
+        """Slots on the cycling side's model/quant."""
         if self.store is None:
             return []
-        return sorted(
-            list_presets_for_quant(self.store, self.left.model, self.left.quant)
-        )
+        side = self._cycle_side()
+        return sorted(list_presets_for_quant(self.store, side.model, side.quant))
 
     def _fill_content(self) -> None:
         try:
@@ -208,9 +215,17 @@ class PresetComparePage(ModalScreen[None]):
             return
 
         left_display = str(self.left.identity.get("display") or self.left.model)
+        right_display = str(self.right.identity.get("display") or self.right.model)
+        if self.left.model == self.right.model and self.left.quant == self.right.quant:
+            scope = f"[dim]{left_display}/{self.left.quant}[/]"
+        else:
+            scope = (
+                f"[dim]{left_display}/{self.left.quant}[/]  vs  "
+                f"[dim]{right_display}/{self.right.quant}[/]"
+            )
         title.update(
             f"[bold]Compare presets[/]  [bold cyan]{self.left.preset.name}[/]  vs  "
-            f"[bold cyan]{self.right.preset.name}[/]  [dim]{left_display}/{self.left.quant}[/]"
+            f"[bold cyan]{self.right.preset.name}[/]  {scope}"
         )
         if self.left.model != self.right.model:
             status.update(
@@ -285,27 +300,28 @@ class PresetComparePage(ModalScreen[None]):
             self.action_close_page()
 
     def action_cycle_preset(self, direction: int) -> None:
-        """Flip the right side to the next/previous preset of the same quant."""
+        """Flip the selected (or idle-right) side; keep a running preset pinned."""
         if self.store is None:
             return
-        options = self._right_options()
+        side = self._cycle_side()
+        options = self._cycle_options()
         if not options:
             self.notify(
                 "No other presets to compare against", severity="warning"
             )
             return
         current = next(
-            (i for i, slot in enumerate(options) if slot == self.right.slot), None
+            (i for i, slot in enumerate(options) if slot == side.slot), None
         )
         if current is None:
             current = 0
         index = (current + direction) % len(options)
         slot = options[index]
-        preset = get_preset(self.store, self.left.model, self.left.quant, slot)
+        preset = get_preset(self.store, side.model, side.quant, slot)
         if preset is None:
             return
-        self.right.slot = slot
-        self.right.preset = preset
+        side.slot = slot
+        side.preset = preset
         self.refresh_measured_columns()
 
     def action_close_page(self) -> None:

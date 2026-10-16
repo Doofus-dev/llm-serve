@@ -6,7 +6,7 @@ import inspect
 import os
 import unittest
 
-from tests.support import MODEL_SLUG, OTHER_SLUG, QUANT, Harness
+from tests.support import DISPLAY, MODEL_SLUG, OTHER_DISPLAY, OTHER_SLUG, QUANT, Harness
 from tui.app import LLMServeApp
 from tui.data.baselines import RunBaseline, save_baselines
 from tui.data.compare_metrics import (
@@ -333,8 +333,53 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             screen = app.screen
             self.assertIsInstance(screen, PresetComparePage)
             self.assertNotEqual(screen.left.model, screen.right.model)
+            self.assertEqual(screen.left.model, OTHER_SLUG)
+            self.assertEqual(screen.left.slot, 2)
+            self.assertEqual(screen.right.model, MODEL_SLUG)
+            self.assertEqual(screen.right.role, "running")
+            self.assertEqual(screen.right.slot, 1)
             status = str(screen.query_one("#pcp-status").content)
             self.assertIn("different models — metrics not directly comparable", status)
+            title = str(screen.query_one("#pcp-title").content)
+            self.assertIn(OTHER_DISPLAY, title)
+            self.assertIn(DISPLAY, title)
+
+    async def test_cross_model_arrows_cycle_selected_keep_running(self) -> None:
+        write_pid_file(
+            self.harness.paths.pid_file,
+            pid=os.getpid(),
+            model=MODEL_SLUG,
+            port=8081,
+            quant=QUANT,
+            preset_slot=1,
+            remote=False,
+        )
+        app = self.harness.app()
+        async with app.run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.4)
+            app._refresh_pid()
+            self._select_preset(app, OTHER_SLUG, 2)
+            app.action_compare_selected()
+            await pilot.pause(0.4)
+            screen = app.screen
+            self.assertIsInstance(screen, PresetComparePage)
+            self.assertEqual(screen.left.model, OTHER_SLUG)
+            self.assertEqual(screen.left.slot, 2)
+            self.assertEqual(screen.right.model, MODEL_SLUG)
+            self.assertEqual(screen.right.slot, 1)
+            await pilot.press("down")
+            await pilot.pause(0.2)
+            self.assertEqual(screen.left.model, OTHER_SLUG)
+            self.assertEqual(screen.left.slot, 1)
+            self.assertEqual(screen.right.model, MODEL_SLUG)
+            self.assertEqual(screen.right.slot, 1)
+            self.assertEqual(screen.right.role, "running")
+            await pilot.press("up")
+            await pilot.pause(0.2)
+            self.assertEqual(screen.left.slot, 2)
+            self.assertEqual(screen.right.slot, 1)
+            grid = self._config_grid(screen)
+            self.assertIn("small", grid)
 
     async def test_missing_baseline_renders_no_data(self) -> None:
         store = load_presets(self.harness.paths.presets_json)
