@@ -8,7 +8,7 @@
 #   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
 #   - Creates a Python venv and installs TUI packages (textual, httpx)
 #   - Creates models/ and logs/ directories
-#   - Copies models.json.example → models.json (if no config exists)
+#   - Creates an empty models.json registry if none exists
 #
 # Usage:
 #   ./setup.sh              # Auto-detect GPU
@@ -175,7 +175,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Checks prerequisites, clones & builds llama.cpp, installs"
             echo "Python and TUI dependencies, creates models/ and logs/"
-            echo "directories, and sets up a default models.json."
+            echo "directories, and creates an empty models.json if missing."
             echo ""
             echo "Idempotent — safe to re-run."
             exit 0
@@ -494,15 +494,10 @@ fi
 # Phase 5: Set up models.json (if needed)
 ###############################################################################
 MODELS_JSON="${SCRIPT_DIR}/models.json"
-MODELS_JSON_EXAMPLE="${SCRIPT_DIR}/models.json.example"
 
 if [[ ! -f "${MODELS_JSON}" ]]; then
-    if [[ -f "${MODELS_JSON_EXAMPLE}" ]]; then
-        cp "${MODELS_JSON_EXAMPLE}" "${MODELS_JSON}"
-        ok "Created models.json from example template"
-    else
-        warn "No models.json.example found. Create models.json manually."
-    fi
+    printf '%s\n' '{"models": {}, "aliases": {}}' > "${MODELS_JSON}"
+    ok "Created empty models.json"
 else
     ok "models.json already exists (skipping)"
 fi

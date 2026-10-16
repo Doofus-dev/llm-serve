@@ -136,7 +136,7 @@ File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns fr
 
 ### `models.json`
 
-Identity only. First setup copies `models.json.example` if the file is missing.
+Identity only. First setup creates an empty `models.json`; models appear when you add them from Hub (**H**) or the TUI. `models.json.example` documents the schema and is not copied.
 
 ```json
 {
@@ -191,7 +191,8 @@ llm-serve/
 ├── llm-serve              # Entrypoint (TUI if no args; otherwise CLI)
 ├── setup.sh
 ├── pyproject.toml         # textual, httpx → project .venv
-├── models.json            # Registry (from models.json.example on first setup)
+├── models.json            # Registry (empty on first setup; gitignored)
+├── models.json.example    # Schema/docs only
 ├── presets.json           # Preset slots (TUI)
 ├── param-help.conf
 ├── tui/                   # Textual app

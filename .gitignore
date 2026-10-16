@@ -34,5 +34,6 @@ __pycache__/
 .venv/
 /llama.cpp/
 presets.json
+models.json
 tui-settings.json
 tui-baselines.json
