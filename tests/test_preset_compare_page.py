@@ -12,6 +12,7 @@ from tui.data.baselines import RunBaseline, save_baselines
 from tui.data.compare_metrics import (
     compare_presets_metrics,
     format_metric_cell,
+    format_metrics_table,
     resolve_baseline,
     resolve_default_preset,
 )
@@ -105,6 +106,24 @@ class CompareMetricsUnitTests(unittest.TestCase):
         )
         self.assertTrue(missing is None or missing.vram_used_mb == 0)
 
+    def test_metrics_table_pads_before_color_markup(self) -> None:
+        left = _run(vram_used_mb=8000, gen_tps=25, prompt_tps=100, ctx=16384, file_size=5_000_000)
+        right = _run(vram_used_mb=4000, gen_tps=40, prompt_tps=200, ctx=32768, file_size=5_000_000)
+        markup = format_metrics_table(
+            compare_presets_metrics(left, right),
+            left_label="selected  [2] max-ctx",
+            right_label="default  [1] default",
+        )
+        vram = next(line for line in markup.splitlines() if "VRAM used (MB)" in line)
+        left_cell = f"[{ERR}]8000 MB[/]"
+        right_cell = f"[{OK}]4000 MB[/]"
+        self.assertIn(left_cell, vram)
+        self.assertIn(right_cell, vram)
+        after_left = vram.index(left_cell) + len(left_cell)
+        self.assertGreater(vram.index(right_cell), after_left)
+        self.assertTrue(vram[after_left:vram.index(right_cell)].isspace())
+        self.assertIn("selected  \\[2\\] max-ctx", markup)
+
 
 class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -165,8 +184,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
             self.assertIn("VRAM used (MB)", metrics)
-            self.assertIn("selected  [2] max-ctx", metrics)
-            self.assertIn("default  [1] default", metrics)
+            self.assertIn(r"selected  \[2\] max-ctx", metrics)
+            self.assertIn(r"default  \[1\] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
             self.assertIn(f"[{ERR}]25 t/s[/]", metrics)
@@ -207,8 +226,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.role, "running")
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
-            self.assertIn("selected  [2] max-ctx", metrics)
-            self.assertIn("running  [1] default", metrics)
+            self.assertIn(r"selected  \[2\] max-ctx", metrics)
+            self.assertIn(r"running  \[1\] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
 

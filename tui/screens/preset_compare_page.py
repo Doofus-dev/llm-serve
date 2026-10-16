@@ -106,10 +106,11 @@ class PresetComparePage(ModalScreen[None]):
     }
     #pcp-metrics {
         height: auto;
-        padding: 0 1;
+        padding: 1 2;
         color: $foreground;
         border: round $border;
         background: $panel;
+        margin-bottom: 1;
     }
     #pcp-help {
         height: auto;

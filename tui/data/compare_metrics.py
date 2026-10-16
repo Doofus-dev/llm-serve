@@ -11,7 +11,7 @@ from tui.data.hf import fmt_size
 from tui.data.presets import Preset, list_presets_for_quant
 from tui.data.preset_template import DEFAULT_PRESET_NAME
 from tui.data.throughput_history import baseline_speed
-from tui.theme import ERR, OK
+from tui.theme import ACCENT, ERR, OK
 
 _NO_DATA = "[dim]no data[/]"
 
@@ -244,20 +244,36 @@ def format_metric_value(value: float | int | None, fmt: str) -> str:
     return str(value)
 
 
+def _plain_metric_text(value: float | int | None, fmt: str) -> str:
+    if value is None:
+        return "no data"
+    return format_metric_value(value, fmt)
+
+
+def _escape_markup(text: str) -> str:
+    """Escape brackets so labels like ``[2] max-ctx`` are not Rich tags."""
+    return text.replace("[", r"\[").replace("]", r"\]")
+
+
 def format_metric_cell(
     value: float | int | None,
     *,
     winner: str | None,
     side: str,
     fmt: str,
+    width: int | None = None,
 ) -> str:
+    text = _plain_metric_text(value, fmt)
     if value is None:
-        return _NO_DATA
-    text = format_metric_value(value, fmt)
-    if winner in (None, "equal"):
-        return text
-    color = OK if winner == side else ERR
-    return f"[{color}]{text}[/]"
+        cell = f"[dim]{text}[/]"
+    elif winner in (None, "equal"):
+        cell = text
+    else:
+        color = OK if winner == side else ERR
+        cell = f"[{color}]{text}[/]"
+    if width is not None and width > len(text):
+        cell = f"{cell}{' ' * (width - len(text))}"
+    return cell
 
 
 def format_metrics_table(
@@ -266,22 +282,54 @@ def format_metrics_table(
     left_label: str = "left",
     right_label: str = "right",
 ) -> str:
-    """Rich markup for the measured-metrics comparison table."""
+    """Rich markup for the measured-metrics comparison table.
+
+    Pad plain text to column width, then wrap markup so color tags cannot
+    shift the columns.
+    """
     name_w = max((len(str(row["name"])) for row in rows), default=8)
     name_w = max(name_w, len("Metric"))
-    col_w = max(16, len(left_label))
-    header = (
-        f"{'Metric':<{name_w}}  {left_label:<{col_w}}  {right_label}"
+    left_w = max(
+        [len(left_label)]
+        + [
+            len(_plain_metric_text(row["left_value"], row["format"]))
+            for row in rows
+        ],
+        default=1,
     )
-    lines = [f"[bold]{header}[/]"]
+    right_w = max(
+        [len(right_label)]
+        + [
+            len(_plain_metric_text(row["right_value"], row["format"]))
+            for row in rows
+        ],
+        default=1,
+    )
+    left_header = f"{left_label:<{left_w}}"
+    name_header = f"{'Metric':<{name_w}}"
+    header = (
+        f"[bold {ACCENT}]{_escape_markup(name_header)}[/]  "
+        f"[bold {ACCENT}]{_escape_markup(left_header)}[/]  "
+        f"[bold {ACCENT}]{_escape_markup(right_label)}[/]"
+    )
+    lines = [header]
     for row in rows:
+        name = f"{row['name']:<{name_w}}"
         left_cell = format_metric_cell(
-            row["left_value"], winner=row["winner"], side="left", fmt=row["format"]
+            row["left_value"],
+            winner=row["winner"],
+            side="left",
+            fmt=row["format"],
+            width=left_w,
         )
         right_cell = format_metric_cell(
-            row["right_value"], winner=row["winner"], side="right", fmt=row["format"]
+            row["right_value"],
+            winner=row["winner"],
+            side="right",
+            fmt=row["format"],
+            width=right_w,
         )
         lines.append(
-            f"{row['name']:<{name_w}}  {left_cell}  {right_cell}"
+            f"[{ACCENT}]{_escape_markup(name)}[/]  {left_cell}  {right_cell}"
         )
     return "\n".join(lines)
