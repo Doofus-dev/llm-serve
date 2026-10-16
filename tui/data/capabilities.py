@@ -189,6 +189,57 @@ def resolve_capabilities(
     return caps.merge_fallback(capabilities_from_files(files, repo_id=repo_id))
 
 
+def identity_capability_inputs(
+    params: Mapping[str, Any] | None,
+) -> tuple[list[str], str]:
+    """Filenames and Hub repo used to resolve caps without a live file listing."""
+    if not params:
+        return [], ""
+    files: list[str] = []
+    repo_id = ""
+    source = params.get("source")
+    if isinstance(source, Mapping):
+        repo_id = str(source.get("repo") or "")
+    for key in ("mmproj", "file"):
+        value = str(params.get(key) or "").strip()
+        if value:
+            files.append(value)
+    quants = params.get("quants")
+    if isinstance(quants, dict):
+        for entry in quants.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("filename", "file"):
+                value = str(entry.get(key) or "").strip()
+                if value:
+                    files.append(value)
+    return files, repo_id
+
+
+def nav_capability_icons(
+    params: Mapping[str, Any] | None,
+    models_dir: Path,
+) -> tuple[str | None, bool]:
+    """Main-list icon state: (vision_state, show_tools).
+
+    ``vision_state`` is None when the model has no vision capability,
+    otherwise ``missing`` (projector not on disk), ``off``, or ``on``.
+    Missing stays ``missing`` even if ``vision_enabled`` is toggled.
+    """
+    files, repo_id = identity_capability_inputs(params)
+    caps = resolve_capabilities(params=params, files=files, repo_id=repo_id)
+    vision_state = None
+    if caps.vision:
+        _, ready = vision_projector_ready(params, models_dir, files)
+        if not ready:
+            vision_state = "missing"
+        elif is_vision_enabled(params):
+            vision_state = "on"
+        else:
+            vision_state = "off"
+    return vision_state, bool(caps.tools)
+
+
 def mmproj_files(files: Sequence[HubFile | str]) -> list[str]:
     names = [
         item.path if isinstance(item, HubFile) else str(item)

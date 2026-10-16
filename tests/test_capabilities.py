@@ -12,6 +12,7 @@ from tui.data.capabilities import (
     is_vision_enabled,
     local_mmproj_path,
     mmproj_filename_for,
+    nav_capability_icons,
     pick_mmproj_filename,
     resolve_capabilities,
     vision_projector_ready,
@@ -202,6 +203,42 @@ class VisionToggleTests(unittest.TestCase):
         )
         self.assertFalse(identity["vision_enabled"])
         self.assertNotIn("gpu_layers", identity)
+
+    def test_nav_icons_hidden_without_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state, tools = nav_capability_icons({}, Path(tmp))
+        self.assertIsNone(state)
+        self.assertFalse(tools)
+
+    def test_nav_icons_missing_projector_stays_missing_when_toggled_off(self) -> None:
+        params = {
+            "capabilities": {"vision": True, "tools": False},
+            "mmproj": "demo/mmproj-Demo-f16.gguf",
+            "vision_enabled": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state, tools = nav_capability_icons(params, Path(tmp))
+        self.assertEqual(state, "missing")
+        self.assertFalse(tools)
+
+    def test_nav_icons_vision_on_off_and_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            path = models_dir / "demo" / "mmproj-Demo-f16.gguf"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"gguf")
+            params = {
+                "capabilities": {"vision": True, "tools": True},
+                "mmproj": "demo/mmproj-Demo-f16.gguf",
+                "file": "demo/Qwen3.8-27B-Q4_K_M.gguf",
+            }
+            state, tools = nav_capability_icons(params, models_dir)
+            self.assertEqual(state, "on")
+            self.assertTrue(tools)
+            params["vision_enabled"] = False
+            state, tools = nav_capability_icons(params, models_dir)
+            self.assertEqual(state, "off")
+            self.assertTrue(tools)
 
 
 class LaunchMmprojTests(unittest.TestCase):

@@ -432,6 +432,11 @@ class LLMServeApp(App):
         def handle(result: str | None) -> None:
             if result:
                 self._switch_quant(model_name, result)
+            else:
+                try:
+                    self.query_one(ModelNav).refresh_cards()
+                except (QueryError, NoMatches):
+                    pass
 
         preferred_ctx = None
         params = self._effective_model_params(model_name) or {}
@@ -458,9 +463,16 @@ class LLMServeApp(App):
         )
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        if not isinstance(event.option_list, (ModelNav, AliasNav)):
+        if not isinstance(event.option_list, AliasNav):
             return
-        data = event.option_list.selected_data
+        self._activate_nav_selection(event.option_list.selected_data)
+
+    def on_list_view_selected(self, event) -> None:
+        if not isinstance(event.list_view, ModelNav):
+            return
+        self._activate_nav_selection(event.list_view.selected_data)
+
+    def _activate_nav_selection(self, data: tuple | None) -> None:
         if data and data[0] == "preset":
             _, model_name, quant, slot = data
             set_active_preset(self.preset_store, model_name, quant, slot)
@@ -749,10 +761,20 @@ class LLMServeApp(App):
         self._update_footer()
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
-        if not isinstance(event.option_list, (ModelNav, AliasNav)):
+        if not isinstance(event.option_list, AliasNav):
             return
-        cfg = self.query_one(ConfigPanel)
-        data = event.option_list.selected_data
+        self._apply_nav_highlight(event.option_list.selected_data)
+
+    def on_list_view_highlighted(self, event) -> None:
+        if not isinstance(event.list_view, ModelNav):
+            return
+        self._apply_nav_highlight(event.list_view.selected_data)
+
+    def _apply_nav_highlight(self, data: tuple | None) -> None:
+        try:
+            cfg = self.query_one(ConfigPanel)
+        except (QueryError, NoMatches):
+            return
         if data and data[0] in ("model", "preset"):
             cfg.selected = data[1]
         elif data and data[0] == "alias":
@@ -761,6 +783,19 @@ class LLMServeApp(App):
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
         self._update_footer()
+
+    def on_screen_resume(self) -> None:
+        """Pick up Hub/quant-picker vision_enabled and download changes."""
+        if self._editor_mode:
+            return
+        try:
+            nav = self.screen.query_one(ModelNav)
+            self.screen.query_one(ConfigPanel)
+        except (QueryError, NoMatches):
+            return
+        nav.registry = self.registry
+        nav.preset_store = self.preset_store
+        nav.refresh_cards()
 
     def _selected_model(self) -> str | None:
         data = self._selected_data()

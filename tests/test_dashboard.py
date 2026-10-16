@@ -329,5 +329,112 @@ class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
             harness.cleanup()
 
 
+class ModelNavCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from tests.support import Harness
+
+        self.harness = Harness()
+
+    async def asyncTearDown(self) -> None:
+        self.harness.cleanup()
+
+    async def test_hides_icons_when_capabilities_absent(self) -> None:
+        from tui.widgets.nav import ModelNav, ToolsBadge, VisionEyeball
+
+        app = self.harness.app()
+        async with app.run_test(size=(120, 40)):
+            nav = app.query_one(ModelNav)
+            self.assertEqual(len(list(nav.query(VisionEyeball))), 0)
+            self.assertEqual(len(list(nav.query(ToolsBadge))), 0)
+
+    async def test_icons_only_on_model_cards(self) -> None:
+        from tests.support import MODEL_SLUG
+        from tui.data.models_json import save_registry
+        from tui.widgets.nav import ModelNav, ToolsBadge, VisionEyeball
+
+        app = self.harness.app()
+        cfg = app.registry.models[MODEL_SLUG]
+        cfg.params["capabilities"] = {"vision": True, "tools": True}
+        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+        save_registry(app.paths.models_json, app.registry)
+        async with app.run_test(size=(120, 40)) as pilot:
+            nav = app.query_one(ModelNav)
+            await pilot.pause()
+            eyeballs = list(nav.query(VisionEyeball))
+            hammers = list(nav.query(ToolsBadge))
+            self.assertEqual(len(eyeballs), 1)
+            self.assertEqual(len(hammers), 1)
+            self.assertEqual(eyeballs[0].model_name, MODEL_SLUG)
+            self.assertEqual(eyeballs[0].state, "missing")
+            preset_items = list(nav.query("ListItem.nav-preset"))
+            self.assertTrue(preset_items)
+            for item in preset_items:
+                self.assertEqual(len(list(item.query(VisionEyeball))), 0)
+                self.assertEqual(len(list(item.query(ToolsBadge))), 0)
+
+    async def test_eyeball_toggle_persists_and_keeps_missing_state(self) -> None:
+        from tests.support import MODEL_SLUG
+        from tui.data.models_json import load_registry, save_registry
+        from tui.widgets.nav import ModelNav, VisionEyeball
+
+        app = self.harness.app()
+        cfg = app.registry.models[MODEL_SLUG]
+        cfg.params["capabilities"] = {"vision": True, "tools": False}
+        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+        save_registry(app.paths.models_json, app.registry)
+        async with app.run_test(size=(120, 40)) as pilot:
+            nav = app.query_one(ModelNav)
+            await pilot.pause()
+            eyeball = nav.query_one(VisionEyeball)
+            self.assertEqual(eyeball.state, "missing")
+            self.assertTrue(app.registry.models[MODEL_SLUG].params.get("vision_enabled", True))
+            await pilot.click(eyeball)
+            await pilot.pause()
+            self.assertFalse(app.registry.models[MODEL_SLUG].params["vision_enabled"])
+            saved = load_registry(app.paths.models_json, models_dir=app.paths.models_dir)
+            self.assertFalse(saved.models[MODEL_SLUG].params["vision_enabled"])
+            eyeball = nav.query_one(VisionEyeball)
+            self.assertEqual(eyeball.state, "missing")
+            self.assertTrue(eyeball.has_class("vision-missing"))
+
+    async def test_eyeball_on_and_off_when_projector_present(self) -> None:
+        from tests.support import MODEL_SLUG
+        from tui.data.models_json import save_registry
+        from tui.widgets.nav import ModelNav, VisionEyeball
+
+        app = self.harness.app()
+        mmproj = app.paths.models_dir / "demo" / "mmproj-Demo-f16.gguf"
+        mmproj.write_bytes(b"gguf")
+        cfg = app.registry.models[MODEL_SLUG]
+        cfg.params["capabilities"] = {"vision": True, "tools": False}
+        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
+        save_registry(app.paths.models_json, app.registry)
+        async with app.run_test(size=(120, 40)) as pilot:
+            nav = app.query_one(ModelNav)
+            await pilot.pause()
+            eyeball = nav.query_one(VisionEyeball)
+            self.assertEqual(eyeball.state, "on")
+            self.assertTrue(eyeball.has_class("vision-on"))
+            await pilot.click(eyeball)
+            await pilot.pause()
+            eyeball = nav.query_one(VisionEyeball)
+            self.assertEqual(eyeball.state, "off")
+            self.assertTrue(eyeball.has_class("vision-off"))
+            self.assertFalse(app.registry.models[MODEL_SLUG].params["vision_enabled"])
+
+    async def test_keyboard_selection_still_moves(self) -> None:
+        from tui.widgets.nav import ModelNav
+
+        app = self.harness.app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            nav = app.query_one(ModelNav)
+            nav.focus()
+            first = nav.selected_data
+            await pilot.press("down")
+            await pilot.pause()
+            self.assertIsNotNone(nav.selected_data)
+            self.assertNotEqual(nav.selected_data, first)
+
+
 if __name__ == "__main__":
     unittest.main()

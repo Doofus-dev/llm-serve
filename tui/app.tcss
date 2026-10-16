@@ -191,18 +191,17 @@ Button.-style-flat:disabled {
         padding: 1;
         background: $surface-darken-1;
     }
-    #model-nav > .option-list--option {
+    #model-nav > ListItem {
         padding: 0 1;
         background: $surface;
+        height: auto;
     }
-    #model-nav > .option-list--option-highlighted {
+    #model-nav > ListItem.-highlight,
+    #model-nav:focus > ListItem.-highlight {
         background: $surface-darken-1;
         border-left: solid $accent;
         color: $foreground;
         text-style: none;
-    }
-    #model-nav > .option-list--separator {
-        color: $surface-darken-1;
     }
     .nav-heading {
         height: 1;
