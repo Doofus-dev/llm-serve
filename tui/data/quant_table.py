@@ -29,7 +29,8 @@ class QuantFileRow:
     size: int
     downloaded: bool
     vram_cell: Text
-    act_vram: str
+    act_vram_off: str
+    act_vram_on: str
     est_tps: str
     act_tps: str
 
@@ -86,23 +87,30 @@ def build_quant_file_rows(
             runs=runs,
             filename=item.path,
         )
-        actual = lookup_baseline(
-            runs,
+        lookup_kw = dict(
             filename=item.path,
             file_size=size,
             ctx=context_tokens,
             offload_ratio=offload_ratio,
             gpu_name=gpu.name,
         )
+        actual = lookup_baseline(runs, **lookup_kw)
+        actual_off = lookup_baseline(runs, vision_enabled=False, **lookup_kw)
+        actual_on = lookup_baseline(runs, vision_enabled=True, **lookup_kw)
         if estimate.percent_available is None:
             fit = "?"
         else:
             fit = f"{estimate.percent_available:.0f}%"
         vram_cell = Text(f"{fmt_memory_mb(estimate.total_mb)} · {fit} ")
         vram_cell.append_text(status_symbol(estimate.status))
-        act_vram = (
-            fmt_memory_mb(actual.vram_used_mb)
-            if actual and actual.vram_used_mb > 0
+        act_vram_off = (
+            fmt_memory_mb(actual_off.vram_used_mb)
+            if actual_off and actual_off.vram_used_mb > 0
+            else "—"
+        )
+        act_vram_on = (
+            fmt_memory_mb(actual_on.vram_used_mb)
+            if actual_on and actual_on.vram_used_mb > 0
             else "—"
         )
         act_tps = fmt_tps(actual.gen_tps if actual else None, estimated=False)
@@ -113,7 +121,8 @@ def build_quant_file_rows(
                 size=size,
                 downloaded=downloaded,
                 vram_cell=vram_cell,
-                act_vram=act_vram,
+                act_vram_off=act_vram_off,
+                act_vram_on=act_vram_on,
                 est_tps=fmt_tps(tps),
                 act_tps=act_tps,
             )
@@ -148,7 +157,8 @@ def quant_file_row_cells(row: QuantFileRow) -> tuple:
         row.path,
         fmt_size(row.size),
         row.vram_cell,
-        row.act_vram,
+        row.act_vram_off,
+        row.act_vram_on,
         row.est_tps,
         row.act_tps,
     )

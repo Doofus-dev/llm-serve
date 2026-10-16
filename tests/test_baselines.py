@@ -218,6 +218,77 @@ class BaselineStoreTests(unittest.TestCase):
             self.assertAlmostEqual(stored.vram_used_mb, 18_400.0)
             self.assertAlmostEqual(stored.gen_tps, 31.2)
 
+    def test_vision_on_and_off_are_independent_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            record_baseline(path, _run(vision_enabled=False, vram_used_mb=4_096.0))
+            record_baseline(path, _run(vision_enabled=True, vram_used_mb=8_192.0))
+            runs = load_baselines(path)
+            self.assertEqual(len(runs), 2)
+            off = lookup_baseline(
+                runs,
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                vision_enabled=False,
+            )
+            on = lookup_baseline(
+                runs,
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                vision_enabled=True,
+            )
+            self.assertIsNotNone(off)
+            self.assertIsNotNone(on)
+            self.assertAlmostEqual(off.vram_used_mb, 4_096.0)
+            self.assertAlmostEqual(on.vram_used_mb, 8_192.0)
+
+    def test_legacy_untagged_rows_count_as_vision_off(self) -> None:
+        raw = _run()
+        data = {
+            "model": raw.model,
+            "file": raw.file,
+            "file_size": raw.file_size,
+            "gpu_name": raw.gpu_name,
+            "ctx": raw.ctx,
+            "gpu_layers": raw.gpu_layers,
+            "total_layers": raw.total_layers,
+            "cache_k": raw.cache_k,
+            "cache_v": raw.cache_v,
+            "vram_used_mb": raw.vram_used_mb,
+            "gen_tps": raw.gen_tps,
+        }
+        loaded = RunBaseline.from_dict(data)
+        self.assertFalse(loaded.vision_enabled)
+        self.assertIs(
+            lookup_baseline(
+                [loaded],
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                vision_enabled=False,
+            ),
+            loaded,
+        )
+        self.assertIsNone(
+            lookup_baseline(
+                [loaded],
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                vision_enabled=True,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

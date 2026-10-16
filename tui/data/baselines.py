@@ -39,6 +39,7 @@ class RunBaseline:
     prompt_tps: float | None = None
     tokens_predicted: float = 0.0
     updated_at: str = ""
+    vision_enabled: bool = False
 
     @property
     def offload_ratio(self) -> float:
@@ -69,7 +70,17 @@ class RunBaseline:
             prompt_tps=_optional_float(data.get("prompt_tps")),
             tokens_predicted=float(data.get("tokens_predicted") or 0.0),
             updated_at=str(data.get("updated_at") or ""),
+            vision_enabled=_optional_bool(data.get("vision_enabled")),
         )
+
+
+def _optional_bool(value: object) -> bool:
+    """Legacy rows with no vision_enabled field count as vision off."""
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _optional_float(value: object) -> float | None:
@@ -106,6 +117,7 @@ def _identity(run: RunBaseline) -> tuple:
         int(run.gpu_layers),
         run.cache_k,
         run.cache_v,
+        bool(run.vision_enabled),
     )
 
 
@@ -184,12 +196,19 @@ def lookup_baseline(
     ctx: int,
     offload_ratio: float,
     gpu_name: str,
+    vision_enabled: bool | None = None,
 ) -> RunBaseline | None:
-    """Best measurement for a file on this GPU. Closer context scores higher."""
+    """Best measurement for a file on this GPU. Closer context scores higher.
+
+    Pass ``vision_enabled`` to restrict to vision-off or vision-on rows.
+    Untagged legacy rows count as off.
+    """
     want_name = _filename(filename)
     best: RunBaseline | None = None
     best_score = -1.0
     for run in runs:
+        if vision_enabled is not None and bool(run.vision_enabled) != bool(vision_enabled):
+            continue
         if gpu_name and run.gpu_name and not same_gpu(run.gpu_name, gpu_name):
             continue
         if abs(run.offload_ratio - offload_ratio) > 0.2:

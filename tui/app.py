@@ -21,6 +21,8 @@ from tui.data.downloads import DownloadJob, DownloadManager
 from tui.data.gpu import query_gpu
 from tui.data.capabilities import (
     apply_mmproj_identity,
+    is_vision_enabled,
+    local_mmproj_path,
     mmproj_filename_for,
     pick_mmproj_filename,
 )
@@ -712,6 +714,10 @@ class LLMServeApp(App):
                     cache_k=str(params.get("cache_k") or "q4_0"),
                     cache_v=str(params.get("cache_v") or "q4_0"),
                     vram_used_mb=gpu.vram_used_mb,
+                    vision_enabled=bool(
+                        is_vision_enabled(params)
+                        and local_mmproj_path(params, self.paths.models_dir)
+                    ),
                     gen_tps=gen_tps,
                     prompt_tps=prompt_tps,
                     tokens_predicted=tokens,

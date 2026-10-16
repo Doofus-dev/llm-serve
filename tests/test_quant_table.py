@@ -82,7 +82,8 @@ class QuantTableDownloadTests(unittest.TestCase):
                 baselines_path=path,
             )
             self.assertEqual(len(rows), 1)
-            self.assertNotEqual(rows[0].act_vram, "—")
+            self.assertNotEqual(rows[0].act_vram_off, "—")
+            self.assertEqual(rows[0].act_vram_on, "—")
             self.assertNotEqual(rows[0].act_tps, "—")
 
     def test_actual_columns_use_nearby_baseline(self) -> None:
@@ -112,8 +113,74 @@ class QuantTableDownloadTests(unittest.TestCase):
                 baselines_path=path,
             )
             self.assertEqual(len(rows), 1)
-            self.assertNotEqual(rows[0].act_vram, "—")
+            self.assertNotEqual(rows[0].act_vram_off, "—")
+            self.assertEqual(rows[0].act_vram_on, "—")
             self.assertNotEqual(rows[0].act_tps, "—")
+
+    def test_act_vram_on_and_off_fill_matching_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            shared = dict(
+                model="qwen",
+                file="bartowski/Model-Q4_K_M.gguf",
+                file_size=1000,
+                gpu_name="NVIDIA GeForce RTX 5080",
+                ctx=65_536,
+                gpu_layers=99,
+                total_layers=40,
+                cache_k="q4_0",
+                cache_v="q4_0",
+            )
+            record_baseline(
+                path,
+                RunBaseline(**shared, vram_used_mb=4_096.0, gen_tps=40.0, vision_enabled=False),
+            )
+            record_baseline(
+                path,
+                RunBaseline(**shared, vram_used_mb=8_192.0, gen_tps=32.0, vision_enabled=True),
+            )
+            rows = build_quant_file_rows(
+                [HubFile(path="Model-Q4_K_M.gguf", size=1000)],
+                gpu=GPUStats(name="NVIDIA GeForce RTX 5080", available=True),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=path,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].act_vram_off, "4.0 GB")
+            self.assertEqual(rows[0].act_vram_on, "8.0 GB")
+            cells = quant_file_row_cells(rows[0])
+            self.assertEqual(cells[4], "4.0 GB")
+            self.assertEqual(cells[5], "8.0 GB")
+
+    def test_legacy_untagged_baseline_fills_off_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            record_baseline(
+                path,
+                RunBaseline(
+                    model="qwen",
+                    file="bartowski/Model-Q4_K_M.gguf",
+                    file_size=1000,
+                    gpu_name="NVIDIA GeForce RTX 5080",
+                    ctx=65_536,
+                    gpu_layers=99,
+                    total_layers=40,
+                    cache_k="q4_0",
+                    cache_v="q4_0",
+                    vram_used_mb=4_096.0,
+                    gen_tps=48.2,
+                ),
+            )
+            rows = build_quant_file_rows(
+                [HubFile(path="Model-Q4_K_M.gguf", size=1000)],
+                gpu=GPUStats(name="NVIDIA GeForce RTX 5080", available=True),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=path,
+            )
+            self.assertEqual(rows[0].act_vram_off, "4.0 GB")
+            self.assertEqual(rows[0].act_vram_on, "—")
 
 
 if __name__ == "__main__":

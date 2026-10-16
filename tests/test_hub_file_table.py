@@ -170,6 +170,8 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     table = screen.query_one("#hub-table", DataTable)
                     labels = [str(col.label) for col in table.columns.values()]
                     self.assertEqual(labels[0], "Disk")
+                    self.assertEqual(labels[4], "Act. VRAM off")
+                    self.assertEqual(labels[5], "Act. VRAM on")
                     self.assertEqual(str(table.get_row_at(0)[0]), "—")
                     self.assertIn("●", str(table.get_row_at(1)[0]))
 

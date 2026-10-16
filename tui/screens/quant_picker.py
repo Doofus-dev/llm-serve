@@ -295,7 +295,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self._rows = self._build_rows()
         for row in self._rows:
             try:
-                table.update_cell(row.path, "act_vram", row.act_vram)
+                table.update_cell(row.path, "act_vram_off", row.act_vram_off)
+                table.update_cell(row.path, "act_vram_on", row.act_vram_on)
                 table.update_cell(row.path, "act_speed", row.act_tps)
                 table.update_cell(row.path, "vram", row.vram_cell)
                 table.update_cell(row.path, "speed", row.est_tps)
@@ -413,7 +414,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
         table.add_column("Quant / file", width=28, key="file")
         table.add_column("File size", width=9, key="size")
         table.add_column("Est. VRAM", width=16, key="vram")
-        table.add_column("Act. VRAM", width=9, key="act_vram")
+        table.add_column("Act. VRAM off", width=13, key="act_vram_off")
+        table.add_column("Act. VRAM on", width=12, key="act_vram_on")
         table.add_column("Est. t/s", width=9, key="speed")
         table.add_column("Act. t/s", width=8, key="act_speed")
 
