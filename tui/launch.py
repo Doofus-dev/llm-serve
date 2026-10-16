@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Mapping
 
+from tui.data.capabilities import local_mmproj_path
 from tui.data.gpu import format_pid_vram, query_pid_vram_mb
 from tui.data.models_json import Registry, load_registry, resolve_model_key
 from tui.data.pidfile import (
@@ -224,6 +225,7 @@ def build_server_args(
     port: int,
     params: Mapping[str, object],
     log_verbosity: int,
+    mmproj_path: Path | None = None,
 ) -> list[str]:
     args = [
         "-m",
@@ -233,6 +235,8 @@ def build_server_args(
         "--port",
         str(port),
     ]
+    if mmproj_path is not None:
+        args.extend(("--mmproj", str(mmproj_path)))
     for key, flag in ALWAYS_FLAGS:
         args.extend((flag, str(params[key])))
     for key, flag in OPTIONAL_FLAGS:
@@ -334,6 +338,9 @@ def _banner(plan: LaunchPlan, params: Mapping[str, object], notes: str, model_ma
         lines.append(f"  UBatch:       {params.get('ubatch')}")
     if _present(params.get("n_predict")):
         lines.append(f"  Max response: {params.get('n_predict')} tokens")
+    mmproj = params.get("mmproj_path")
+    if _present(mmproj):
+        lines.append(f"  Vision:       --mmproj {mmproj}")
     lines.append(
         f"  Sampling:     temp={params.get('temp')} top_p={params.get('top_p')} "
         f"top_k={params.get('top_k')} seed={params.get('seed')}"
@@ -463,12 +470,17 @@ def prepare_launch(
     if not model_path.is_file():
         raise LaunchError(f"model not found at {model_path}")
 
+    mmproj_path = local_mmproj_path(cfg.params, paths.models_dir)
+    if mmproj_path is not None:
+        params["mmproj_path"] = str(mmproj_path)
+
     args = build_server_args(
         model_path=model_path,
         host=host,
         port=port,
         params=params,
         log_verbosity=verbosity,
+        mmproj_path=mmproj_path,
     )
     plan = LaunchPlan(
         requested=requested,

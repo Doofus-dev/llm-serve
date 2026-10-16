@@ -10,7 +10,7 @@ from rich.text import Text
 from tui.data.baselines import load_baselines, lookup_baseline
 from tui.data.gpu import GPUStats
 from tui.data.hf import HubFile, fmt_size
-from tui.data.quant import quant_from_filename
+from tui.data.quant import is_sidecar_gguf, quant_from_filename
 from tui.data.vram import (
     classify_vram,
     estimate_gen_tps_calibrated,
@@ -57,6 +57,8 @@ def build_quant_file_rows(
     rows: list[QuantFileRow] = []
 
     for item in files:
+        if is_sidecar_gguf(item.path):
+            continue
         downloaded = False
         size = item.size
         if models_dir and author:

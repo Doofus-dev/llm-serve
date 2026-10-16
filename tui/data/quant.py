@@ -47,9 +47,14 @@ def family_key(filename: str) -> str:
     return re.sub(r"[-_\.]+", "-", stem).strip("-")
 
 
+def is_mmproj_gguf(filename: str) -> bool:
+    """True for multimodal projector GGUFs (the vision sidecar)."""
+    return Path(filename).name.lower().startswith("mmproj")
+
+
 def is_sidecar_gguf(filename: str) -> bool:
     name = Path(filename).name.lower()
-    return name.startswith("mmproj") or "imatrix" in name
+    return is_mmproj_gguf(name) or "imatrix" in name
 
 
 def quant_from_filename(filename: str) -> str:

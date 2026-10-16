@@ -21,8 +21,16 @@ from tui.data.context_length import (
     resolve_context_length,
 )
 from tui.data.gpu import GPUStats, query_gpu
-from tui.data.hf import HubFile, list_repo_ggufs, repo_author
+from tui.data.capabilities import (
+    apply_mmproj_identity,
+    badge_markup,
+    capabilities_from_payload,
+    pick_mmproj_filename,
+    resolve_capabilities,
+)
+from tui.data.hf import HubFile, fetch_repo_info, list_repo_ggufs, repo_author
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
+from tui.data.quant import is_sidecar_gguf
 from tui.data.quant_table import (
     QuantFileRow,
     build_quant_file_rows,
@@ -160,6 +168,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         self.offload_ratio = 1.0
         self.offload_options = [0.0, 0.25, 0.5, 0.75, 1.0]
         self._syncing_controls = False
+        self._caps_markup = badge_markup(resolve_capabilities(params=cfg.params))
 
     def compose(self) -> ComposeResult:
         with Vertical(id="quant-picker"):
@@ -196,12 +205,8 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 yield Button("Cancel", id="cancel")
 
     def on_mount(self) -> None:
-        max_ctx = resolve_context_length(self.cfg.params, self.models_dir)
-        title = f"[bold]Quant — {self.cfg.display}[/]  [dim]({self.model_name})[/]"
-        if max_ctx is not None:
-            title += f"  [dim]max ctx {fmt_ctx_compact(max_ctx)}[/]"
-        self.query_one("#quant-picker-title", Label).update(title)
         self.gpu = query_gpu()
+        max_ctx = resolve_context_length(self.cfg.params, self.models_dir)
         self.context_options = context_length_options(max_ctx)
         if self.preferred_ctx:
             self.context_options = include_context_option(
@@ -211,6 +216,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             self.context_options, self.preferred_ctx
         )
         self._render_estimate_controls()
+        self._update_title()
         self._load_id += 1
         self._fetch_files(self._load_id)
         if self.download_manager is not None:
@@ -294,6 +300,27 @@ class QuantPickerScreen(ModalScreen[str | None]):
             return str(source.get("author") or "")
         return ""
 
+    def _repo_id(self) -> str:
+        source = self.cfg.params.get("source")
+        if isinstance(source, dict):
+            return str(source.get("repo") or "")
+        return ""
+
+    def _update_title(self) -> None:
+        max_ctx = resolve_context_length(self.cfg.params, self.models_dir)
+        self._caps_markup = badge_markup(
+            resolve_capabilities(
+                params=self.cfg.params,
+                files=self._files,
+                repo_id=self._repo_id(),
+            )
+        )
+        title = f"[bold]Quant — {self.cfg.display}[/]  [dim]({self.model_name})[/]"
+        if max_ctx is not None:
+            title += f"  [dim]max ctx {fmt_ctx_compact(max_ctx)}[/]"
+        title += f"  {self._caps_markup}"
+        self.query_one("#quant-picker-title", Label).update(title)
+
     def _refresh_table(self) -> None:
         self._rows = self._build_rows()
 
@@ -340,15 +367,32 @@ class QuantPickerScreen(ModalScreen[str | None]):
         error: str | None = None
         if repo:
             remote_files, error = list_repo_ggufs(repo)
+            info, _ = fetch_repo_info(repo)
+            hf_caps = capabilities_from_payload(info) if info else None
+            caps = resolve_capabilities(
+                hf=hf_caps,
+                files=remote_files,
+                repo_id=str(repo),
+                params=params,
+            )
+            mmproj = pick_mmproj_filename(remote_files)
+            apply_mmproj_identity(
+                params,
+                author=author,
+                mmproj_filename=mmproj,
+                caps=caps,
+            )
             if remote_files:
-                before = json.dumps(params.get("quants") or {}, sort_keys=True)
                 merge_repo_catalog(
                     params, [(f.path, f.size) for f in remote_files]
                 )
-                after = json.dumps(params.get("quants") or {}, sort_keys=True)
-                self.cfg.params["quants"] = params["quants"]
-                if before != after:
-                    save_registry(self.registry_path, self.registry)
+            dirty = False
+            for key in ("capabilities", "mmproj", "quants", "active_quant"):
+                if params.get(key) != self.cfg.params.get(key):
+                    self.cfg.params[key] = params.get(key)
+                    dirty = True
+            if dirty:
+                save_registry(self.registry_path, self.registry)
 
         # Ensure local-only quants appear even if Hub list fails
         quants = params.get("quants") or {}
@@ -357,7 +401,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             if not isinstance(entry, dict):
                 continue
             fn = str(entry.get("filename") or qid)
-            if fn in seen_paths:
+            if fn in seen_paths or is_sidecar_gguf(fn):
                 continue
             size = 0
             if author:
@@ -375,6 +419,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         if load_id != self._load_id:
             return
         self._files = files
+        self._update_title()
         if error and not files:
             self.query_one("#quant-picker-status", Static).update(
                 f"[bold $error]{error}[/]"

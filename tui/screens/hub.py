@@ -25,6 +25,14 @@ from tui.data.context_length import (
     include_context_option,
     pick_estimate_context,
 )
+from tui.data.capabilities import (
+    ModelCapabilities,
+    badge_markup,
+    capabilities_from_hf,
+    capabilities_from_payload,
+    pick_mmproj_filename,
+    resolve_capabilities,
+)
 from tui.data.hf import (
     HF_INSTALL_HINT,
     AuthStatus,
@@ -36,6 +44,7 @@ from tui.data.hf import (
     build_download_plan,
     build_source_metadata,
     download_files,
+    fetch_repo_info,
     fmt_size,
     fmt_count,
     hf_available,
@@ -358,6 +367,7 @@ class HubScreen(Screen):
         self.offload_options = [0.0, 0.25, 0.5, 0.75, 1.0]
         self._syncing_controls = False
         self._filters_ready = False
+        self._file_caps = ModelCapabilities()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
@@ -467,6 +477,7 @@ class HubScreen(Screen):
         self.query_one("#context-controls").display = False
         self.query_one("#back", Button).disabled = True
         self.query_one("#select", Button).label = "Open / download"
+        self._refresh_hub_title()
         self._render_repo_table()
         self.query_one("#hub-table", DataTable).focus()
 
@@ -475,9 +486,11 @@ class HubScreen(Screen):
         self.mode = "files"
         self.selected_repo = repo
         self.files = []
+        self._file_caps = ModelCapabilities()
         self.query_one("#context-controls").display = True
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
+        self._refresh_hub_title()
         self._update_context_options(repo.context_length)
         self._file_load_id += 1
         self._load_files(repo, self._file_load_id)
@@ -596,20 +609,44 @@ class HubScreen(Screen):
         except QueryError:
             pass
 
+    def _refresh_hub_title(self) -> None:
+        title = self.query_one("#hub-title", Label)
+        if self.mode == "files" and self.selected_repo:
+            caps = badge_markup(self._file_caps)
+            title.update(
+                f"[bold]{self.selected_repo.id}[/]  {caps}  "
+                "[dim]Enter: download · B: back · Esc: close[/]"
+            )
+            return
+        title.update(
+            "[bold]Browse Hugging Face GGUF models[/]  "
+            "[dim]Tab: fields · ↑↓: list · Enter: open/download · "
+            "B: back · Esc: close[/]"
+        )
+
     def _render_repo_table(self) -> None:
         table = self.query_one("#hub-table", DataTable)
         table.clear(columns=True)
         table.add_column("Disk", width=4, key="disk")
-        table.add_column("Repo / author", width=34, key="repo")
+        table.add_column("Repo / author", width=30, key="repo")
+        table.add_column("Caps", width=16, key="caps")
         table.add_column("Context", width=9, key="context")
         table.add_column("Size", width=11, key="size")
         table.add_column("Downloads", width=12, key="downloads")
         on_disk = downloaded_repo_ids(self.registry, self.models_dir)
         for repo in self.repos:
             ctx = self._fmt_context(repo.context_length) if repo.context_length else "?"
+            caps = resolve_capabilities(
+                hf=capabilities_from_hf(
+                    tags=repo.tags,
+                    pipeline_tag=repo.pipeline_tag,
+                ),
+                repo_id=repo.id,
+            )
             table.add_row(
                 fmt_downloaded_cell(repo.id in on_disk),
                 repo.id,
+                badge_markup(caps),
                 ctx,
                 fmt_size(repo.size),
                 fmt_count(repo.downloads),
@@ -637,6 +674,7 @@ class HubScreen(Screen):
         )
         for row in self._rows:
             table.add_row(*quant_file_row_cells(row), key=row.path)
+        self._refresh_hub_title()
 
     def _log(self, message: str) -> None:
         if self._downloading:
@@ -702,10 +740,15 @@ class HubScreen(Screen):
     def _load_files(self, repo: HubRepo, load_id: int) -> None:
         self.app.call_from_thread(self._log, f"[dim]Listing GGUF files in {repo.id}…[/]")
         files, error = list_repo_ggufs(repo.id)
-        self.app.call_from_thread(self._finish_load_files, load_id, files, error)
+        info, _info_error = fetch_repo_info(repo.id)
+        self.app.call_from_thread(self._finish_load_files, load_id, files, error, info)
 
     def _finish_load_files(
-        self, load_id: int, files: list[HubFile], error: str | None
+        self,
+        load_id: int,
+        files: list[HubFile],
+        error: str | None,
+        info: dict | None = None,
     ) -> None:
         if load_id != self._file_load_id or self._download_locks_hub():
             return
@@ -713,6 +756,17 @@ class HubScreen(Screen):
             self._log(f"[bold $error]{error}[/]")
             return
         self.files = files
+        hf_caps = capabilities_from_hf(
+            tags=self.selected_repo.tags if self.selected_repo else (),
+            pipeline_tag=self.selected_repo.pipeline_tag if self.selected_repo else None,
+        )
+        if info:
+            hf_caps = hf_caps.merge_fallback(capabilities_from_payload(info))
+        self._file_caps = resolve_capabilities(
+            hf=hf_caps,
+            files=files,
+            repo_id=self.selected_repo.id if self.selected_repo else "",
+        )
         self._apply_measured_context()
         self._render_estimate_controls()
         self._render_file_table()
@@ -834,11 +888,18 @@ class HubScreen(Screen):
             return
         display_name, clone_from = profile
         all_names = [f.path for f in self.files]
+        extra_files: list[str] = []
+        mmproj = pick_mmproj_filename(self.files, quant_filename=filename)
+        if mmproj:
+            local_mmproj = self.models_dir / self.selected_repo.author / mmproj
+            if not local_mmproj.is_file():
+                extra_files.append(mmproj)
         plan = build_download_plan(
             self.selected_repo.id,
             filename,
             self.models_dir,
             all_ggufs=all_names,
+            extra_files=extra_files,
         )
         expected = sum(item.size for item in self.files if item.path in plan.filenames)
 

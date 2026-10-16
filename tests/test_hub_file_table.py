@@ -16,9 +16,9 @@ from tui.data.settings import TUISettings
 from tui.screens.hub import DownloadProfileDialog, HubScreen
 
 
-def _repo(repo_id: str) -> HubRepo:
+def _repo(repo_id: str, **kwargs) -> HubRepo:
     author = repo_id.split("/", 1)[0]
-    return HubRepo(id=repo_id, author=author, downloads=0, likes=0)
+    return HubRepo(id=repo_id, author=author, downloads=0, likes=0, **kwargs)
 
 
 class DownloadedRepoIdTests(unittest.TestCase):
@@ -115,7 +115,10 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
 
                     screen.repos = [
-                        _repo("bartowski/Model-GGUF"),
+                        _repo(
+                            "bartowski/Model-GGUF",
+                            pipeline_tag="image-text-to-text",
+                        ),
                         _repo("bartowski/Other-GGUF"),
                     ]
                     screen._set_mode_repos()
@@ -123,6 +126,9 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     table = screen.query_one("#hub-table", DataTable)
                     labels = [str(col.label) for col in table.columns.values()]
                     self.assertEqual(labels[0], "Disk")
+                    self.assertEqual(labels[1], "Repo / author")
+                    self.assertEqual(labels[2], "Caps")
+                    self.assertIn("vision", str(table.get_row_at(0)[2]).lower())
                     self.assertIn("●", str(table.get_row_at(0)[0]))
                     self.assertEqual(str(table.get_row_at(1)[0]), "—")
                     self.assertIsInstance(screen.query_one("#min_context", Select), Select)

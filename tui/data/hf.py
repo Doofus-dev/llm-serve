@@ -13,11 +13,20 @@ from pathlib import Path
 from typing import Any, Callable
 
 HF_INSTALL_HINT = "Install: curl -LsSf https://hf.co/cli/install.sh | bash -s"
-HUB_REPO_EXPAND = "downloads,likes,gguf"
+HUB_REPO_EXPAND = "downloads,likes,gguf,tags,pipeline_tag"
+HUB_INFO_EXPAND = "tags,pipeline_tag,cardData,gguf"
 HUB_LIST_LIMIT = 50
 HUB_FILTER_FETCH_LIMIT = 150
 
 SHARD_RE = re.compile(r"^(?P<prefix>.+)-(?P<part>\d+)-of-(?P<total>\d+)\.gguf$", re.IGNORECASE)
+
+
+def _tuple_tags(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, str) and raw.strip():
+        return (raw.strip(),)
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(tag).strip() for tag in raw if str(tag).strip())
+    return ()
 
 
 @dataclass(frozen=True)
@@ -29,11 +38,14 @@ class HubRepo:
     trending_score: int | None = None
     size: int = 0
     context_length: int | None = None
+    tags: tuple[str, ...] = ()
+    pipeline_tag: str | None = None
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> HubRepo:
         repo_id = str(data.get("id", ""))
         author = repo_id.split("/", 1)[0] if "/" in repo_id else repo_id
+        pipeline = data.get("pipeline_tag")
         return cls(
             id=repo_id,
             author=author,
@@ -50,6 +62,8 @@ class HubRepo:
                 if (data.get("gguf") or {}).get("context_length") is not None
                 else None
             ),
+            tags=_tuple_tags(data.get("tags")),
+            pipeline_tag=str(pipeline).strip() if pipeline else None,
         )
 
 
@@ -98,12 +112,16 @@ def build_download_plan(
     models_dir: Path,
     *,
     all_ggufs: list[str] | None = None,
+    extra_files: list[str] | None = None,
     revision: str = "main",
 ) -> DownloadPlan:
     """Build local paths and file list for a Hub download."""
     author = repo_author(repo_id)
     local_dir = models_dir / author
     filenames = shard_filenames(filename, all_ggufs or [])
+    for extra in extra_files or []:
+        if extra and extra not in filenames:
+            filenames.append(extra)
     relative_file = f"{author}/{filename}"
     return DownloadPlan(
         repo_id=repo_id,
@@ -344,6 +362,33 @@ def list_repo_ggufs(repo_id: str, *, revision: str = "main") -> tuple[list[HubFi
             files.append(parsed)
     files.sort(key=lambda f: f.path.lower())
     return files, None
+
+
+def fetch_repo_info(repo_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch Hub model info (tags, pipeline, card) for capability detection."""
+    if not hf_available():
+        return None, f"hf CLI not found. {HF_INSTALL_HINT}"
+
+    args = [
+        "models",
+        "info",
+        repo_id,
+        "--expand",
+        HUB_INFO_EXPAND,
+        "--format",
+        "json",
+    ]
+    result = _run_hf(args, timeout=60)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "Failed to fetch model info").strip()
+        return None, message
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return None, f"Invalid JSON from hf: {exc}"
+    if not isinstance(data, dict):
+        return None, "Unexpected response from hf models info"
+    return data, None
 
 
 async def download_files(

@@ -29,6 +29,7 @@ from tui.data.quant import (
     author_size_label,
     default_model_slug,
     family_display,
+    is_sidecar_gguf,
     parse_gguf_filename,
     quant_from_filename,
 )
@@ -424,7 +425,17 @@ def merge_repo_catalog(params: dict[str, Any], files: list[tuple[str, str]]) -> 
     source = params.get("source")
     if isinstance(source, dict):
         author = str(source.get("author") or "")
+    for qid in list(quants):
+        entry = quants.get(qid)
+        filename = ""
+        if isinstance(entry, dict):
+            filename = str(entry.get("filename") or "")
+        if is_sidecar_gguf(filename) or is_sidecar_gguf(str(qid)):
+            del quants[qid]
+
     for path, _size in files:
+        if is_sidecar_gguf(path):
+            continue
         qid = quant_from_filename(path)
         file_rel = f"{author}/{path}" if author else path
         if qid not in quants:
@@ -434,6 +445,9 @@ def merge_repo_catalog(params: dict[str, Any], files: list[tuple[str, str]]) -> 
             if isinstance(entry, dict):
                 entry.setdefault("filename", path)
                 entry.setdefault("file", file_rel)
+    active = str(params.get("active_quant") or "")
+    if quants and active not in quants:
+        params["active_quant"] = next(iter(quants))
 
 
 def set_active_quant(

@@ -19,6 +19,7 @@ from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selec
 from tui.data.baselines import RunBaseline, record_baseline
 from tui.data.downloads import DownloadJob, DownloadManager
 from tui.data.gpu import query_gpu
+from tui.data.capabilities import apply_mmproj_identity, pick_mmproj_filename
 from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
 from tui.data.models_json import (
     AliasTarget,
@@ -315,6 +316,19 @@ class LLMServeApp(App):
                 display=display,
                 hf_context=hf_context,
             )
+            mmproj_name = pick_mmproj_filename(plan.filenames, quant_filename=filename)
+            if mmproj_name:
+                from tui.data.models_json import load_registry, save_registry
+
+                reg = load_registry(self.paths.models_json, models_dir=self.paths.models_dir)
+                cfg = reg.models.get(slug)
+                if cfg is not None:
+                    apply_mmproj_identity(
+                        cfg.params,
+                        author=plan.author,
+                        mmproj_filename=mmproj_name,
+                    )
+                    save_registry(self.paths.models_json, reg)
             self._reload_registry()
             extra = ""
             info = read_gguf_architecture(gguf_path)
@@ -364,7 +378,22 @@ class LLMServeApp(App):
                 self.notify("No Hub repo for this model", severity="error")
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
-            plan = build_download_plan(source["repo"], filename, self.paths.models_dir)
+            extra_files: list[str] = []
+            mmproj_rel = str(cfg.params.get("mmproj") or "")
+            mmproj_name = Path(mmproj_rel).name if mmproj_rel else pick_mmproj_filename(
+                [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
+                quant_filename=filename,
+            )
+            if mmproj_name:
+                local = self.paths.models_dir / (mmproj_rel or f"{source.get('author', '')}/{mmproj_name}")
+                if not local.is_file():
+                    extra_files.append(mmproj_name)
+            plan = build_download_plan(
+                source["repo"],
+                filename,
+                self.paths.models_dir,
+                extra_files=extra_files,
+            )
             self.start_model_download(
                 plan=plan,
                 filename=filename,
@@ -496,8 +525,11 @@ class LLMServeApp(App):
                     if running_key in self.registry.models
                     else None
                 )
-                nav = self.query_one(ModelNav)
-                if nav.running_models != running_keys:
+                try:
+                    nav = self.query_one(ModelNav)
+                except (QueryError, NoMatches):
+                    nav = None
+                if nav is not None and nav.running_models != running_keys:
                     nav.running_models = set(running_keys)
                     nav.refresh_cards()
                 panel.quant_display = None
