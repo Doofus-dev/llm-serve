@@ -17,10 +17,10 @@ from tui.data.compare_metrics import (
 )
 from tui.data.pidfile import write_pid_file
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
-from tui.data.presets import get_preset, load_presets, save_presets, set_preset
-from tui.screens.compare import format_diff_summary
+from tui.data.presets import Preset, get_preset, load_presets, save_presets, set_preset
 from tui.screens.preset_compare_page import PresetComparePage
-from tui.theme import ERR, OK
+from tui.theme import ERR, OK, WARN_STYLE
+from tui.widgets.config import build_preset_column, build_preset_column_wide
 from tui.widgets.nav import ModelNav
 
 
@@ -165,11 +165,24 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
             self.assertIn("VRAM used (MB)", metrics)
+            self.assertIn("selected  [2] max-ctx", metrics)
+            self.assertIn("default  [1] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
             self.assertIn(f"[{ERR}]25 t/s[/]", metrics)
             self.assertIn(f"[{OK}]40 t/s[/]", metrics)
             self.assertNotIn("different models", str(screen.query_one("#pcp-status").content))
+            scroll_ids = [
+                child.id for child in screen.query_one("#pcp-scroll").children
+            ]
+            self.assertEqual(
+                scroll_ids,
+                ["pcp-status", "pcp-metrics", "pcp-config-title", "pcp-config-grid"],
+            )
+            self.assertEqual(len(screen.query("#pcp-diff")), 0)
+            grid = self._config_grid(screen)
+            self.assertIn(f"[{ERR}]16384", grid)
+            self.assertIn(f"[{OK}]32768", grid)
 
     async def test_active_compares_selected_against_running(self) -> None:
         write_pid_file(
@@ -194,6 +207,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.role, "running")
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
+            self.assertIn("selected  [2] max-ctx", metrics)
+            self.assertIn("running  [1] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
 
@@ -218,6 +233,10 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             # without a "RUNTIME CONFIG" header; narrow layout has one.
             self.assertIn("ctx", grid)
             self.assertIn("gpu_layers", grid)
+            self.assertIn(f"[{ERR}]16384", grid)
+            self.assertIn(f"[{OK}]32768", grid)
+            self.assertIn(f"[{ERR}]40", grid)
+            self.assertIn(f"[{OK}]99", grid)
 
     async def test_arrow_keys_cycle_right_preset(self) -> None:
         app = self.harness.app()
@@ -241,15 +260,39 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             grid = self._config_grid(screen)
             self.assertIn("max-ctx", grid)
 
-    def test_diff_summary_colors_changed_values_by_direction(self) -> None:
-        summary = format_diff_summary(
-            "a",
-            "b",
-            {"ctx": 8192, "gpu_layers": 99},
-            {"ctx": 16384, "gpu_layers": 99},
+    def test_runtime_config_colors_differing_values(self) -> None:
+        identity = {
+            "display": "Demo",
+            "active_quant": "Q4_K_M",
+            "file": "demo/Demo-Q4_K_M.gguf",
+        }
+        left = Preset(
+            slot=2,
+            name="small",
+            params={"ctx": 8192, "gpu_layers": 99, "cache_k": "q4_0"},
         )
-        self.assertIn(f"ctx  [{ERR}]8192[/] → [{OK}]16384[/]", summary)
-        self.assertNotIn("gpu_layers", summary)
+        right = Preset(
+            slot=1,
+            name="default",
+            params={"ctx": 16384, "gpu_layers": 99, "cache_k": "q4_0"},
+        )
+        narrow = build_preset_column((identity, left), (identity, right), None)
+        wide = build_preset_column_wide(
+            (identity, left), (identity, right), None, width=160
+        )
+        for grid in (narrow, wide):
+            self.assertIn(f"[{ERR}]8192", grid)
+            self.assertIn(f"[{OK}]16384", grid)
+            self.assertNotIn(f"[{OK}]8192", grid)
+            self.assertNotIn(f"[{ERR}]16384", grid)
+        runtime = narrow.split("[bold dim]RUNTIME CONFIG[/]", 1)[1]
+        cache_line = next(line for line in runtime.splitlines() if "cache_k" in line)
+        self.assertNotIn(f"[{OK}]", cache_line)
+        self.assertNotIn(f"[{ERR}]", cache_line)
+        self.assertIn(WARN_STYLE, cache_line)
+        identity_block = narrow.split("[bold dim]RUNTIME CONFIG[/]", 1)[0]
+        self.assertNotIn(f"[{OK}]", identity_block)
+        self.assertNotIn(f"[{ERR}]", identity_block)
 
     async def test_cross_model_shows_caveat(self) -> None:
         write_pid_file(

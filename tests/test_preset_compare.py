@@ -18,6 +18,7 @@ from tui.data.presets import (
 )
 from tui.screens.compare import PresetCompareScreen, format_diff_summary
 from tui.screens.editors import ConfirmDialog, ParamHelpPanel, PresetEditor
+from tui.theme import ERR, OK
 from tui.widgets.nav import ModelNav
 
 
@@ -48,6 +49,16 @@ class PresetDiffTests(unittest.TestCase):
         self.assertIn("ctx", summary)
         self.assertIn("32768", summary)
         self.assertIn("131072", summary)
+        self.assertNotIn("gpu_layers", summary)
+
+    def test_summary_colors_changed_values_by_direction(self) -> None:
+        summary = format_diff_summary(
+            "a",
+            "b",
+            {"ctx": 8192, "gpu_layers": 99},
+            {"ctx": 16384, "gpu_layers": 99},
+        )
+        self.assertIn(f"ctx  [{ERR}]8192[/] → [{OK}]16384[/]", summary)
         self.assertNotIn("gpu_layers", summary)
 
 

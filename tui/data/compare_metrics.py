@@ -269,7 +269,7 @@ def format_metrics_table(
     """Rich markup for the measured-metrics comparison table."""
     name_w = max((len(str(row["name"])) for row in rows), default=8)
     name_w = max(name_w, len("Metric"))
-    col_w = 16
+    col_w = max(16, len(left_label))
     header = (
         f"{'Metric':<{name_w}}  {left_label:<{col_w}}  {right_label}"
     )

@@ -27,7 +27,6 @@ from tui.data.presets import (
     get_preset,
     list_presets_for_quant,
 )
-from tui.screens.compare import format_diff_summary
 from tui.widgets.action_bar import ActionBar
 from tui.widgets.config import build_preset_column, build_preset_column_wide
 
@@ -59,7 +58,7 @@ def identity_for_quant(cfg: ModelConfig, quant: str) -> dict[str, Any]:
 
 
 class PresetComparePage(ModalScreen[None]):
-    """Compare two presets' identity, measured metrics, and param diff."""
+    """Compare two presets' measured metrics and colored config values."""
 
     BINDINGS = [
         Binding("escape", "close_page", "Back"),
@@ -112,12 +111,6 @@ class PresetComparePage(ModalScreen[None]):
         border: round $border;
         background: $panel;
     }
-    #pcp-diff {
-        height: auto;
-        padding: 0 1;
-        border: round $border;
-        background: $panel;
-    }
     #pcp-help {
         height: auto;
         color: $text-muted;
@@ -154,10 +147,9 @@ class PresetComparePage(ModalScreen[None]):
             yield Label("", id="pcp-title")
             with ScrollableContainer(id="pcp-scroll"):
                 yield Static("", id="pcp-status")
+                yield Static("", id="pcp-metrics")
                 yield Static("", id="pcp-config-title")
                 yield Static("", id="pcp-config-grid")
-                yield Static("", id="pcp-metrics")
-                yield Static("", id="pcp-diff")
             yield Static(
                 "[dim]Esc back · ↑↓ flip preset · scroll to view · green = better · red = worse[/]",
                 id="pcp-help",
@@ -178,7 +170,7 @@ class PresetComparePage(ModalScreen[None]):
             event.prevent_default()
 
     def refresh_measured_columns(self) -> None:
-        """Reload baselines / presets and redraw grids, metrics, and diff."""
+        """Reload baselines / presets and redraw metrics and config."""
         if not self.is_mounted:
             return
         self._refresh_sides()
@@ -208,10 +200,9 @@ class PresetComparePage(ModalScreen[None]):
         try:
             title = self.query_one("#pcp-title", Label)
             status = self.query_one("#pcp-status", Static)
+            metrics = self.query_one("#pcp-metrics", Static)
             config_title = self.query_one("#pcp-config-title", Static)
             config_grid = self.query_one("#pcp-config-grid", Static)
-            metrics = self.query_one("#pcp-metrics", Static)
-            diff = self.query_one("#pcp-diff", Static)
         except NoMatches:
             return
 
@@ -283,16 +274,8 @@ class PresetComparePage(ModalScreen[None]):
         metrics.update(
             format_metrics_table(
                 compare_presets_metrics(left_run, right_run),
-                left_label=self.left.role,
-                right_label=self.right.role,
-            )
-        )
-        diff.update(
-            format_diff_summary(
-                self.left.preset.name,
-                self.right.preset.name,
-                self.left.preset.params,
-                self.right.preset.params,
+                left_label=self.left.title,
+                right_label=self.right.title,
             )
         )
 

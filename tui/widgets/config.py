@@ -22,7 +22,7 @@ from tui.data.presets import (
     merge_identity_and_preset,
 )
 from tui.paths import PROFILE_KEYS
-from tui.theme import ACCENT, WARN_STYLE
+from tui.theme import ACCENT, ERR, OK, WARN, WARN_STYLE
 from tui.widgets.health import fmt_ctx, model_author, model_file_exists
 
 
@@ -101,6 +101,8 @@ def _markup_pair(
     right_value: object,
     label_w: int,
     left_w: int,
+    *,
+    color_diff: bool = False,
 ) -> str:
     """One aligned row: label, left value, right value with computed column widths."""
     left_str = "" if left_value == "" else str(left_value)
@@ -110,8 +112,19 @@ def _markup_pair(
     left_padded = f"{left_str:<{left_w}}" if left_str else "—"
     right_padded = right_str
     label_part = f"[{ACCENT}]{escape(label_padded)}[/]"
-    left_part = f"[{WARN_STYLE}]{escape(left_padded)}[/]" if left_str else "[dim]—[/]"
-    right_part = f"[{WARN_STYLE}]{escape(right_padded)}[/]" if right_str else "[dim]—[/]"
+    left_style = WARN_STYLE
+    right_style = WARN_STYLE
+    if color_diff and left_str and right_str and left_str != right_str:
+        from tui.screens.compare import _direction_style
+
+        right_style = _direction_style(left_str, right_str)
+        left_style = (
+            WARN
+            if right_style == WARN
+            else (ERR if right_style == OK else OK)
+        )
+    left_part = f"[{left_style}]{escape(left_padded)}[/]" if left_str else "[dim]—[/]"
+    right_part = f"[{right_style}]{escape(right_padded)}[/]" if right_str else "[dim]—[/]"
     return f"{label_part}  {left_part}  {right_part}"
 
 
@@ -153,7 +166,9 @@ def build_preset_column(
     lines.append("")
     lines.append("[bold dim]RUNTIME CONFIG[/]")
     for key, lv, rv in runtime_rows:
-        lines.append(_markup_pair(key, lv, rv, rt_label_w, rt_left_w))
+        lines.append(
+            _markup_pair(key, lv, rv, rt_label_w, rt_left_w, color_diff=True)
+        )
     return "\n".join(lines)
 
 
@@ -202,7 +217,10 @@ def build_preset_column_wide(
     gap = 4
     if id_col_w + gap + rt_col_w <= width:
         id_lines = [_markup_pair(name, lv, rv, id_label_w, id_left_w) for name, lv, rv in identity_rows]
-        rt_lines = [_markup_pair(key, lv, rv, rt_label_w, rt_left_w) for key, lv, rv in runtime_rows]
+        rt_lines = [
+            _markup_pair(key, lv, rv, rt_label_w, rt_left_w, color_diff=True)
+            for key, lv, rv in runtime_rows
+        ]
         # Pad shorter column to match height
         max_h = max(len(id_lines), len(rt_lines))
         while len(id_lines) < max_h:
