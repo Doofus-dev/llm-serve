@@ -24,10 +24,14 @@ def resolve_context_length(identity: dict[str, Any], models_dir: Path | None = N
     stored = parse_context_length(identity.get("context_length"))
     if stored is not None:
         return stored
-    file_rel = str(identity.get("file", ""))
-    if not file_rel or models_dir is None:
+    file_value = identity.get("files") or identity.get("file", "")
+    if isinstance(file_value, (list, tuple)):
+        rels = [str(item) for item in file_value if str(item)]
+    else:
+        rels = [str(file_value)] if file_value else []
+    if not rels or models_dir is None:
         return None
-    return read_gguf_architecture(models_dir / file_rel).context_length
+    return read_gguf_architecture(models_dir / rels[0]).context_length
 
 
 def apply_context_length(

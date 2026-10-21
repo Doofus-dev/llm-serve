@@ -109,7 +109,11 @@ def author_size_label(params: dict, filename: str) -> str:
     source = params.get("source")
     if isinstance(source, dict) and source.get("author"):
         author = str(source["author"])
-    file_path = str(params.get("file") or filename)
+    file_value = params.get("file")
+    if isinstance(file_value, (list, tuple)) and file_value:
+        file_path = str(file_value[0])
+    else:
+        file_path = str(file_value or filename)
     if not author and "/" in file_path:
         author = file_path.split("/", 1)[0]
     size, variant, _ = parse_gguf_filename(Path(filename).name)

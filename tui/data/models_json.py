@@ -25,6 +25,7 @@ from tui.data.presets import (
     seed_default_preset,
 )
 from tui.data.fsutil import atomic_write
+from tui.data.hf import SHARD_RE
 from tui.data.quant import (
     author_size_label,
     default_model_slug,
@@ -42,7 +43,8 @@ class ModelConfig:
 
     @property
     def file(self) -> str:
-        return str(self.params.get("file", ""))
+        paths = coerce_rel_paths(self.params.get("file"))
+        return paths[0] if paths else ""
 
     @property
     def port(self) -> int:
@@ -130,6 +132,74 @@ class Registry:
     aliases: dict[str, AliasTarget] = field(default_factory=dict)
 
 
+def coerce_rel_paths(value: object) -> list[str]:
+    """Normalize a ``file`` / ``files`` JSON value to ordered relative paths.
+
+    A quant entry in models.json may use any of:
+      ``"file": "author/repo/Quant.gguf"`` — legacy single file
+      ``"file": ["...-00001-of-00003.gguf", "..."]`` — JSON array on ``file``
+      ``"files": ["...-00001-of-00003.gguf", "..."]`` — ordered shard list
+    ``files`` wins when it is a non-empty list. Shard names follow the
+    existing ``<prefix>-NNNNN-of-NNNNN.gguf`` convention (see ``SHARD_RE``).
+    """
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if str(item)]
+    return []
+
+
+def order_shard_paths(rel_paths: list[str]) -> list[str]:
+    """Keep declared order unless every path is a multi-shard GGUF name."""
+    if len(rel_paths) <= 1:
+        return list(rel_paths)
+    keyed: list[tuple[int, str]] = []
+    for rel in rel_paths:
+        match = SHARD_RE.match(Path(rel).name)
+        if not match or int(match.group("total")) <= 1:
+            return list(rel_paths)
+        keyed.append((int(match.group("part")), rel))
+    return [rel for _, rel in sorted(keyed, key=lambda item: (item[0], item[1]))]
+
+
+def quant_entry_rel_paths(entry: object) -> list[str]:
+    """Ordered relative GGUF paths for one quant entry."""
+    if not isinstance(entry, dict):
+        return []
+    files = coerce_rel_paths(entry.get("files"))
+    if files:
+        return order_shard_paths(files)
+    return order_shard_paths(coerce_rel_paths(entry.get("file")))
+
+
+def quant_entry_filename(entry: object) -> str:
+    """Canonical filename for a quant: explicit filename, else the first shard."""
+    if not isinstance(entry, dict):
+        return ""
+    filename = str(entry.get("filename") or "")
+    if filename:
+        return filename
+    paths = quant_entry_rel_paths(entry)
+    return Path(paths[0]).name if paths else ""
+
+
+def quant_rel_paths(cfg: ModelConfig | None, quant: str) -> list[str]:
+    """Resolve ordered relative paths for a model's quant.
+
+    Prefers the quant entry's ``files`` / ``file``, then the model's legacy
+    top-level ``file`` (string or array) or ``files``.
+    """
+    if cfg is None:
+        return []
+    quants = cfg.params.get("quants")
+    if isinstance(quants, dict):
+        paths = quant_entry_rel_paths(quants.get(quant) or {})
+        if paths:
+            return paths
+    top = coerce_rel_paths(cfg.params.get("files")) or coerce_rel_paths(cfg.params.get("file"))
+    return order_shard_paths(top)
+
+
 def _repo_id(params: dict[str, Any]) -> str | None:
     source = params.get("source")
     if isinstance(source, dict) and source.get("repo"):
@@ -141,8 +211,8 @@ def _filename_from_params(params: dict[str, Any]) -> str:
     source = params.get("source")
     if isinstance(source, dict) and source.get("filename"):
         return str(source["filename"])
-    file_rel = str(params.get("file", ""))
-    return Path(file_rel).name if file_rel else ""
+    paths = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
+    return Path(paths[0]).name if paths else ""
 
 
 def _normalize_quant_ids(params: dict[str, Any]) -> dict[str, str]:
@@ -155,9 +225,7 @@ def _normalize_quant_ids(params: dict[str, Any]) -> dict[str, str]:
     remapped: dict[str, str] = {}
     for old_id, entry in quants.items():
         old_id = str(old_id)
-        filename = ""
-        if isinstance(entry, dict):
-            filename = str(entry.get("filename") or Path(str(entry.get("file", ""))).name)
+        filename = quant_entry_filename(entry)
         _, _, parsed_quant = parse_gguf_filename(filename) if filename else (None, None, None)
         quant_id = parsed_quant or old_id
         if quant_id != old_id and quant_id not in normalized and quant_id not in quants:
@@ -176,7 +244,8 @@ def _normalize_quant_ids(params: dict[str, Any]) -> dict[str, str]:
 
 def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None) -> dict[str, Any]:
     """Ensure params has quants/active_quant/display; derive from file if missing."""
-    file_rel = str(params.get("file", ""))
+    rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
+    file_rel = rels[0] if rels else ""
     filename = _filename_from_params(params)
     if not filename and file_rel:
         filename = Path(file_rel).name
@@ -187,7 +256,10 @@ def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None)
 
     if not quants and filename:
         qid = quant_from_filename(filename)
-        quants[qid] = {"filename": filename, "file": file_rel}
+        entry: dict[str, Any] = {"filename": filename, "file": file_rel}
+        if len(rels) > 1:
+            entry["files"] = rels
+        quants[qid] = entry
 
     params["quants"] = quants
 
@@ -205,10 +277,13 @@ def _ensure_quants_block(params: dict[str, Any], models_dir: Path | None = None)
     if active and active in quants:
         entry = quants[active]
         if isinstance(entry, dict):
-            if entry.get("file"):
-                params["file"] = entry["file"]
+            entry_rels = quant_entry_rel_paths(entry)
+            if entry_rels:
+                params["file"] = entry_rels[0]
             if isinstance(params.get("source"), dict):
-                params["source"]["filename"] = entry.get("filename", Path(str(entry.get("file", ""))).name)
+                params["source"]["filename"] = entry.get(
+                    "filename", Path(entry_rels[0]).name if entry_rels else ""
+                )
 
     repo = _repo_id(params)
     if repo and filename and not params.get("display"):
@@ -468,13 +543,15 @@ def set_active_quant(
     if not isinstance(entry, dict):
         return False
     cfg.params["active_quant"] = quant_id
-    if entry.get("file"):
-        cfg.params["file"] = entry["file"]
-    if isinstance(cfg.params.get("source"), dict) and entry.get("filename"):
-        cfg.params["source"]["filename"] = entry["filename"]
+    entry_rels = quant_entry_rel_paths(entry)
+    if entry_rels:
+        cfg.params["file"] = entry_rels[0]
+    filename = quant_entry_filename(entry)
+    if isinstance(cfg.params.get("source"), dict) and filename:
+        cfg.params["source"]["filename"] = filename
     gguf = None
-    if models_dir and entry.get("file"):
-        gguf = models_dir / str(entry["file"])
+    if models_dir and entry_rels:
+        gguf = models_dir / entry_rels[0]
     apply_architecture_from_gguf(cfg.params, gguf, replace_cloned=False)
     save_registry(path, reg)
     return True
@@ -494,12 +571,12 @@ def delete_model(path: Path, name: str) -> None:
 
 def model_file_paths(cfg: ModelConfig, models_dir: Path) -> set[Path]:
     """Return safe, on-disk GGUF paths referenced by a model profile."""
-    relative_paths = {cfg.file} if cfg.file else set()
+    relative_paths = set(coerce_rel_paths(cfg.params.get("file")))
+    relative_paths.update(coerce_rel_paths(cfg.params.get("files")))
     quants = cfg.params.get("quants")
     if isinstance(quants, dict):
         for entry in quants.values():
-            if isinstance(entry, dict) and entry.get("file"):
-                relative_paths.add(str(entry["file"]))
+            relative_paths.update(quant_entry_rel_paths(entry))
 
     root = models_dir.resolve()
     paths: set[Path] = set()
@@ -693,10 +770,10 @@ def sync_gguf_architecture(registry_path: Path, models_dir: Path) -> list[tuple[
     reg = load_registry(registry_path, models_dir=models_dir)
     changes: list[tuple[str, str, int | None, int]] = []
     for name, cfg in reg.models.items():
-        file_rel = str(cfg.params.get("file", ""))
-        if not file_rel:
+        rels = coerce_rel_paths(cfg.params.get("file")) or coerce_rel_paths(cfg.params.get("files"))
+        if not rels:
             continue
-        info = read_gguf_architecture(models_dir / file_rel)
+        info = read_gguf_architecture(models_dir / rels[0])
         if info.block_count is not None:
             old = cfg.params.get("total_layers")
             try:
@@ -797,8 +874,15 @@ def migrate_models_json(data: dict[str, Any], *, models_dir: Path | None = None)
     for name, params in standalone.items():
         filename = _filename_from_params(params)
         qid = quant_from_filename(filename)
-        file_rel = str(params.get("file", ""))
-        params["quants"] = {qid: {"filename": filename or Path(file_rel).name, "file": file_rel}}
+        rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
+        file_rel = rels[0] if rels else ""
+        quant_entry: dict[str, Any] = {
+            "filename": filename or Path(file_rel).name,
+            "file": file_rel,
+        }
+        if len(rels) > 1:
+            quant_entry["files"] = rels
+        params["quants"] = {qid: quant_entry}
         params["active_quant"] = qid
         params.setdefault("display", name)
         new_models[name] = params
@@ -825,8 +909,12 @@ def migrate_models_json(data: dict[str, Any], *, models_dir: Path | None = None)
         for old_name, params in entries:
             fn = _filename_from_params(params)
             qid = quant_from_filename(fn)
-            file_rel = str(params.get("file", ""))
-            merged["quants"][qid] = {"filename": fn, "file": file_rel}
+            rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
+            file_rel = rels[0] if rels else ""
+            quant_entry: dict[str, Any] = {"filename": fn, "file": file_rel}
+            if len(rels) > 1:
+                quant_entry["files"] = rels
+            merged["quants"][qid] = quant_entry
             preset_remap[old_name] = (slug, qid)
             if old_name == primary_name:
                 active_quant = qid
@@ -834,7 +922,11 @@ def migrate_models_json(data: dict[str, Any], *, models_dir: Path | None = None)
         merged["active_quant"] = active_quant
         entry = merged["quants"].get(active_quant, {})
         if isinstance(entry, dict):
-            merged["file"] = entry.get("file", merged.get("file", ""))
+            entry_rels = quant_entry_rel_paths(entry)
+            if entry_rels:
+                merged["file"] = entry_rels[0]
+            elif "file" not in merged:
+                merged["file"] = ""
             if isinstance(merged.get("source"), dict):
                 merged["source"]["filename"] = entry.get("filename", _filename_from_params(merged))
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
+from typing import Sequence
 
 from rich.text import Text
 from tui.data.context_length import fmt_ctx_compact, fmt_ctx_range, resolve_context_length
@@ -28,10 +30,11 @@ def model_author(params: dict, file: str) -> str | None:
     return None
 
 
-def model_file_exists(file: str, models_dir: Path) -> bool:
-    if not file:
+def model_file_exists(file: str | Sequence[str], models_dir: Path) -> bool:
+    files = [file] if isinstance(file, str) else list(file)
+    if not files or any(not rel for rel in files):
         return False
-    return (models_dir / file).is_file()
+    return all((models_dir / rel).is_file() for rel in files)
 
 
 def fmt_model_runtime_line(params: dict, models_dir: Path) -> str:

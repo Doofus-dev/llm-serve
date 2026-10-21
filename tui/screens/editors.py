@@ -15,7 +15,7 @@ from textual.widgets import Button, Collapsible, Input, Label, Select, Static
 
 from tui.data.context_length import fmt_ctx_compact as fmt_ctx, resolve_context_length
 from tui.data.gguf import apply_architecture_from_gguf
-from tui.data.models_json import Registry, validate_display_name
+from tui.data.models_json import Registry, coerce_rel_paths, validate_display_name
 from tui.data.param_help import get_param_help, load_param_help
 from tui.data.param_widgets import (
     HIDDEN_EDITOR_PARAMS,
@@ -452,8 +452,11 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
                 params=default_preset_params(),
             )
         self.identity = dict(identity)
+        rels = coerce_rel_paths(self.identity.get("files")) or coerce_rel_paths(
+            self.identity.get("file")
+        )
         apply_architecture_from_gguf(
-            self.identity, models_dir / str(self.identity.get("file", ""))
+            self.identity, models_dir / rels[0] if rels else None
         )
         self.max_ctx = resolve_context_length(self.identity, models_dir)
         self.fields: dict[str, ParamInput | ParamSelect] = {}

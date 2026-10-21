@@ -13,7 +13,7 @@ from textual.widgets import Static
 from textual.app import ComposeResult
 
 from tui.data.context_length import resolve_context_length
-from tui.data.models_json import Registry
+from tui.data.models_json import Registry, coerce_rel_paths, quant_entry_rel_paths, quant_rel_paths
 from tui.data.presets import (
     Preset,
     PresetStore,
@@ -49,12 +49,19 @@ def _markup_value(value: object) -> str:
 def _identity_fields(
     identity: dict, preset: Preset, models_dir: Path | None
 ) -> dict[str, object]:
-    file_rel = str(identity.get("file") or "")
+    file_rels = coerce_rel_paths(identity.get("file"))
+    quants = identity.get("quants")
+    active = str(identity.get("active_quant") or "")
+    if isinstance(quants, dict) and active:
+        from_quant = quant_entry_rel_paths(quants.get(active))
+        if from_quant:
+            file_rels = from_quant
+    file_rel = file_rels[0] if file_rels else ""
     author = model_author(identity, file_rel)
     max_ctx = resolve_context_length(identity, models_dir)
     file_status = (
         "present"
-        if models_dir and model_file_exists(file_rel, models_dir)
+        if models_dir and model_file_exists(file_rels, models_dir)
         else "missing"
     )
     return {
@@ -73,7 +80,7 @@ def _runtime_settings(identity: dict, preset: Preset) -> list[tuple[str, object]
     params = merge_identity_and_preset(identity, preset)
     settings: list[tuple[str, object]] = []
     for key, value in params.items():
-        if key in {"source", "quants", "file"}:
+        if key in {"source", "quants", "file", "files"}:
             continue
         if key in PROFILE_KEYS:
             continue
@@ -304,7 +311,10 @@ class ConfigPanel(Static):
                 max_ctx = resolve_context_length(identity, self.models_dir)
                 file_status = (
                     "present"
-                    if self.models_dir and model_file_exists(model.file, self.models_dir)
+                    if self.models_dir and model_file_exists(
+                        quant_rel_paths(model, active_q) or [model.file],
+                        self.models_dir,
+                    )
                     else "missing"
                 )
                 summary = Table.grid(expand=True, padding=(0, 1))

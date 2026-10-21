@@ -32,8 +32,10 @@ from tui.data.models_json import (
     AliasTarget,
     add_or_update_quant,
     clamp_preset_contexts,
+    coerce_rel_paths,
     delete_model,
     load_registry,
+    quant_rel_paths,
     remap_alias_preset_slots,
     save_registry,
     set_active_quant,
@@ -709,12 +711,19 @@ class LLMServeApp(App):
         if not params:
             return
 
-        file_rel = str(params.get("file", ""))
-        path = self.paths.models_dir / file_rel
-        try:
-            file_size = path.stat().st_size if path.is_file() else 0
-        except OSError:
-            file_size = 0
+        cfg = self.registry.models.get(info.model)
+        rels = quant_rel_paths(cfg, info.quant or "") if cfg else []
+        if not rels:
+            rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
+        file_rel = rels[0] if rels else ""
+        file_size = 0
+        for rel in rels:
+            path = self.paths.models_dir / rel
+            try:
+                if path.is_file():
+                    file_size += path.stat().st_size
+            except OSError:
+                continue
 
         gen_tps, prompt_tps, tokens = baseline_speed(
             panel.live_throughput,
