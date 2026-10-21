@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from tui.data.hf import HubFile
+from tui.data.models_json import coerce_rel_paths, quant_entry_rel_paths
 from tui.data.quant import family_key, is_mmproj_gguf, is_sidecar_gguf
 
 VISION_PIPELINE_TAGS = frozenset({
@@ -200,19 +201,19 @@ def identity_capability_inputs(
     source = params.get("source")
     if isinstance(source, Mapping):
         repo_id = str(source.get("repo") or "")
-    for key in ("mmproj", "file"):
-        value = str(params.get(key) or "").strip()
-        if value:
-            files.append(value)
+    mmproj = str(params.get("mmproj") or "").strip()
+    if mmproj:
+        files.append(mmproj)
+    files.extend(coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file")))
     quants = params.get("quants")
     if isinstance(quants, dict):
         for entry in quants.values():
             if not isinstance(entry, dict):
                 continue
-            for key in ("filename", "file"):
-                value = str(entry.get(key) or "").strip()
-                if value:
-                    files.append(value)
+            filename = str(entry.get("filename") or "").strip()
+            if filename:
+                files.append(filename)
+            files.extend(quant_entry_rel_paths(entry))
     return files, repo_id
 
 
@@ -277,9 +278,10 @@ def pick_mmproj_filename(
 
 def _family_hint(params: Mapping[str, Any]) -> str | None:
     """Filename used to keep projector lookup on this model family."""
+    file_rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
     for value in (
         Path(str(params.get("mmproj") or "")).name,
-        Path(str(params.get("file") or "")).name,
+        Path(file_rels[0]).name if file_rels else "",
     ):
         if value:
             return value
@@ -324,11 +326,11 @@ def local_mmproj_path(
             if not isinstance(entry, dict):
                 continue
             filename = str(entry.get("filename") or "")
-            file_rel = str(entry.get("file") or "")
-            if is_mmproj_gguf(filename) and file_rel:
-                path = models_dir / file_rel
-                if path.is_file():
-                    candidates.append(path)
+            for file_rel in quant_entry_rel_paths(entry):
+                if is_mmproj_gguf(filename or Path(file_rel).name) and file_rel:
+                    path = models_dir / file_rel
+                    if path.is_file():
+                        candidates.append(path)
 
     for name in extra_files:
         if is_mmproj_gguf(name):

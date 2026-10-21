@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -16,16 +17,71 @@ from tui.launch import (
     instance_log_path,
     launch_background,
     prepare_launch,
+    quant_file_rel,
     rotate_log,
     status_text,
     stop_server,
 )
 from tui.data.gpu import query_pid_vram_mb
+from tui.data.models_json import ModelConfig, Registry, load_registry
 from tui.data.pidfile import list_instances, write_pid_file
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
-from tui.data.presets import PARAM_TO_ENV
+from tui.data.presets import PARAM_TO_ENV, PresetStore
 
 from tests.support import DISPLAY, MODEL_SLUG, OTHER_SLUG, QUANT, Harness
+
+FLASH_SLUG = "flash-next"
+FLASH_QUANT = "Q4_0"
+FLASH_SHARDS = [
+    "author/Flash-Q4_0-00001-of-00003.gguf",
+    "author/Flash-Q4_0-00002-of-00003.gguf",
+    "author/Flash-Q4_0-00003-of-00003.gguf",
+]
+
+
+def _core_params() -> dict:
+    return {
+        **DEFAULT_PRESET_PARAMS,
+        "n_cpu_moe": "",
+        "reasoning_format": "",
+        "mtp": 0,
+        "checkpoint_every": -1,
+    }
+
+
+def _install_sharded_model(harness: Harness, *, skip: str | None = None) -> None:
+    author_dir = harness.paths.models_dir / "author"
+    author_dir.mkdir(parents=True, exist_ok=True)
+    for rel in FLASH_SHARDS:
+        path = harness.paths.models_dir / rel
+        if skip is None or not rel.endswith(skip):
+            path.write_bytes(b"GGUF-shard")
+    data = json.loads(harness.paths.models_json.read_text())
+    data["models"][FLASH_SLUG] = {
+        "display": "Flash Next",
+        "host": "127.0.0.1",
+        "port": 8083,
+        "notes": "sharded fixture",
+        "file": FLASH_SHARDS[0],
+        "active_quant": FLASH_QUANT,
+        "total_layers": 48,
+        "context_length": 32768,
+        "quants": {
+            FLASH_QUANT: {
+                "filename": Path(FLASH_SHARDS[0]).name,
+                "files": list(FLASH_SHARDS),
+            }
+        },
+    }
+    harness.paths.models_json.write_text(json.dumps(data, indent=2) + "\n")
+    presets = json.loads(harness.paths.presets_json.read_text())
+    presets.setdefault("_active", {})[FLASH_SLUG] = {FLASH_QUANT: 1}
+    presets[FLASH_SLUG] = {
+        FLASH_QUANT: {
+            "1": {"name": "default", "params": dict(DEFAULT_PRESET_PARAMS)},
+        }
+    }
+    harness.paths.presets_json.write_text(json.dumps(presets, indent=2) + "\n")
 
 
 class EnvOverrideTests(unittest.TestCase):
@@ -87,6 +143,93 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(args[i + 1], "off")
         self.assertIn("--checkpoint-min-step", args)
 
+    def test_single_file_list_is_byte_identical_to_path(self) -> None:
+        kwargs = {
+            "host": "127.0.0.1",
+            "port": 8081,
+            "params": _core_params(),
+            "log_verbosity": 4,
+        }
+        from_path = build_server_args(model_path=Path("/tmp/m.gguf"), **kwargs)
+        from_list = build_server_args(model_path=[Path("/tmp/m.gguf")], **kwargs)
+        self.assertEqual(from_path, from_list)
+        self.assertEqual(from_path.count("-m"), 1)
+        self.assertEqual(from_path[0:6], ["-m", "/tmp/m.gguf", "--host", "127.0.0.1", "--port", "8081"])
+
+    def test_multi_shard_emits_one_m_flag_per_shard(self) -> None:
+        shards = [
+            Path("/tmp/m-00001-of-00003.gguf"),
+            Path("/tmp/m-00002-of-00003.gguf"),
+            Path("/tmp/m-00003-of-00003.gguf"),
+        ]
+        args = build_server_args(
+            model_path=shards,
+            host="127.0.0.1",
+            port=8081,
+            params=_core_params(),
+            log_verbosity=4,
+        )
+        m_values = [args[i + 1] for i, flag in enumerate(args) if flag == "-m"]
+        self.assertEqual(m_values, [str(path) for path in shards])
+        self.assertEqual(
+            args[0:8],
+            [
+                "-m",
+                str(shards[0]),
+                "-m",
+                str(shards[1]),
+                "-m",
+                str(shards[2]),
+                "--host",
+                "127.0.0.1",
+            ],
+        )
+
+
+class QuantFileRelTests(unittest.TestCase):
+    def test_legacy_file_string_returns_one_path(self) -> None:
+        cfg = ModelConfig(
+            name="demo",
+            params={
+                "file": "demo/Demo-Q4_K_M.gguf",
+                "quants": {
+                    QUANT: {
+                        "filename": "Demo-Q4_K_M.gguf",
+                        "file": "demo/Demo-Q4_K_M.gguf",
+                    }
+                },
+            },
+        )
+        self.assertEqual(quant_file_rel(cfg, QUANT), ["demo/Demo-Q4_K_M.gguf"])
+
+    def test_files_array_returns_ordered_shards(self) -> None:
+        cfg = ModelConfig(
+            name=FLASH_SLUG,
+            params={
+                "file": FLASH_SHARDS[0],
+                "quants": {
+                    FLASH_QUANT: {
+                        "filename": Path(FLASH_SHARDS[0]).name,
+                        "files": list(reversed(FLASH_SHARDS)),
+                    }
+                },
+            },
+        )
+        self.assertEqual(quant_file_rel(cfg, FLASH_QUANT), FLASH_SHARDS)
+
+    def test_file_array_returns_ordered_shards(self) -> None:
+        cfg = ModelConfig(
+            name=FLASH_SLUG,
+            params={
+                "quants": {
+                    FLASH_QUANT: {
+                        "file": list(FLASH_SHARDS),
+                    }
+                },
+            },
+        )
+        self.assertEqual(quant_file_rel(cfg, FLASH_QUANT), FLASH_SHARDS)
+
 
 class PrepareLaunchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -113,6 +256,86 @@ class PrepareLaunchTests(unittest.TestCase):
     def test_unknown_model(self) -> None:
         with self.assertRaises(LaunchError):
             prepare_launch("no-such-model", paths=self.harness.paths)
+
+    def test_single_file_plan_keeps_legacy_fields(self) -> None:
+        plan = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        self.assertEqual(plan.model_file, "demo/Demo-Q4_K_M.gguf")
+        self.assertEqual(plan.model_files, ["demo/Demo-Q4_K_M.gguf"])
+        self.assertEqual(plan.model_paths, [plan.model_path])
+        self.assertEqual(plan.args.count("-m"), 1)
+        self.assertIn(f"  File:         {plan.model_file}", plan.banner_lines)
+
+    def test_multi_shard_plan_emits_three_m_flags(self) -> None:
+        _install_sharded_model(self.harness)
+        plan = prepare_launch(FLASH_SLUG, paths=self.harness.paths)
+        self.assertEqual(plan.model_file, FLASH_SHARDS[0])
+        self.assertEqual(plan.model_files, FLASH_SHARDS)
+        self.assertEqual(len(plan.model_paths), 3)
+        m_values = [plan.args[i + 1] for i, flag in enumerate(plan.args) if flag == "-m"]
+        self.assertEqual(m_values, [str(path) for path in plan.model_paths])
+        for rel in FLASH_SHARDS:
+            self.assertTrue(any(rel in line for line in plan.banner_lines), rel)
+
+    def test_missing_shard_names_the_first_gap(self) -> None:
+        _install_sharded_model(self.harness, skip="00002-of-00003.gguf")
+        with self.assertRaises(LaunchError) as ctx:
+            prepare_launch(FLASH_SLUG, paths=self.harness.paths)
+        self.assertIn("00002-of-00003.gguf", str(ctx.exception))
+
+
+class RegistryShardTests(unittest.TestCase):
+    def test_load_registry_keeps_files_array_as_one_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "models.json"
+            path.write_text(json.dumps({
+                "models": {
+                    FLASH_SLUG: {
+                        "display": "Flash Next",
+                        "active_quant": FLASH_QUANT,
+                        "file": FLASH_SHARDS[0],
+                        "quants": {
+                            FLASH_QUANT: {
+                                "filename": Path(FLASH_SHARDS[0]).name,
+                                "files": list(FLASH_SHARDS),
+                            }
+                        },
+                    }
+                },
+                "aliases": {},
+            }) + "\n")
+            reg = load_registry(path, migrate=False)
+            self.assertEqual(list(reg.models), [FLASH_SLUG])
+            self.assertEqual(quant_file_rel(reg.models[FLASH_SLUG], FLASH_QUANT), FLASH_SHARDS)
+
+    def test_model_nav_renders_one_entry_for_sharded_model(self) -> None:
+        from tui.widgets.nav import ModelNav
+
+        cfg = ModelConfig(
+            name=FLASH_SLUG,
+            params={
+                "display": "Flash Next",
+                "active_quant": FLASH_QUANT,
+                "file": FLASH_SHARDS[0],
+                "quants": {
+                    FLASH_QUANT: {
+                        "filename": Path(FLASH_SHARDS[0]).name,
+                        "files": list(FLASH_SHARDS),
+                    }
+                },
+            },
+        )
+        nav = ModelNav(Registry(models={FLASH_SLUG: cfg}), PresetStore(), Path("/tmp"))
+        _items, option_data, option_order = nav._build_entries()
+        model_entries = [data for data in option_data.values() if data[0] == "model"]
+        self.assertEqual(model_entries, [("model", FLASH_SLUG)])
+        labels = [
+            str(option.prompt)
+            for option in option_order
+            if option_data.get(option.id or "", ("",))[0] == "model"
+        ]
+        self.assertTrue(any("Flash Next" in label for label in labels), labels)
+        self.assertTrue(any(FLASH_QUANT in label for label in labels), labels)
 
 
 class ProcessTests(unittest.TestCase):

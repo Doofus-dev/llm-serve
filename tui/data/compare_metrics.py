@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from tui.data.baselines import RunBaseline, lookup_baseline
+from tui.data.models_json import coerce_rel_paths, quant_entry_rel_paths
 from tui.data.context_length import fmt_ctx_compact
 from tui.data.hf import fmt_size
 from tui.data.presets import Preset, list_presets_for_quant
@@ -37,23 +38,35 @@ def _filename(path: str) -> str:
     return Path(path).name.lower()
 
 
-def _file_rel_for_quant(identity: dict[str, Any], quant: str) -> str:
+def _file_rels_for_quant(identity: dict[str, Any], quant: str) -> list[str]:
     quants = identity.get("quants")
     if isinstance(quants, dict):
-        entry = quants.get(quant) or {}
-        if isinstance(entry, dict) and entry.get("file"):
-            return str(entry["file"])
-    return str(identity.get("file") or "")
+        paths = quant_entry_rel_paths(quants.get(quant) or {})
+        if paths:
+            return paths
+    return coerce_rel_paths(identity.get("files")) or coerce_rel_paths(identity.get("file"))
 
 
-def _disk_size(models_dir: Path | None, file_rel: str) -> int:
-    if not models_dir or not file_rel:
+def _file_rel_for_quant(identity: dict[str, Any], quant: str) -> str:
+    rels = _file_rels_for_quant(identity, quant)
+    return rels[0] if rels else ""
+
+
+def _disk_size(models_dir: Path | None, file_rel: str | list[str]) -> int:
+    rels = [file_rel] if isinstance(file_rel, str) else list(file_rel)
+    if not models_dir or not rels:
         return 0
-    path = models_dir / file_rel
-    try:
-        return path.stat().st_size if path.is_file() else 0
-    except OSError:
-        return 0
+    total = 0
+    for rel in rels:
+        if not rel:
+            continue
+        path = models_dir / rel
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _as_int(value: object, default: int = 0) -> int:
@@ -85,9 +98,10 @@ def resolve_baseline(
     """
     del preset_slot  # slot distinguishes callers; runs are keyed by config
     identity = identity or {}
-    file_rel = _file_rel_for_quant(identity, quant)
+    file_rels = _file_rels_for_quant(identity, quant)
+    file_rel = file_rels[0] if file_rels else ""
     filename = Path(file_rel).name if file_rel else ""
-    file_size = _disk_size(models_dir, file_rel)
+    file_size = _disk_size(models_dir, file_rels)
 
     ctx = 0
     gpu_layers = 0

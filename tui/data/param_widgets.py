@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 # Shown in config/launch but not in the model/preset editor UI.
-HIDDEN_EDITOR_PARAMS = frozenset({"file"})
+HIDDEN_EDITOR_PARAMS = frozenset({"file", "files"})
 
 CACHE_TYPE_VALUES = (
     "f32",
@@ -41,7 +41,7 @@ PARAM_SELECT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
 # Empty stored value maps to Select.NULL (server default — flag omitted).
 PARAM_ALLOW_BLANK = frozenset({"thinking", "reasoning_format"})
 
-PRESERVED_EDITOR_PARAMS = frozenset({"total_layers", "file"})
+PRESERVED_EDITOR_PARAMS = frozenset({"total_layers", "file", "files"})
 
 
 def fmt_locked_value(value: object) -> str:

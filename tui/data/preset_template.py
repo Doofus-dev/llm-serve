@@ -8,6 +8,7 @@ from typing import Any
 IDENTITY_KEYS = frozenset({
     "display",
     "file",
+    "files",
     "source",
     "quants",
     "active_quant",

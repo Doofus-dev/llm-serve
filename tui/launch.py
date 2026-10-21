@@ -17,11 +17,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from tui.data.capabilities import is_vision_enabled, local_mmproj_path
 from tui.data.gpu import format_pid_vram, query_pid_vram_mb
-from tui.data.models_json import Registry, load_registry, resolve_model_key
+from tui.data.models_json import Registry, load_registry, quant_rel_paths, resolve_model_key
 from tui.data.pidfile import (
     PidInfo,
     forget_instance,
@@ -120,6 +120,8 @@ class LaunchPlan:
     args: list[str]
     env: dict[str, str]
     banner_lines: list[str] = field(default_factory=list)
+    model_files: list[str] = field(default_factory=list)
+    model_paths: list[Path] = field(default_factory=list)
 
 
 def _present(value: object) -> bool:
@@ -209,32 +211,41 @@ def apply_env_overrides(params: dict[str, object], env: Mapping[str, str]) -> di
     return merged
 
 
-def quant_file_rel(cfg, quant: str) -> str:
-    quants = cfg.params.get("quants") if cfg else None
-    if isinstance(quants, dict):
-        entry = quants.get(quant) or {}
-        if isinstance(entry, dict) and entry.get("file"):
-            return str(entry["file"])
-    return str(cfg.file) if cfg else ""
+def quant_file_rel(cfg, quant: str) -> list[str]:
+    """Return ordered relative GGUF paths for a quant.
+
+    Multi-shard quants use ``files`` (or a JSON array on ``file``); legacy
+    single-file entries still use a string ``file`` and return a one-item list.
+    """
+    return quant_rel_paths(cfg, quant)
+
+
+def _as_model_paths(model_path: Path | Sequence[Path]) -> list[Path]:
+    if isinstance(model_path, Path):
+        return [model_path]
+    return [Path(p) for p in model_path]
 
 
 def build_server_args(
     *,
-    model_path: Path,
+    model_path: Path | Sequence[Path],
     host: str,
     port: int,
     params: Mapping[str, object],
     log_verbosity: int,
     mmproj_path: Path | None = None,
 ) -> list[str]:
-    args = [
-        "-m",
-        str(model_path),
-        "--host",
-        str(host),
-        "--port",
-        str(port),
-    ]
+    args: list[str] = []
+    for path in _as_model_paths(model_path):
+        args.extend(("-m", str(path)))
+    args.extend(
+        (
+            "--host",
+            str(host),
+            "--port",
+            str(port),
+        )
+    )
     if mmproj_path is not None:
         args.extend(("--mmproj", str(mmproj_path)))
     for key, flag in ALWAYS_FLAGS:
@@ -313,12 +324,19 @@ def _banner(plan: LaunchPlan, params: Mapping[str, object], notes: str, model_ma
     total_layers = _as_int(params.get("total_layers"), 0)
     gpu_layers = _as_int(params.get("gpu_layers"), 0)
     cpu_layers = max(total_layers - gpu_layers, 0) if total_layers > 0 and gpu_layers < total_layers else 0
+    shard_files = plan.model_files or [plan.model_file]
     lines = [
         f"Starting llama-server: {plan.model_key}",
-        f"  File:         {plan.model_file}",
-        f"  URL:          http://{plan.host}:{plan.port}/v1",
-        f"  Context:      {ctx} tokens  ({parallel} slot(s), {per_slot} per slot)",
+        f"  File:         {shard_files[0]}",
     ]
+    for extra in shard_files[1:]:
+        lines.append(f"                {extra}")
+    lines.extend(
+        [
+            f"  URL:          http://{plan.host}:{plan.port}/v1",
+            f"  Context:      {ctx} tokens  ({parallel} slot(s), {per_slot} per slot)",
+        ]
+    )
     if _present(model_max_ctx) and str(model_max_ctx).isdigit():
         lines.append(f"  Model max:    {model_max_ctx} tokens")
     lines.append(
@@ -422,12 +440,17 @@ def prepare_launch(
             f"preset [{slot}] for '{requested}' ({quant}) does not exist."
         )
 
-    model_file = quant_file_rel(cfg, quant)
-    if not model_file:
+    model_files = quant_file_rel(cfg, quant)
+    if not model_files:
         raise LaunchError(f"quant '{quant}' for '{requested}' does not exist.")
+    model_file = model_files[0]
 
     model_path_override = _env_override(env_map, "MODEL_PATH")
-    model_path = Path(model_path_override) if model_path_override else paths.models_dir / model_file
+    if model_path_override:
+        model_paths = [Path(model_path_override)]
+    else:
+        model_paths = [paths.models_dir / rel for rel in model_files]
+    model_path = model_paths[0]
 
     host_override = _env_override(env_map, "HOST")
     if host_override is not None:
@@ -467,8 +490,9 @@ def prepare_launch(
 
     if not paths.llama_server.is_file() or not os.access(paths.llama_server, os.X_OK):
         raise LaunchError(f"llama-server not found at {paths.llama_server}")
-    if not model_path.is_file():
-        raise LaunchError(f"model not found at {model_path}")
+    for shard_path in model_paths:
+        if not shard_path.is_file():
+            raise LaunchError(f"model not found at {shard_path}")
 
     mmproj_path = None
     if is_vision_enabled(cfg.params):
@@ -477,7 +501,7 @@ def prepare_launch(
             params["mmproj_path"] = str(mmproj_path)
 
     args = build_server_args(
-        model_path=model_path,
+        model_path=model_paths,
         host=host,
         port=port,
         params=params,
@@ -493,6 +517,8 @@ def prepare_launch(
         preset_name=preset.name,
         model_file=model_file,
         model_path=model_path,
+        model_files=list(model_files),
+        model_paths=list(model_paths),
         host=host,
         port=port,
         remote=remote,

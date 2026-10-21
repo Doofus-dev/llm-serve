@@ -20,7 +20,7 @@ from tui.data.compare_metrics import (
     format_metrics_table,
     resolve_baseline,
 )
-from tui.data.models_json import ModelConfig, Registry
+from tui.data.models_json import ModelConfig, Registry, quant_entry_rel_paths
 from tui.data.presets import (
     Preset,
     PresetStore,
@@ -52,8 +52,10 @@ def identity_for_quant(cfg: ModelConfig, quant: str) -> dict[str, Any]:
     quants = identity.get("quants")
     if isinstance(quants, dict):
         entry = quants.get(quant) or {}
-        if isinstance(entry, dict) and entry.get("file"):
-            identity["file"] = str(entry["file"])
+        if isinstance(entry, dict):
+            rels = quant_entry_rel_paths(entry)
+            if rels:
+                identity["file"] = rels[0]
     return identity
 
 
