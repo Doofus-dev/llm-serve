@@ -12,7 +12,7 @@ from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches, QueryError
 from textual.events import Focus
-from textual.widgets import Footer, Label
+from textual.widgets import Footer, Label, Switch
 from textual.theme import Theme
 
 from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selection_supports_action
@@ -940,11 +940,21 @@ class LLMServeApp(App):
 
     def action_toggle_remote(self) -> None:
         """Toggle Meshnet/LAN binding for the next launch."""
-        self.remote_launch = not self.remote_launch
+        self._set_remote_launch(not self.remote_launch)
+
+    def _set_remote_launch(self, remote: bool) -> None:
+        self.remote_launch = bool(remote)
         self.settings.remote_launch = self.remote_launch
         save_settings(self.paths.settings_json, self.settings)
         self.query_one(StatusPanel).next_remote = self.remote_launch
         self._update_footer()
+
+    def on_switch_changed(self, event: Switch.Changed) -> None:
+        if event.switch.id != "remote-switch":
+            return
+        if bool(event.value) == self.remote_launch:
+            return
+        self._set_remote_launch(bool(event.value))
 
     def action_cycle_log_verbosity(self) -> None:
         """Cycle llama.cpp log verbosity for the next launch (info/trace/debug)."""

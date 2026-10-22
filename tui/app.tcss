@@ -229,12 +229,18 @@ Button.-style-flat:disabled {
     }
     #right { layout: vertical; height: 1fr; width: 1fr; }
     #status {
-        height: 17;
-        min-height: 12;
+        height: 20;
+        min-height: 15;
         overflow-y: auto;
         border: round $border;
         padding: 0 1;
         background: $panel;
+    }
+    #remote-toggle-row {
+        height: 3;
+        min-height: 3;
+        padding: 0 1;
+        align: left middle;
     }
     #status .card-title {
         height: 1;

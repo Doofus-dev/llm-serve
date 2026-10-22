@@ -25,6 +25,7 @@ def build_app_bindings(
         # Run server
         Binding("l", "launch", "Launch"),
         Binding("s", "stop", "Stop"),
+        Binding("r", "toggle_remote", "Remote ON" if remote_on else "Remote OFF"),
         # Selected model / preset / alias
         Binding("e", "edit", "Edit"),
         Binding("p", "pick_quant", "Quant"),
@@ -33,7 +34,6 @@ def build_app_bindings(
         Binding("x", "compare_selected", "Compare Presets"),
         Binding("d", "delete", "Delete"),
         # Next launch + log panel
-        Binding("r", "toggle_remote", "Remote ON" if remote_on else "Remote OFF"),
         Binding("v", "cycle_log_verbosity", f"Log {log_label}"),
         Binding("o", "toggle_log_source", info_label),
         # App

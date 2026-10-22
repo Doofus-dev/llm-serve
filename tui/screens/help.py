@@ -109,7 +109,7 @@ class HelpScreen(ModalScreen[None]):
                 )
                 yield Static(
                     "Next launch / logs\n"
-                    "  R          Remote on/off (next launch)\n"
+                    "  R          Remote on/off (STATUS switch + next launch)\n"
                     "  V          Log verbosity (next launch)\n"
                     "  O          Extra info lines on/off",
                     classes="help-row",

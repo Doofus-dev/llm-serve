@@ -7,8 +7,9 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 from textual.app import ComposeResult
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Static
+from textual.widgets import Label, Static, Switch
 
 from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo
@@ -120,6 +121,13 @@ def format_generation_speed(gen_tps: float, width: int = SPARKLINE_WIDTH) -> Tex
     return speed
 
 
+def remote_toggle_label(remote_on: bool) -> str:
+    """Always-visible STATUS switch caption for the next launch bind."""
+    if remote_on:
+        return "Remote ON   Meshnet/LAN  0.0.0.0  (R)"
+    return "Remote OFF  localhost only  (R)"
+
+
 def format_preset_display(slot: int | None, name: str | None = None) -> str | None:
     """Preset slot label for STATUS, e.g. ``[5] 120K-HighPower``."""
     if slot is None:
@@ -194,8 +202,33 @@ class StatusHeader(Static):
         return Text(line, style=ACCENT)
 
 
-class StatusPanel(Static):
-    """Live status + throughput + GPU."""
+class StatusPanel(Vertical):
+    """Live status + throughput + GPU, plus the next-launch remote switch."""
+
+    DEFAULT_CSS = """
+    StatusPanel {
+        layout: vertical;
+        height: auto;
+    }
+    #remote-toggle-row {
+        height: 3;
+        min-height: 3;
+        padding: 0 1;
+        align: left middle;
+    }
+    #remote-switch {
+        width: auto;
+        height: 1;
+        margin: 0 1 0 0;
+    }
+    #remote-switch-label {
+        height: 1;
+        color: $text-muted;
+    }
+    #status-body {
+        height: auto;
+    }
+    """
 
     pid_info: reactive[PidInfo | None] = reactive(None)
     instances: reactive[list[PidInfo]] = reactive([])
@@ -215,6 +248,79 @@ class StatusPanel(Static):
 
     def compose(self) -> ComposeResult:
         yield Static("STATUS", classes="card-title", id="status-title")
+        with Horizontal(id="remote-toggle-row"):
+            yield Switch(value=False, id="remote-switch")
+            yield Label(
+                remote_toggle_label(False),
+                id="remote-switch-label",
+            )
+        yield Static(id="status-body")
+
+    def on_mount(self) -> None:
+        self._sync_remote_switch()
+        self._refresh_body()
+
+    def _refresh_body(self) -> None:
+        if not self.is_mounted:
+            return
+        self.query_one("#status-body", Static).update(self.render())
+
+    def _sync_remote_switch(self) -> None:
+        if not self.is_mounted:
+            return
+        switch = self.query_one("#remote-switch", Switch)
+        if switch.value != self.next_remote:
+            with switch.prevent(Switch.Changed):
+                switch.value = self.next_remote
+        self.query_one("#remote-switch-label", Label).update(
+            remote_toggle_label(self.next_remote)
+        )
+
+    def watch_next_remote(self) -> None:
+        self._sync_remote_switch()
+        self._refresh_body()
+
+    def watch_pid_info(self) -> None:
+        self._refresh_body()
+
+    def watch_instances(self) -> None:
+        self._refresh_body()
+
+    def watch_instance_labels(self) -> None:
+        self._refresh_body()
+
+    def watch_instance_preset_names(self) -> None:
+        self._refresh_body()
+
+    def watch_model_display(self) -> None:
+        self._refresh_body()
+
+    def watch_quant_display(self) -> None:
+        self._refresh_body()
+
+    def watch_preset_display(self) -> None:
+        self._refresh_body()
+
+    def watch_next_log_verbosity(self) -> None:
+        self._refresh_body()
+
+    def watch_metrics(self) -> None:
+        self._refresh_body()
+
+    def watch_live_throughput(self) -> None:
+        self._refresh_body()
+
+    def watch_gen_tps_history(self) -> None:
+        self._refresh_body()
+
+    def watch_gpu(self) -> None:
+        self._refresh_body()
+
+    def watch_props(self) -> None:
+        self._refresh_body()
+
+    def watch_uptime(self) -> None:
+        self._refresh_body()
 
     def render(self) -> Group:
         info = self.pid_info
