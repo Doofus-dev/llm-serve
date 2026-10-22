@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 HF_INSTALL_HINT = "Install: curl -LsSf https://hf.co/cli/install.sh | bash -s"
@@ -134,16 +134,27 @@ def build_download_plan(
 
 
 def shard_filenames(selected: str, all_ggufs: list[str]) -> list[str]:
-    """If selected is a sharded GGUF, return all shards in the set."""
-    match = SHARD_RE.match(selected)
+    """If selected is a sharded GGUF, return all shards in the set.
+
+    Matching is per-directory: a repo may keep the same shard numbering under
+    several quant folders (``UD-Q4_K_XL/…-00001-of-00004.gguf``), so a shard is
+    only grouped with candidates sharing its parent directory.
+    """
+    match = SHARD_RE.match(Path(selected).name)
     if not match:
         return [selected]
 
     prefix = match.group("prefix")
     total = match.group("total")
     pattern = re.compile(rf"^{re.escape(prefix)}-\d+-of-{total}\.gguf$", re.IGNORECASE)
-    shards = sorted(f for f in all_ggufs if pattern.match(f))
-    return shards or [selected]
+    parent = PurePosixPath(selected).parent
+    shards: list[str] = []
+    for candidate in all_ggufs:
+        if PurePosixPath(candidate).parent != parent:
+            continue
+        if pattern.match(Path(candidate).name):
+            shards.append(candidate)
+    return sorted(shards) or [selected]
 
 
 def build_source_metadata(plan: DownloadPlan, filename: str) -> dict[str, str]:
@@ -332,34 +343,78 @@ def list_gguf_repos(
     return repos[:limit], None
 
 
+HF_API_BASE = "https://huggingface.co/api"
+
+
+def _api_tree(repo_id: str, path: str = "", revision: str = "main") -> list[dict[str, Any]]:
+    """List one tree level via the Hub API. ``path`` is a repo-relative subdir."""
+    import urllib.parse
+    import urllib.request
+
+    url = f"{HF_API_BASE}/models/{urllib.parse.quote(repo_id)}/tree/{revision}"
+    if path:
+        url = f"{url}/{urllib.parse.quote(path)}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
 def list_repo_ggufs(repo_id: str, *, revision: str = "main") -> tuple[list[HubFile], str | None]:
     if not hf_available():
         return [], f"hf CLI not found. {HF_INSTALL_HINT}"
 
-    args = ["models", "list", repo_id, "--format", "json"]
-    if revision:
-        args.extend(["--revision", revision])
-
-    result = _run_hf(args, timeout=120)
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout or "Failed to list repo files").strip()
-        return [], message
-
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        return [], f"Invalid JSON from hf: {exc}"
-
-    if not isinstance(data, list):
-        return [], "Unexpected response from hf models list"
-
+    # The ``hf models list`` CLI only lists a repo root and cannot descend into
+    # subfolders, but some repos (e.g. unsloth's one-folder-per-quant layout)
+    # keep every quant under a subdirectory. The Hub tree API recurses, so use
+    # it to collect every GGUF in the repo regardless of layout.
     files: list[HubFile] = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        parsed = HubFile.from_json(item)
-        if parsed is not None:
-            files.append(parsed)
+
+    def _walk(path: str) -> None:
+        for item in _api_tree(repo_id, path, revision):
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "directory":
+                child = str(item.get("path", "")).strip("/")
+                if child:
+                    _walk(child)
+                continue
+            # The tree API already returns repo-relative paths (a subfolder
+            # fetch yields ``UD-Q4_K_XL/shard-00001-of-00004.gguf``), so use the
+            # item path verbatim rather than re-prefixing it.
+            name = str(item.get("path", ""))
+            if not name.lower().endswith(".gguf"):
+                continue
+            size = int(item.get("size") or item.get("lfs", {}).get("size") or 0)
+            files.append(HubFile(path=name, size=size))
+
+    _walk("")
+
+    if not files:
+        # API unreachable (offline / gated): fall back to the CLI root listing
+        # so a single-folder repo still resolves.
+        args = ["models", "list", repo_id, "--format", "json"]
+        if revision:
+            args.extend(["--revision", revision])
+        result = _run_hf(args, timeout=120)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "Failed to list repo files").strip()
+            return [], message
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return [], f"Invalid JSON from hf: {exc}"
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                parsed = HubFile.from_json(item)
+                if parsed is not None:
+                    files.append(parsed)
+
     files.sort(key=lambda f: f.path.lower())
     return files, None
 

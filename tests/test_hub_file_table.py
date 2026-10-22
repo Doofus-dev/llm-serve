@@ -192,6 +192,16 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     push.assert_called_once()
                     self.assertIsInstance(push.call_args.args[0], DownloadProfileDialog)
 
+    async def test_first_model_dialog_skips_clone_select(self) -> None:
+        """Empty models.json must not mount Select(value=False) (Textual crash)."""
+        app = self.harness.app()
+        dialog = DownloadProfileDialog(Registry(), "Qwen 3.8")
+        async with app.run_test(size=(80, 30)) as pilot:
+            app.push_screen(dialog)
+            await pilot.pause()
+            self.assertEqual(len(dialog.query("#clone_from")), 0)
+            self.assertEqual(dialog.query_one("#name").value, "Qwen 3.8")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from rich.text import Text
 from tui.data.baselines import load_baselines, lookup_baseline
 from tui.data.gpu import GPUStats
 from tui.data.hf import HubFile, fmt_size
-from tui.data.quant import is_sidecar_gguf, quant_from_filename
+from tui.data.quant import is_draft_gguf, is_sidecar_gguf, quant_from_filename
 from tui.data.vram import (
     classify_vram,
     estimate_gen_tps_calibrated,
@@ -33,6 +33,7 @@ class QuantFileRow:
     act_vram_on: str
     est_tps: str
     act_tps: str
+    is_draft: bool = False
 
 
 def local_file_size(models_dir: Path, author: str, filename: str) -> int:
@@ -125,6 +126,7 @@ def build_quant_file_rows(
                 act_vram_on=act_vram_on,
                 est_tps=fmt_tps(tps),
                 act_tps=act_tps,
+                is_draft=is_draft_gguf(item.path),
             )
         )
 
@@ -152,9 +154,10 @@ def fmt_disk_cell(*, downloaded: bool, transferring: bool = False) -> str:
 
 def quant_file_row_cells(row: QuantFileRow) -> tuple:
     """Cell values for the shared Disk + estimate file table."""
+    label = f"[dim]draft · {row.path}[/]" if row.is_draft else row.path
     return (
         fmt_downloaded_cell(row.downloaded),
-        row.path,
+        label,
         fmt_size(row.size),
         row.vram_cell,
         row.act_vram_off,

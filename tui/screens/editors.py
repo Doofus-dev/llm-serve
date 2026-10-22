@@ -128,8 +128,8 @@ class ParamSelect(EditorSelect):
     """Select that notifies the app when focused (for F2 param help)."""
 
     def __init__(self, param_name: str, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.param_name = param_name
+        super().__init__(*args, **kwargs)
 
     def on_focus(self, event: Focus) -> None:
         self.post_message(ParamFocused(self.param_name))

@@ -156,7 +156,7 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(from_path.count("-m"), 1)
         self.assertEqual(from_path[0:6], ["-m", "/tmp/m.gguf", "--host", "127.0.0.1", "--port", "8081"])
 
-    def test_multi_shard_emits_one_m_flag_per_shard(self) -> None:
+    def test_multi_shard_emits_one_m_flag_for_first_shard(self) -> None:
         shards = [
             Path("/tmp/m-00001-of-00003.gguf"),
             Path("/tmp/m-00002-of-00003.gguf"),
@@ -170,18 +170,16 @@ class ArgvTests(unittest.TestCase):
             log_verbosity=4,
         )
         m_values = [args[i + 1] for i, flag in enumerate(args) if flag == "-m"]
-        self.assertEqual(m_values, [str(path) for path in shards])
+        self.assertEqual(m_values, [str(shards[0])])
         self.assertEqual(
-            args[0:8],
+            args[0:6],
             [
                 "-m",
                 str(shards[0]),
-                "-m",
-                str(shards[1]),
-                "-m",
-                str(shards[2]),
                 "--host",
                 "127.0.0.1",
+                "--port",
+                "8081",
             ],
         )
 
@@ -265,14 +263,14 @@ class PrepareLaunchTests(unittest.TestCase):
         self.assertEqual(plan.args.count("-m"), 1)
         self.assertIn(f"  File:         {plan.model_file}", plan.banner_lines)
 
-    def test_multi_shard_plan_emits_three_m_flags(self) -> None:
+    def test_multi_shard_plan_passes_first_shard_only(self) -> None:
         _install_sharded_model(self.harness)
         plan = prepare_launch(FLASH_SLUG, paths=self.harness.paths)
         self.assertEqual(plan.model_file, FLASH_SHARDS[0])
         self.assertEqual(plan.model_files, FLASH_SHARDS)
         self.assertEqual(len(plan.model_paths), 3)
         m_values = [plan.args[i + 1] for i, flag in enumerate(plan.args) if flag == "-m"]
-        self.assertEqual(m_values, [str(path) for path in plan.model_paths])
+        self.assertEqual(m_values, [str(plan.model_paths[0])])
         for rel in FLASH_SHARDS:
             self.assertTrue(any(rel in line for line in plan.banner_lines), rel)
 
@@ -547,3 +545,19 @@ class RotateLogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuantFilenameTests(unittest.TestCase):
+    def test_ud_quant_id_from_filename(self) -> None:
+        from tui.data.quant import quant_from_filename
+        self.assertEqual(
+            quant_from_filename("Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"),
+            "UD-Q4_K_XL",
+        )
+        self.assertEqual(quant_from_filename("Qwen3.8-27B-Q4_K_M.gguf"), "Q4_K_M")
+
+    def test_mtp_is_draft_not_sidecar(self) -> None:
+        from tui.data.quant import is_draft_gguf, is_sidecar_gguf
+        self.assertTrue(is_draft_gguf("mtp-Qwen3.8-Flash-Next-Q8_0.gguf"))
+        self.assertFalse(is_sidecar_gguf("mtp-Qwen3.8-Flash-Next-Q8_0.gguf"))
+        self.assertTrue(is_sidecar_gguf("mmproj-BF16.gguf"))

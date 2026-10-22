@@ -125,8 +125,16 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
             yield Label("[bold]Register Downloaded Model[/bold]", classes="dialog-title")
             yield Label("Display name:")
             yield Input(value=self.default_name, placeholder="Qwen 3.8", id="name")
-            yield Label("Clone server params from:")
-            yield Select(options, id="clone_from", value=options[0][1] if options else Select.BLANK)
+            if options:
+                yield Label("Clone server params from:")
+                yield Select(
+                    options,
+                    id="clone_from",
+                    allow_blank=False,
+                    value=options[0][1],
+                )
+            else:
+                yield Label("First model — using built-in default server params.")
             with ActionBar():
                 yield Button("Create", variant="success", id="create")
                 yield Button("Cancel", id="cancel")
@@ -139,14 +147,17 @@ class DownloadProfileDialog(ModalScreen[tuple[str, str] | None]):
             self.dismiss(None)
             return
         name = self.query_one("#name", Input).value.strip()
-        clone_from = self.query_one("#clone_from", Select).value
         if not name:
             self.app.notify("Name cannot be empty", severity="error")
             return
-        if clone_from in (None, Select.BLANK):
-            self.app.notify("Select a model to clone params from", severity="error")
-            return
-        self.dismiss((name, str(clone_from)))
+        clone_from = ""
+        if self.registry.models:
+            clone_from = self.query_one("#clone_from", Select).value
+            if clone_from in (None, Select.BLANK):
+                self.app.notify("Select a model to clone params from", severity="error")
+                return
+            clone_from = str(clone_from)
+        self.dismiss((name, clone_from))
 
 
 class HubTable(DataTable):
@@ -1141,7 +1152,11 @@ class HubScreen(Screen):
                 self._set_status(f"[bold $error]Download failed[/] {message[:140]}")
                 return
 
-            base_params = dict(self.registry.models[clone_from].params)
+            base_params = (
+                dict(self.registry.models[clone_from].params)
+                if clone_from in self.registry.models
+                else {}
+            )
             source = build_source_metadata(plan, filename)
             gguf_path = plan.local_dir / filename
             create_downloaded_model(

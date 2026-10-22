@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from tui.data.hf import HubFile
 from tui.data.models_json import coerce_rel_paths, quant_entry_rel_paths
-from tui.data.quant import family_key, is_mmproj_gguf, is_sidecar_gguf
+from tui.data.quant import family_key, is_draft_gguf, is_mmproj_gguf, is_sidecar_gguf
 
 VISION_PIPELINE_TAGS = frozenset({
     "image-text-to-text",
@@ -150,6 +150,7 @@ def capabilities_from_files(
     names = [
         item.path if isinstance(item, HubFile) else str(item)
         for item in files
+        if not is_draft_gguf(item.path if isinstance(item, HubFile) else str(item))
     ]
     vision = any(is_mmproj_gguf(name) for name in names)
     haystack = " ".join([repo_id, *names])
@@ -245,6 +246,7 @@ def mmproj_files(files: Sequence[HubFile | str]) -> list[str]:
     names = [
         item.path if isinstance(item, HubFile) else str(item)
         for item in files
+        if not is_draft_gguf(item.path if isinstance(item, HubFile) else str(item))
     ]
     return [name for name in names if is_mmproj_gguf(name)]
 
@@ -369,7 +371,7 @@ def local_mmproj_path(
 
 
 def model_files_only(files: Sequence[HubFile]) -> list[HubFile]:
-    return [item for item in files if not is_sidecar_gguf(item.path)]
+    return [item for item in files if not is_sidecar_gguf(item.path) and not is_draft_gguf(item.path)]
 
 
 def apply_mmproj_identity(

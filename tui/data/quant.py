@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 QUANT_RE = re.compile(
-    r"(Q\d+_K(?:_[A-Z0-9]+)?|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)",
+    r"(UD-)?(Q\d+_K(?:_[A-Z0-9]+)?|Q\d+_\d+|IQ\d+_[A-Z0-9]+|F16|BF16)",
     re.IGNORECASE,
 )
 SIZE_RE = re.compile(r"(\d+(?:\.\d+)?[BMbm])")
@@ -33,7 +33,10 @@ def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | No
 
     quant = None
     if m := QUANT_RE.search(stem):
-        quant = m.group(1).upper()
+        ud = m.group(1)
+        q = m.group(2)
+        if q:
+            quant = (ud or "") + q.upper()
 
     return size, variant, quant
 
@@ -53,8 +56,20 @@ def is_mmproj_gguf(filename: str) -> bool:
 
 
 def is_sidecar_gguf(filename: str) -> bool:
+    """True for non-model companion GGUFs (vision projector, imatrix)."""
     name = Path(filename).name.lower()
     return is_mmproj_gguf(name) or "imatrix" in name
+
+
+def is_draft_gguf(filename: str) -> bool:
+    """True for MTP speculative-decoding draft GGUFs (e.g. mtp-Model-Q8_0.gguf).
+
+    Drafts are selectable downloads, not sidecars: they must appear in the
+    quant/file picker but stay out of the quant catalog, VRAM calibration,
+    and capability/mmproj matching, where they would masquerade as the
+    model's main quant.
+    """
+    return Path(filename).name.lower().startswith("mtp-")
 
 
 def quant_from_filename(filename: str) -> str:

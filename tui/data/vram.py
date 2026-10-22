@@ -9,7 +9,7 @@ from rich.text import Text
 
 from tui.data.baselines import RunBaseline, plausible_vram
 from tui.data.gpu import GPUStats, same_gpu
-from tui.data.quant import family_key, is_sidecar_gguf
+from tui.data.quant import family_key, is_draft_gguf, is_sidecar_gguf
 
 # Effective system RAM bandwidth for CPU-offloaded layers. Dual-channel
 # DDR5 is theoretically ~70-80 GB/s; llama.cpp typically sees less.
@@ -127,7 +127,7 @@ def _usable_runs(
             continue
         if abs(_offload(run) - offload_ratio) > 0.2:
             continue
-        if is_sidecar_gguf(run.file):
+        if is_sidecar_gguf(run.file) or is_draft_gguf(run.file):
             continue
         if run.file_size <= 0 or run.ctx <= 0:
             continue
@@ -138,7 +138,7 @@ def _usable_runs(
 
 
 def _sibling_runs(runs: list[RunBaseline], filename: str) -> list[RunBaseline]:
-    if is_sidecar_gguf(filename):
+    if is_sidecar_gguf(filename) or is_draft_gguf(filename):
         return []
     want = family_key(filename)
     if not want:

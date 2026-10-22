@@ -32,7 +32,7 @@ from tui.data.capabilities import (
 )
 from tui.data.hf import HubFile, fetch_repo_info, list_repo_ggufs, repo_author
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
-from tui.data.quant import is_sidecar_gguf
+from tui.data.quant import is_draft_gguf, is_sidecar_gguf
 from tui.data.quant_table import (
     QuantFileRow,
     build_quant_file_rows,
@@ -423,14 +423,11 @@ class QuantPickerScreen(ModalScreen[str | None]):
         active = self.cfg.active_quant
         cursor_row = 0
         for idx, row in enumerate(self._rows):
-            table.add_row(
-                *quant_file_row_cells(row),
-                # Repos may contain multiple files with the same inferred
-                # quant (for example the main Q8_0 and an MTP Q8_0 draft).
-                # The path is the unique identity of a selectable row.
-                key=row.path,
-            )
-            if row.quant_id == active:
+            # The path is the row key for every row (including drafts), so cell
+            # updates and ``_selected_row`` resolve. Drafts are selectable
+            # downloads, not main quants; ``quant_file_row_cells`` marks them.
+            table.add_row(*quant_file_row_cells(row), key=row.path)
+            if not row.is_draft and row.quant_id == active:
                 cursor_row = idx
 
         status = self.query_one("#quant-picker-status", Static)
@@ -487,7 +484,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             if not isinstance(entry, dict):
                 continue
             fn = str(entry.get("filename") or qid)
-            if fn in seen_paths or is_sidecar_gguf(fn):
+            if fn in seen_paths or is_sidecar_gguf(fn) or is_draft_gguf(fn):
                 continue
             size = 0
             if author:
@@ -559,14 +556,13 @@ class QuantPickerScreen(ModalScreen[str | None]):
 
     def _selected_row(self) -> QuantFileRow | None:
         table = self.query_one("#quant-table", DataTable)
-        if table.cursor_row is None or not self._rows:
+        if table.cursor_row is None:
             return None
-        row_key = table.get_row_at(table.cursor_row)[1]
-        # row[1] is path after disk column
-        path = str(row_key)
-        for item in self._rows:
-            if item.path == path:
-                return item
+        # Rows are added in ``self._rows`` order, so the cursor index is the
+        # row's index. (Cell text is markup-styled for drafts and must not be
+        # parsed back into a path.)
+        if 0 <= table.cursor_row < len(self._rows):
+            return self._rows[table.cursor_row]
         return None
 
     def action_cancel(self) -> None:

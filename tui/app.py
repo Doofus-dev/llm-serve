@@ -341,7 +341,11 @@ class LLMServeApp(App):
                     on_complete()
                 return
 
-            base_params = dict(self.registry.models[clone_from].params)
+            base_params = (
+                dict(self.registry.models[clone_from].params)
+                if clone_from in self.registry.models
+                else {}
+            )
             source = build_source_metadata(plan, filename)
             gguf_path = plan.local_dir / filename
             slug, quant_id = add_or_update_quant(

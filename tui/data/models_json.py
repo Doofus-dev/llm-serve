@@ -30,6 +30,7 @@ from tui.data.quant import (
     author_size_label,
     default_model_slug,
     family_display,
+    is_draft_gguf,
     is_sidecar_gguf,
     parse_gguf_filename,
     quant_from_filename,
@@ -505,21 +506,35 @@ def merge_repo_catalog(params: dict[str, Any], files: list[tuple[str, str]]) -> 
         filename = ""
         if isinstance(entry, dict):
             filename = str(entry.get("filename") or "")
-        if is_sidecar_gguf(filename) or is_sidecar_gguf(str(qid)):
+        if is_sidecar_gguf(filename) or is_sidecar_gguf(str(qid)) or is_draft_gguf(filename) or is_draft_gguf(str(qid)):
             del quants[qid]
 
+    grouped: dict[str, list[str]] = {}
     for path, _size in files:
-        if is_sidecar_gguf(path):
+        if is_sidecar_gguf(path) or is_draft_gguf(path):
             continue
         qid = quant_from_filename(path)
-        file_rel = f"{author}/{path}" if author else path
+        grouped.setdefault(qid, []).append(path)
+    for qid, paths in grouped.items():
+        ordered = order_shard_paths(paths) if len(paths) > 1 else list(paths)
+        file_rels = [f"{author}/{path}" if author else path for path in ordered]
         if qid not in quants:
-            quants[qid] = {"filename": path, "file": file_rel}
+            entry: dict[str, Any] = {"filename": ordered[0], "file": file_rels[0]}
+            if len(file_rels) > 1:
+                entry["files"] = file_rels
+            quants[qid] = entry
+            continue
+        entry = quants[qid]
+        if not isinstance(entry, dict):
+            continue
+        entry.setdefault("filename", ordered[0])
+        if len(file_rels) > 1:
+            existing = quant_entry_rel_paths(entry)
+            if len(existing) < 2:
+                entry["files"] = file_rels
+                entry["file"] = file_rels[0]
         else:
-            entry = quants[qid]
-            if isinstance(entry, dict):
-                entry.setdefault("filename", path)
-                entry.setdefault("file", file_rel)
+            entry.setdefault("file", file_rels[0])
     active = str(params.get("active_quant") or "")
     if quants and active not in quants:
         params["active_quant"] = next(iter(quants))

@@ -70,6 +70,25 @@ class HFPathTests(unittest.TestCase):
         )
         self.assertEqual(shard_filenames("Model-Q4_K_M.gguf", all_files), ["Model-Q4_K_M.gguf"])
 
+    def test_shard_filenames_groups_only_same_directory(self) -> None:
+        all_files = [
+            "UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00004.gguf",
+            "UD-Q4_K_XL/Model-UD-Q4_K_XL-00002-of-00004.gguf",
+            "Q8_0/Model-Q8_0-00001-of-00004.gguf",
+            "Q8_0/Model-Q8_0-00002-of-00004.gguf",
+        ]
+        shards = shard_filenames(
+            "UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00004.gguf",
+            all_files,
+        )
+        self.assertEqual(
+            shards,
+            [
+                "UD-Q4_K_XL/Model-UD-Q4_K_XL-00001-of-00004.gguf",
+                "UD-Q4_K_XL/Model-UD-Q4_K_XL-00002-of-00004.gguf",
+            ],
+        )
+
     def test_build_source_metadata(self) -> None:
         models_dir = Path("/repo/models")
         plan = build_download_plan("unsloth/Qwen3.6-27B-GGUF", "Qwen3.6-27B-UD-Q3_K_XL.gguf", models_dir)

@@ -236,8 +236,11 @@ def build_server_args(
     mmproj_path: Path | None = None,
 ) -> list[str]:
     args: list[str] = []
-    for path in _as_model_paths(model_path):
-        args.extend(("-m", str(path)))
+    # llama.cpp split GGUFs must be loaded from the first shard only; extra
+    # -m flags overwrite the path (last wins) and fail with "illegal split file idx".
+    shards = _as_model_paths(model_path)
+    if shards:
+        args.extend(("-m", str(shards[0])))
     args.extend(
         (
             "--host",
