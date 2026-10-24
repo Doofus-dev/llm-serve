@@ -95,6 +95,7 @@ from tui.screens.editors import (
 )
 from tui.screens.hub import HubScreen
 from tui.screens.help import HelpScreen
+from tui.screens.benchmark import BenchmarkScreen
 from tui.data.compare_metrics import resolve_default_preset
 from tui.screens.compare import PresetCompareScreen
 from tui.screens.preset_compare_page import (
@@ -1549,6 +1550,26 @@ class LLMServeApp(App):
                 live=live,
                 history=history,
                 gpu_name=gpu_name,
+            )
+        )
+
+    def action_open_benchmark(self) -> None:
+        if self._editor_mode:
+            self.notify("Close the editor first", severity="warning")
+            return
+        gpu = None
+        try:
+            gpu = self.query_one(StatusPanel).gpu
+        except (QueryError, NoMatches):
+            gpu = None
+        if gpu is None or not gpu.available:
+            gpu = query_gpu()
+        self.push_screen(
+            BenchmarkScreen(
+                registry=self.registry,
+                paths=self.paths,
+                gpu=gpu,
+                initial_model=self._selected_model(),
             )
         )
 

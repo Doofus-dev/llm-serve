@@ -9,6 +9,7 @@ A llama.cpp launcher with a Textual TUI. Register GGUF models in JSON, pick a qu
 - **Aliases** — `llm-serve coding` can follow a model’s current quant, or pin a quant and preset.
 - **Presets** — Up to five numbered slots per quant (`gpu_layers`, context, KV cache type, sampling, MTP, reasoning, …). The TUI can compare and independently edit two slots of one model/quant.
 - **Hub** — Search GGUF repos, compare estimated vs measured VRAM and tok/s, download one or more quants.
+- **Benchmark** — Run vendored `llama-bench` against catalogued local GGUFs and keep per-host prompt/gen tok/s in `tui-benchmarks.json` so two machines can be compared.
 - **Concurrent servers** — One `llama-server` per model, each on its own port. Launch another without stopping the first. `stop` with no argument stops the tracked server (or the first running instance if none is tracked); `stop <model>` stops that instance.
 - **Remote** — `--remote` or **R** in the TUI binds `0.0.0.0` so other devices on a trusted LAN or VPN can connect. There is no authentication.
 - **Setup** — `./setup.sh` installs a project `.venv`, clones and builds llama.cpp (CUDA / ROCm / CPU), and puts `llm-serve` on `PATH`.
@@ -113,6 +114,7 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05` 
 | **N** / **D** | New / delete (preset or alias, depending on focus) |
 | **1–5** | Activate that preset (or pin it on an alias) |
 | **H** | Hugging Face Hub |
+| **B** | Benchmark (`llama-bench` on local GGUFs) |
 | **R** | Next launch local ↔ remote |
 | **V** | Next launch log level (INFO → TRACE → DEBUG) |
 | **O** | Extra lines in the log pane |
@@ -131,6 +133,10 @@ In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles comp
 Need the `hf` CLI for browse/download. Local models still work without it.
 
 File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns from runs saved in `tui-baselines.json` (written while a server is up). Context and GPU-offload sliders change the estimates. You can start several quant downloads at once from Hub or the quant picker (● on disk, ⬇ downloading, — missing); they keep running if you close those screens. Gated repos need **Login** (Hugging Face token) — that is not API auth for llama-server.
+
+### Benchmark
+
+**B** opens a Benchmark page that runs the vendored `llama.cpp/build/bin/llama-bench` binary against GGUFs already in `models.json` (no `llama-server`, no Hub download). Default knobs are `-p 512 -n 128 -r 5`. Each saved row includes hostname, GPU name, VRAM, and CPU so a second machine's numbers can sit next to this one; a re-run replaces only this host's row for that model+quant+config. Results go to `tui-benchmarks.json`, not the live STATUS sampler in `tui-baselines.json`. The page fails loudly if `llama-bench` is missing.
 
 ## Configuration
 
@@ -182,6 +188,7 @@ Created by the TUI (not by setup). Per model, per quant, slots `1`–`5`. Slot 1
 |------|---------|
 | `tui-settings.json` | Theme, Hub author recents, next-launch remote and log verbosity |
 | `tui-baselines.json` | Measured VRAM and generation averages for Hub **Act.** columns |
+| `tui-benchmarks.json` | Offline `llama-bench` prompt/gen tok/s per host, model, and quant |
 | `param-help.conf` | Preset-editor field docs (**F2**). Not a config file. |
 
 ## Layout

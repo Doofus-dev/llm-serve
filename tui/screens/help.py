@@ -117,6 +117,7 @@ class HelpScreen(ModalScreen[None]):
                 yield Static(
                     "App\n"
                     "  H          Hub (browse/download models)\n"
+                    "  B          Benchmark (llama-bench on local GGUFs)\n"
                     "  T          Cycle theme\n"
                     "  F1         This help\n"
                     "  Q          Quit",
@@ -191,6 +192,14 @@ class HelpScreen(ModalScreen[None]):
                     "  mmproj sidecar) and tools. Use Download vision when\n"
                     "  the projector is missing, and the Vision switch to\n"
                     "  pass or skip --mmproj on launch.",
+                    classes="help-tip",
+                )
+                yield Static(
+                    "• Press B for Benchmark: pick catalogued GGUFs and run\n"
+                    "  llama-bench (pp 512 / tg 128 / 5 reps) on this machine.\n"
+                    "  Results save in tui-benchmarks.json with a hardware\n"
+                    "  fingerprint so another host's numbers can sit beside\n"
+                    "  yours. This is not the live STATUS t/s sampler.",
                     classes="help-tip",
                 )
                 yield Static(

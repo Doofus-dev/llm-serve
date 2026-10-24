@@ -95,11 +95,13 @@ def write_harness(root: Path) -> AppPaths:
         models_dir=models_dir,
         llama_dir=root / "llama.cpp",
         llama_server=server,
+        llama_bench=llama_bin / "llama-bench",
         log_dir=logs,
         log_file=logs / "llm-serve.log",
         pid_file=logs / ".llm-serve.pid",
         settings_json=root / "tui-settings.json",
         baselines_json=root / "tui-baselines.json",
+        benchmarks_json=root / "tui-benchmarks.json",
     )
 
 

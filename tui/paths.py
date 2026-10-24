@@ -27,11 +27,13 @@ class AppPaths:
     models_dir: Path
     llama_dir: Path
     llama_server: Path
+    llama_bench: Path
     log_dir: Path
     log_file: Path
     pid_file: Path
     settings_json: Path
     baselines_json: Path
+    benchmarks_json: Path
 
 
 def default_paths(*, env: Mapping[str, str] | None = None, root: Path | None = None) -> AppPaths:
@@ -49,9 +51,11 @@ def default_paths(*, env: Mapping[str, str] | None = None, root: Path | None = N
         models_dir=models_dir,
         llama_dir=llama_dir,
         llama_server=llama_dir / "build" / "bin" / "llama-server",
+        llama_bench=llama_dir / "build" / "bin" / "llama-bench",
         log_dir=log_dir,
         log_file=log_file,
         pid_file=pid_file,
         settings_json=base / "tui-settings.json",
         baselines_json=base / "tui-baselines.json",
+        benchmarks_json=base / "tui-benchmarks.json",
     )

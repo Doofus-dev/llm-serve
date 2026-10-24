@@ -38,6 +38,7 @@ def build_app_bindings(
         Binding("o", "toggle_log_source", info_label),
         # App
         Binding("h", "open_hub", "Hub"),
+        Binding("b", "open_benchmark", "Benchmark"),
         Binding("t", "change_theme", "Theme"),
         Binding("f1", "help", "Help"),
         Binding("q", "quit", "Quit"),
@@ -103,6 +104,7 @@ Next launch / logs
 
 App
   H         Hub
+  B         Benchmark (llama-bench on local GGUFs)
   T         theme
   F1        this help
   Q         quit

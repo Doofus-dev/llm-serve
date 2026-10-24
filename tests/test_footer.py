@@ -61,6 +61,7 @@ class FooterBindingTests(unittest.TestCase):
                 "cycle_log_verbosity",
                 "toggle_log_source",
                 "open_hub",
+                "open_benchmark",
                 "change_theme",
                 "help",
                 "quit",
@@ -96,7 +97,9 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
                 {"launch", "edit", "pick_quant", "compare_presets", "compare_selected"}
                 <= on_model
             )
-            self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_model)
+            self.assertTrue(
+                {"stop", "new", "delete", "open_hub", "open_benchmark", "quit"} <= on_model
+            )
 
             aliases = app.query_one(AliasNav)
             aliases.focus()
@@ -107,7 +110,9 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("compare_presets", on_alias)
             self.assertNotIn("compare_selected", on_alias)
             self.assertIn("edit", on_alias)
-            self.assertTrue({"stop", "new", "delete", "open_hub", "quit"} <= on_alias)
+            self.assertTrue(
+                {"stop", "new", "delete", "open_hub", "open_benchmark", "quit"} <= on_alias
+            )
 
     async def test_log_panel_hides_selection_actions(self) -> None:
         app = self.harness.app()
