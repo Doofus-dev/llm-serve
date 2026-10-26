@@ -294,8 +294,8 @@ def save_benchmarks(path: Path, rows: list[BenchRow]) -> None:
     atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
-def record_benchmark(path: Path, row: BenchRow) -> BenchRow:
-    """Upsert this host's row for model+quant+config. Other hosts are kept."""
+def record_benchmark(path: Path, row: BenchRow) -> bool:
+    """Upsert by host+model+quant+Prompt/Gen/Repeats. True if a row was replaced."""
     if not row.updated_at:
         row.updated_at = utc_now()
     runs = load_benchmarks(path)
@@ -304,10 +304,17 @@ def record_benchmark(path: Path, row: BenchRow) -> BenchRow:
         if _row_identity(existing) == key:
             runs[index] = row
             save_benchmarks(path, runs)
-            return row
+            return True
     runs.append(row)
     save_benchmarks(path, runs)
-    return row
+    return False
+
+
+def _speed_sort_key(value: float | None) -> float:
+    # Missing speeds sink; higher tok/s first via negative sort.
+    if value is None:
+        return float("inf")
+    return -float(value)
 
 
 def rows_for_table(
@@ -315,8 +322,9 @@ def rows_for_table(
     *,
     this_hostname: str,
     host_filter: str = "",
+    current: BenchConfig | None = None,
 ) -> list[BenchRow]:
-    """Order by model, quant, this host first, then other hostnames."""
+    """Matching knobs first, then fastest Gen t/s. Same identity stays comparable."""
     filtered = [
         row
         for row in rows
@@ -325,6 +333,12 @@ def rows_for_table(
     return sorted(
         filtered,
         key=lambda row: (
+            0 if current is not None and row.config() == current else 1,
+            -int(row.n_prompt),
+            -int(row.n_gen),
+            -int(row.repetitions),
+            _speed_sort_key(row.tg_tps),
+            _speed_sort_key(row.pp_tps),
             (row.display or row.model).lower(),
             row.model.lower(),
             row.quant.lower(),

@@ -117,7 +117,7 @@ class HelpScreen(ModalScreen[None]):
                 yield Static(
                     "App\n"
                     "  H          Hub (browse/download models)\n"
-                    "  B          Benchmark (llama-bench on local GGUFs)\n"
+                    "  B          Benchmark (Prompt t/s / Gen t/s on local GGUFs)\n"
                     "  T          Cycle theme\n"
                     "  F1         This help\n"
                     "  Q          Quit",
@@ -195,7 +195,7 @@ class HelpScreen(ModalScreen[None]):
                     classes="help-tip",
                 )
                 yield Static(
-                    "• Press B for Benchmark: pick catalogued GGUFs and run\n"
+                    "• Press B for Benchmark: Run selected (cursor if none) or Run all, one at a time\n"
                     "  llama-bench (pp 512 / tg 128 / 5 reps) on this machine.\n"
                     "  Results save in tui-benchmarks.json with a hardware\n"
                     "  fingerprint so another host's numbers can sit beside\n"

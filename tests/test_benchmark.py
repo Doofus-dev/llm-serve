@@ -253,13 +253,46 @@ class StoreTests(unittest.TestCase):
     def test_different_config_does_not_replace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "tui-benchmarks.json"
-            record_benchmark(path, _row(n_prompt=512, pp_tps=100.0))
-            record_benchmark(path, _row(n_prompt=256, pp_tps=80.0))
+            first = record_benchmark(path, _row(n_prompt=512, pp_tps=100.0))
+            second = record_benchmark(path, _row(n_prompt=256, pp_tps=80.0))
+            self.assertFalse(first)
+            self.assertFalse(second)
             stored = load_benchmarks(path)
             self.assertEqual(len(stored), 2)
             by_pp = {row.n_prompt: row.pp_tps for row in stored}
             self.assertAlmostEqual(by_pp[512], 100.0)
             self.assertAlmostEqual(by_pp[256], 80.0)
+
+    def test_changing_gen_or_repeats_is_a_new_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tui-benchmarks.json"
+            record_benchmark(path, _row(n_gen=128, repetitions=5, tg_tps=10.0))
+            record_benchmark(path, _row(n_gen=256, repetitions=5, tg_tps=9.0))
+            record_benchmark(path, _row(n_gen=128, repetitions=3, tg_tps=11.0))
+            stored = load_benchmarks(path)
+            self.assertEqual(len(stored), 3)
+
+    def test_identical_knobs_rewrite_the_same_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tui-benchmarks.json"
+            record_benchmark(path, _row(n_prompt=512, n_gen=128, repetitions=5, tg_tps=10.0))
+            replaced = record_benchmark(
+                path, _row(n_prompt=512, n_gen=128, repetitions=5, tg_tps=99.0)
+            )
+            self.assertTrue(replaced)
+            stored = load_benchmarks(path)
+            self.assertEqual(len(stored), 1)
+            self.assertAlmostEqual(stored[0].tg_tps, 99.0)
+
+    def test_faster_gen_sorts_first(self) -> None:
+        ordered = rows_for_table(
+            [
+                _row(model="slow-model", display="Slow", tg_tps=10.0, pp_tps=100.0),
+                _row(model="fast-model", display="Fast", tg_tps=200.0, pp_tps=50.0),
+            ],
+            this_hostname="box-a",
+        )
+        self.assertEqual([row.model for row in ordered], ["fast-model", "slow-model"])
 
     def test_table_puts_this_host_first_in_a_model_quant_group(self) -> None:
         ordered = rows_for_table(
@@ -421,6 +454,13 @@ class BenchmarkScreenTests(unittest.IsolatedAsyncioTestCase):
             picker = screen.query_one("#bench-picker", DataTable)
             statuses = [str(picker.get_row_at(i)[4]) for i in range(picker.row_count)]
             self.assertIn("done", statuses)
+            result_row = results.get_row_at(0)
+            labels = [str(col.label) for col in results.columns.values()]
+            self.assertEqual(labels, list(RESULT_COLUMNS))
+            as_text = [str(cell) for cell in result_row]
+            self.assertIn("512", as_text)
+            self.assertIn("128", as_text)
+            self.assertIn("5", as_text)
 
     async def test_run_without_binary_marks_failed(self) -> None:
         app = self.harness.app()
@@ -434,6 +474,32 @@ class BenchmarkScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.status_by_key[f"{MODEL_SLUG}/{QUANT}"], "failed")
             status = str(screen.query_one("#bench-status", Static).render())
             self.assertIn("llama-bench not found", status)
+
+
+    async def test_run_without_pick_uses_cursor_row(self) -> None:
+        binary = self.harness.paths.llama_bench
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+
+        def runner(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout=SAMPLE_JSON, stderr="")
+
+        app = self.harness.app()
+        screen = self._screen(registry=app.registry, runner=runner)
+        async with app.run_test(size=(140, 50)) as pilot:
+            app.push_screen(screen)
+            await pilot.pause()
+            self.assertEqual(screen.picked, set())
+            screen.action_run_bench()
+            workers = [worker for worker in screen.workers if worker.state.name != "CANCELLED"]
+            if workers:
+                await workers[0].wait()
+            await pilot.pause()
+            self.assertIn(f"{MODEL_SLUG}/{QUANT}", screen.picked)
+            self.assertEqual(screen.status_by_key[f"{MODEL_SLUG}/{QUANT}"], "done")
+            stored = load_benchmarks(self.harness.paths.benchmarks_json)
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0].model, MODEL_SLUG)
 
 
 class RowFromRunTests(unittest.TestCase):

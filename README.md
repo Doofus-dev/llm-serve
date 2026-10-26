@@ -139,7 +139,7 @@ File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns fr
 
 ### Benchmark
 
-**B** opens a Benchmark page that runs the vendored `llama.cpp/build/bin/llama-bench` binary against GGUFs already in `models.json` (no `llama-server`, no Hub download). Default knobs are `-p 512 -n 128 -r 5`. Each saved row includes hostname, GPU name, VRAM, and CPU so a second machine's numbers can sit next to this one; a re-run replaces only this host's row for that model+quant+config. Results go to `tui-benchmarks.json`, not the live STATUS sampler in `tui-baselines.json`. The page fails loudly if `llama-bench` is missing.
+**B** opens a Benchmark page that runs this checkout's `llama-bench` against GGUFs already in the catalog (no live `llama-server`, no Hub download). Knobs use the same names as the rest of the TUI: **Prompt tokens**, **Gen tokens**, **Repeats** (llama-bench `-p` / `-n` / `-r`, defaults 512 / 128 / 5). **Run selected** (or **R**) runs the picked rows, or the cursor row if nothing is picked. **Run all** (Ctrl+R) queues every local GGUF. Either way they run **one at a time**. Each saved row stores Prompt/Gen/Repeats plus Prompt t/s, Gen t/s, gpu_layers, and threads. Re-running the same knobs on this host rewrites that row; change any knob and a new row is kept so you can compare. Results sort fastest Gen t/s first. File: `tui-benchmarks.json` in the shared data dir, not the live STATUS sampler in `tui-baselines.json`. Missing `llama-bench` fails loudly.
 
 ## Configuration
 

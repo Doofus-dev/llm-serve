@@ -42,9 +42,12 @@ RESULT_COLUMNS = (
     "Host",
     "Model",
     "Quant",
-    "PP t/s",
-    "TG t/s",
-    "ngl",
+    "Prompt tokens",
+    "Gen tokens",
+    "Repeats",
+    "Prompt t/s",
+    "Gen t/s",
+    "gpu_layers",
     "threads",
     "backend",
     "GPU",
@@ -63,7 +66,8 @@ class BenchmarkScreen(Screen):
         Binding("escape", "close", "Close"),
         Binding("space", "toggle_pick", "Toggle", show=False),
         Binding("a", "pick_all", "All", show=False),
-        Binding("r", "run_bench", "Run"),
+        Binding("r", "run_bench", "Run selected"),
+        Binding("ctrl+r", "run_all", "Run all"),
     ]
 
     CSS = """
@@ -99,7 +103,8 @@ class BenchmarkScreen(Screen):
     }
 
     #bench-knobs {
-        height: 3;
+        height: auto;
+        min-height: 3;
         align: left middle;
     }
 
@@ -111,7 +116,7 @@ class BenchmarkScreen(Screen):
     }
 
     #bench-knobs Input {
-        width: 8;
+        width: 10;
         height: 3;
         margin: 0 2 0 0;
         border: round $accent;
@@ -172,15 +177,15 @@ class BenchmarkScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="bench-panel"):
-            yield Label("[bold]Benchmark[/]  llama-bench on local GGUFs", id="bench-title")
+            yield Label("[bold]Benchmark[/]  offline Prompt t/s and Gen t/s", id="bench-title")
             yield Static("", id="bench-hardware")
             yield Static("", id="bench-status")
             with Horizontal(id="bench-knobs"):
-                yield Label("pp (-p)")
+                yield Label("Prompt tokens")
                 yield Input(str(DEFAULT_N_PROMPT), id="bench-pp")
-                yield Label("tg (-n)")
+                yield Label("Gen tokens")
                 yield Input(str(DEFAULT_N_GEN), id="bench-n")
-                yield Label("reps (-r)")
+                yield Label("Repeats")
                 yield Input(str(DEFAULT_REPETITIONS), id="bench-r")
                 yield Label("Host")
                 yield Select(
@@ -190,15 +195,16 @@ class BenchmarkScreen(Screen):
                     id="bench-host-filter",
                 )
             with ActionBar():
-                yield Button("Run", variant="success", id="run")
+                yield Button("Run selected", variant="success", id="run")
+                yield Button("Run all", id="run-all")
                 yield Button("Close", id="close")
             yield Label("Local GGUFs", classes="help-section")
             yield DataTable(id="bench-picker", cursor_type="row")
             yield Label("Results", classes="help-section")
             yield DataTable(id="bench-results", cursor_type="row")
             yield Static(
-                "Space: pick  A: all  R: run  Esc: close  —  "
-                "Re-run replaces this host only. Live STATUS t/s stays in tui-baselines.json.",
+                "Space: pick  R: run selected (cursor if none)  Ctrl+R: run all one at a time  Esc: close  —  "
+                "Same Prompt/Gen/Repeats on this host rewrites the last run. Change a knob to keep both.",
                 id="bench-help",
             )
 
@@ -232,29 +238,33 @@ class BenchmarkScreen(Screen):
     def _reload_catalog(self) -> None:
         self.targets = catalogued_ggufs(self.registry, self.paths.models_dir)
 
-    def _read_config(self) -> BenchConfig | None:
+    def _read_config(self, *, silent: bool = False) -> BenchConfig | None:
         def parse(widget_id: str, default: int, label: str) -> int | None:
             raw = self.query_one(widget_id, Input).value.strip() or str(default)
             try:
                 value = int(raw)
             except ValueError:
-                self.notify(f"{label} must be an integer", severity="error")
+                if not silent:
+                    self.notify(f"{label} must be an integer", severity="error")
                 return None
             if value < 0:
-                self.notify(f"{label} must be ≥ 0", severity="error")
+                if not silent:
+                    self.notify(f"{label} must be ≥ 0", severity="error")
                 return None
             return value
 
-        n_prompt = parse("#bench-pp", DEFAULT_N_PROMPT, "pp (-p)")
-        n_gen = parse("#bench-n", DEFAULT_N_GEN, "tg (-n)")
-        reps = parse("#bench-r", DEFAULT_REPETITIONS, "reps (-r)")
+        n_prompt = parse("#bench-pp", DEFAULT_N_PROMPT, "Prompt tokens")
+        n_gen = parse("#bench-n", DEFAULT_N_GEN, "Gen tokens")
+        reps = parse("#bench-r", DEFAULT_REPETITIONS, "Repeats")
         if n_prompt is None or n_gen is None or reps is None:
             return None
         if n_prompt <= 0 and n_gen <= 0:
-            self.notify("Need pp (-p) or tg (-n) > 0", severity="error")
+            if not silent:
+                self.notify("Need Prompt tokens or Gen tokens > 0", severity="error")
             return None
         if reps <= 0:
-            self.notify("reps (-r) must be ≥ 1", severity="error")
+            if not silent:
+                self.notify("Repeats must be ≥ 1", severity="error")
             return None
         return BenchConfig(n_prompt=n_prompt, n_gen=n_gen, repetitions=reps)
 
@@ -308,14 +318,16 @@ class BenchmarkScreen(Screen):
         for label in RESULT_COLUMNS:
             table.add_column(label, key=label.lower().replace(" ", "_"))
         host_filter = "" if self._host_filter == ALL_HOSTS else self._host_filter
+        current = self._read_config(silent=True)
         ordered = rows_for_table(
             self.rows,
             this_hostname=self.fingerprint.hostname,
             host_filter=host_filter,
+            current=current,
         )
-        prev_group: tuple[str, str] | None = None
+        prev_group: tuple | None = None
         for row in ordered:
-            group = (row.model, row.quant)
+            group = (row.model, row.quant, row.n_prompt, row.n_gen, row.repetitions)
             host = row.hostname
             if host == self.fingerprint.hostname:
                 host = f"{host} *"
@@ -328,6 +340,9 @@ class BenchmarkScreen(Screen):
                 host,
                 model,
                 quant,
+                str(row.n_prompt),
+                str(row.n_gen),
+                str(row.repetitions),
                 format_speed(row.pp_tps, row.pp_stddev),
                 format_speed(row.tg_tps, row.tg_stddev),
                 "—" if row.n_gpu_layers is None else str(row.n_gpu_layers),
@@ -354,6 +369,9 @@ class BenchmarkScreen(Screen):
             return
         if event.button.id == "run":
             self.action_run_bench()
+            return
+        if event.button.id == "run-all":
+            self.action_run_all()
 
     def action_close(self) -> None:
         self.app.pop_screen()
@@ -376,13 +394,36 @@ class BenchmarkScreen(Screen):
         self.picked = {target.key for target in self.targets}
         self._render_picker()
 
+    def _cursor_target(self) -> BenchTarget | None:
+        table = self.query_one("#bench-picker", DataTable)
+        if not table.row_count:
+            return None
+        index = table.cursor_row
+        if index < 0 or index >= len(self.targets):
+            return None
+        return self.targets[index]
+
+    def action_run_all(self) -> None:
+        self._start_run(list(self.targets), label="all local GGUFs")
+
     def action_run_bench(self) -> None:
+        selected = [target for target in self.targets if target.key in self.picked]
+        if not selected:
+            cursor = self._cursor_target()
+            if cursor is None:
+                self.notify("Pick a GGUF or put the cursor on one row", severity="warning")
+                return
+            selected = [cursor]
+            self.picked.add(cursor.key)
+            self._render_picker()
+        self._start_run(selected, label="selected")
+
+    def _start_run(self, selected: list[BenchTarget], *, label: str) -> None:
         if self._bench_active:
             self.notify("Benchmark already running", severity="warning")
             return
-        selected = [target for target in self.targets if target.key in self.picked]
         if not selected:
-            self.notify("Pick at least one local GGUF", severity="warning")
+            self.notify("No local GGUFs to benchmark", severity="warning")
             return
         config = self._read_config()
         if config is None:
@@ -396,6 +437,12 @@ class BenchmarkScreen(Screen):
             self._set_status(str(exc), error=True)
             self.notify(str(exc), severity="error", timeout=8)
             return
+        names = ", ".join(f"{t.display} {t.quant}" for t in selected[:4])
+        extra = "" if len(selected) <= 4 else f" +{len(selected) - 4} more"
+        self._set_status(
+            f"Queue {len(selected)} · {label} · one at a time · "
+            f"Prompt {config.n_prompt} · Gen {config.n_gen} · Repeats {config.repetitions} · {names}{extra}"
+        )
         self._run_worker(selected, config)
 
     @work(exclusive=True)
@@ -406,10 +453,14 @@ class BenchmarkScreen(Screen):
         except (QueryError, NoMatches):
             pass
         try:
-            for target in selected:
-                self.status_by_key[target.key] = "running"
+            total = len(selected)
+            for index, target in enumerate(selected, start=1):
+                self.status_by_key[target.key] = f"running {index}/{total}"
                 self._render_picker()
-                self._set_status(f"Running llama-bench on {target.display} {target.quant}…")
+                self._set_status(
+                    f"Running {index}/{total} · {target.display} {target.quant} · one at a time · "
+                    f"Prompt {config.n_prompt} · Gen {config.n_gen} · Repeats {config.repetitions}"
+                )
                 try:
                     measurement = await asyncio.to_thread(
                         run_llama_bench,
@@ -424,10 +475,16 @@ class BenchmarkScreen(Screen):
                         fingerprint=self.fingerprint,
                         config=config,
                     )
-                    await asyncio.to_thread(record_benchmark, self.paths.benchmarks_json, row)
+                    replaced = await asyncio.to_thread(
+                        record_benchmark, self.paths.benchmarks_json, row
+                    )
                     self.status_by_key[target.key] = "done"
                     self._reload_results()
-                    self._set_status(f"Done {target.display} {target.quant}")
+                    verb = "replaced last run" if replaced else "saved new run"
+                    self._set_status(
+                        f"{index}/{total} {verb} · {target.display} {target.quant} · "
+                        f"Prompt {row.n_prompt} · Gen {row.n_gen} · Repeats {row.repetitions}"
+                    )
                 except LlamaBenchError as exc:
                     self.status_by_key[target.key] = "failed"
                     self._render_picker()
