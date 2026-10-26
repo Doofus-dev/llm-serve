@@ -11,6 +11,7 @@ from textual.events import Focus
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
+from textual.css.query import NoMatches
 from textual.widgets import Button, Collapsible, Input, Label, Select, Static
 
 from tui.data.context_length import fmt_ctx_compact as fmt_ctx, resolve_context_length
@@ -101,6 +102,13 @@ class EditorSelect(Select):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("compact", True)
         super().__init__(*args, **kwargs)
+
+    def _init_selected_option(self, hint=Select.NULL):
+        """Textual compact Select can set value before SelectCurrent #label exists."""
+        try:
+            super()._init_selected_option(hint)
+        except NoMatches:
+            self.call_later(self._init_selected_option, hint)
 
     def _param_editor(self) -> ProfileEditor | PresetEditor | None:
         node = self.parent
