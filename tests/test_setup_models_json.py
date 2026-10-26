@@ -24,6 +24,7 @@ def _run_setup_phase5(script_dir: Path) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -euo pipefail
 SCRIPT_DIR={json.dumps(str(script_dir))}
+LLM_SERVE_DATA={json.dumps(str(script_dir))}
 ok() {{ echo "[ok] $*"; }}
 warn() {{ echo "[warn] $*"; }}
 {phase5}

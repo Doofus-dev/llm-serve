@@ -90,6 +90,7 @@ def write_harness(root: Path) -> AppPaths:
     (root / "presets.json").write_text(json.dumps(presets, indent=2) + "\n")
     return AppPaths(
         root=root,
+        data=root,
         models_json=root / "models.json",
         presets_json=root / "presets.json",
         models_dir=models_dir,

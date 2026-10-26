@@ -84,13 +84,16 @@ LLAMA_DIR=/opt/llama.cpp llm-serve my-model
 
 `PORT`, `HOST`, `CONTEXT_SIZE`, `GPU_LAYERS`, `THREADS`, `UBATCH`, `PARALLEL`, `N_PREDICT`, `CACHE_TYPE_K`, `CACHE_TYPE_V`, `BATCH_SIZE`, `DEFRAG_THOLD`, `TEMP`, `TOP_P`, `SEED`, `ENABLE_MTP`, `N_CPU_MOE`, `MODEL_PATH`, `MODEL_DIR`
 
-Path defaults (all under the repo that contains the `llm-serve` script, not the current directory):
+Path defaults:
 
 | Variable | Default |
 |----------|---------|
-| `LLAMA_DIR` | `{repo}/llama.cpp` |
-| `MODEL_DIR` | `{repo}/models` |
-| `LOG_DIR` | `{repo}/logs` |
+| `LLAMA_DIR` | `{repo}/llama.cpp` (this checkout's build) |
+| `LLM_SERVE_DATA` | `~/.local/share/llm-serve` (or `$XDG_DATA_HOME/llm-serve`) |
+| `MODEL_DIR` | `{LLM_SERVE_DATA}/models` |
+| `LOG_DIR` | `{LLM_SERVE_DATA}/logs` |
+
+Registry JSON (`models.json`, `presets.json`, TUI settings/baselines/benchmarks) and GGUFs live in `LLM_SERVE_DATA`, so every branch and worktree on this machine sees the same models and presets. `llama.cpp` stays with the checkout you launched. First run copies repo-local JSON and moves `models/` into the data dir if it is still empty.
 
 After setup, `~/.local/bin/llm-serve` points at the repo script, so the TUI and CLI work from any directory.
 
@@ -142,7 +145,7 @@ File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns fr
 
 ### `models.json`
 
-Identity only. First setup creates an empty `models.json`; models appear when you add them from Hub (**H**) or the TUI. `models.json.example` documents the schema and is not copied.
+Identity only. Lives in `~/.local/share/llm-serve/models.json` (override `LLM_SERVE_DATA`). First setup creates an empty file there if needed; models appear when you add them from Hub (**H**) or the TUI. `models.json.example` documents the schema and is not copied.
 
 ```json
 {
@@ -182,7 +185,8 @@ Identity only. First setup creates an empty `models.json`; models appear when yo
 
 Created by the TUI (not by setup). Per model, per quant, slots `1`–`5`. Slot 1 is seeded as `default` when a quant is added. Launch uses the active slot for the active (or alias-pinned) quant.
 
-### Other files (repo root, gitignored except the example)
+### Other files (in `LLM_SERVE_DATA`, gitignored if a copy is left in the repo)
+
 
 | File | Purpose |
 |------|---------|
@@ -194,25 +198,29 @@ Created by the TUI (not by setup). Per model, per quant, slots `1`–`5`. Slot 1
 ## Layout
 
 ```
-llm-serve/
-├── llm-serve              # Entrypoint (TUI if no args; otherwise CLI)
+llm-serve/                         # git checkout (code + llama.cpp)
+├── llm-serve
 ├── setup.sh
-├── pyproject.toml         # textual, httpx → project .venv
-├── models.json            # Registry (empty on first setup; gitignored)
-├── models.json.example    # Schema/docs only
-├── presets.json           # Preset slots (TUI)
+├── models.json.example
 ├── param-help.conf
-├── tui/                   # Textual app
+├── tui/
 ├── tests/
-├── lib/                   # llama.cpp build + venv helpers
-├── patches/llama.cpp/     # Applied at build time
-├── models/                # GGUFs as author/filename.gguf
-├── llama.cpp/             # Clone + build
-├── logs/                  # llm-serve.log, .llm-serve.pid, instances/ (<pid>.pid, <port>.log per extra server)
+├── lib/
+├── patches/llama.cpp/
+├── llama.cpp/                     # per-checkout build
 └── .venv/
+
+~/.local/share/llm-serve/          # machine-wide (every branch)
+├── models.json                    # Registry
+├── presets.json
+├── tui-settings.json
+├── tui-baselines.json
+├── tui-benchmarks.json
+├── models/                        # GGUFs as author/filename.gguf
+└── logs/                          # llm-serve.log, .llm-serve.pid, instances/
 ```
 
-`models/` is independent of the llama.cpp tree so an update does not touch weights.
+Weights stay out of the llama.cpp tree so `llm-serve update` does not touch them. They also stay out of git worktrees so a feature branch does not look like an empty library.
 
 ## Remote access
 

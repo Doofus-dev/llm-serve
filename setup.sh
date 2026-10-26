@@ -7,8 +7,8 @@
 #   - Clones llama.cpp if not present
 #   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
 #   - Creates a Python venv and installs TUI packages (textual, httpx)
-#   - Creates models/ and logs/ directories
-#   - Creates an empty models.json registry if none exists
+#   - Creates the shared data dir (~/.local/share/llm-serve): models/, logs/,
+#     and an empty models.json if none exists (or copies one from the checkout)
 #
 # Usage:
 #   ./setup.sh              # Auto-detect GPU
@@ -141,6 +141,8 @@ BUILD_FORCE=""   # empty=auto-detect, cpu, cuda, or rocm
 source "${SCRIPT_DIR}/lib/llama-build.sh"
 # shellcheck source=lib/tui-venv.sh
 source "${SCRIPT_DIR}/lib/tui-venv.sh"
+# shellcheck source=lib/data-home.sh
+source "${SCRIPT_DIR}/lib/data-home.sh"
 
 _set_build_force() {
     local val="$1"
@@ -174,8 +176,8 @@ while [[ $# -gt 0 ]]; do
             echo "  ./setup.sh --help       Show this help"
             echo ""
             echo "Checks prerequisites, clones & builds llama.cpp, installs"
-            echo "Python and TUI dependencies, creates models/ and logs/"
-            echo "directories, and creates an empty models.json if missing."
+            echo "Python and TUI dependencies, creates the shared data dir"
+            echo "(~/.local/share/llm-serve) with models/, logs/, and models.json."
             echo ""
             echo "Idempotent — safe to re-run."
             exit 0
@@ -470,37 +472,48 @@ fi
 "${LLAMA_SERVER}" --help 2>&1 | head -1
 
 ###############################################################################
-# Phase 4: Create runtime directories
+# Phase 4: Create runtime directories (machine-wide data dir)
 ###############################################################################
 echo ""
-MODELS_DIR="${SCRIPT_DIR}/models"
-LOGS_DIR="${SCRIPT_DIR}/logs"
+DATA_DIR="$(llm_serve_data_dir)"
+MODELS_DIR="${MODEL_DIR:-${DATA_DIR}/models}"
+LOGS_DIR="${LOG_DIR:-${DATA_DIR}/logs}"
+mkdir -p "${DATA_DIR}" "${MODELS_DIR}" "${LOGS_DIR}"
+ok "Shared data dir: ${DATA_DIR}"
 
-if [[ ! -d "${MODELS_DIR}" ]]; then
-    mkdir -p "${MODELS_DIR}"
-    ok "Created models/ directory"
-else
-    ok "models/ directory already exists"
-fi
-
-if [[ ! -d "${LOGS_DIR}" ]]; then
-    mkdir -p "${LOGS_DIR}"
-    ok "Created logs/ directory"
-else
-    ok "logs/ directory already exists"
+if [[ -z "${MODEL_DIR:-}" && -d "${SCRIPT_DIR}/models" ]]; then
+    if ! find "${MODELS_DIR}" -name '*.gguf' -print -quit | grep -q .; then
+        if find "${SCRIPT_DIR}/models" -name '*.gguf' -print -quit | grep -q .; then
+            rmdir "${MODELS_DIR}" 2>/dev/null || true
+            mv "${SCRIPT_DIR}/models" "${MODELS_DIR}"
+            mkdir -p "${SCRIPT_DIR}/models"
+            ok "Moved GGUFs from checkout models/ into ${MODELS_DIR}"
+        fi
+    fi
 fi
 
 ###############################################################################
 # Phase 5: Set up models.json (if needed)
 ###############################################################################
-MODELS_JSON="${SCRIPT_DIR}/models.json"
+DATA_DIR="${LLM_SERVE_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/llm-serve}"
+mkdir -p "${DATA_DIR}"
+MODELS_JSON="${DATA_DIR}/models.json"
 
-if [[ ! -f "${MODELS_JSON}" ]]; then
+if [[ ! -f "${MODELS_JSON}" && -f "${SCRIPT_DIR}/models.json" ]]; then
+    cp "${SCRIPT_DIR}/models.json" "${MODELS_JSON}"
+    ok "Copied models.json into shared data dir"
+elif [[ ! -f "${MODELS_JSON}" ]]; then
     printf '%s\n' '{"models": {}, "aliases": {}}' > "${MODELS_JSON}"
     ok "Created empty models.json"
 else
     ok "models.json already exists (skipping)"
 fi
+for f in presets.json tui-settings.json tui-baselines.json tui-benchmarks.json; do
+    if [[ ! -f "${DATA_DIR}/$f" && -f "${SCRIPT_DIR}/$f" ]]; then
+        cp "${SCRIPT_DIR}/$f" "${DATA_DIR}/$f"
+        ok "Copied $f into shared data dir"
+    fi
+done
 
 # Make launcher executable
 chmod +x "${SCRIPT_DIR}/llm-serve"
