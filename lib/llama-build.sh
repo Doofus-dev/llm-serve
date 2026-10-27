@@ -2,7 +2,10 @@
 # Shared llama.cpp clone/build/update helpers for setup.sh and llm-serve.
 # Source this file; do not execute directly.
 #
-# Requires callers to set LLAMA_DIR and LLAMA_SERVER before sourcing.
+# Requires callers to set LLAMA_DIR, LLAMA_SERVER and LLAMA_BENCH before sourcing.
+# LLAMA_BENCH defaults to ${LLAMA_DIR}/build/bin/llama-bench when unset.
+# Defensive: sourcing stays safe when the caller only set LLAMA_DIR.
+: "${LLAMA_BENCH:=${LLAMA_DIR}/build/bin/llama-bench}"
 
 llama_build_dir() { echo "${LLAMA_DIR}/build"; }
 llama_stamp_file()  { echo "$(llama_build_dir)/.llm-serve-build"; }
@@ -348,7 +351,10 @@ llama_binary_is_current() {
     local head
     head="$(llama_local_head)"
 
+    # Load-bearing: pre-existing installs carry a valid stamp from a server-only
+    # build, so llama-bench must be part of the "current" test or it never builds.
     [[ -x "${LLAMA_SERVER}" ]] || return 1
+    [[ -x "${LLAMA_BENCH:-}" ]] || return 1
     llama_read_stamp
     [[ -n "$_LLAMA_STAMP_TYPE" && -n "$_LLAMA_STAMP_COMMIT" ]] || return 1
     [[ "$_LLAMA_STAMP_TYPE" == "$build_type" ]] || return 1
@@ -441,10 +447,15 @@ llama_build_server() {
                     -DCMAKE_BUILD_TYPE=Release ..
                 ;;
         esac
-        ${build_cmd} -j"${nproc}" llama-server
+        ${build_cmd} -j"${nproc}" llama-server llama-bench
     )
 
-    [[ -x "${LLAMA_SERVER}" ]] || return 1
+    if [[ ! -x "${LLAMA_SERVER}" || ! -x "${LLAMA_BENCH:-}" ]]; then
+        # A stale stamp would keep llama_binary_is_current reporting "current"
+        # for a tree whose build just failed.
+        rm -f "$(llama_stamp_file)"
+        return 1
+    fi
     head="$(llama_local_head)"
     [[ -n "$head" ]] && llama_write_stamp "$build_type" "$head"
     return 0

@@ -26,6 +26,7 @@ trap cleanup EXIT
 # Isolate from the real install
 export LLAMA_DIR="${TEST_ROOT}/llama.cpp"
 export LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
+export LLAMA_BENCH="${LLAMA_DIR}/build/bin/llama-bench"
 mkdir -p "${LLAMA_DIR}/build/bin"
 
 # shellcheck source=../lib/llama-build.sh
@@ -113,8 +114,8 @@ git -C "${LLAMA_DIR}" add README
 git -C "${LLAMA_DIR}" commit -q -m "test"
 HEAD="$(llama_local_head)"
 llama_write_stamp "rocm" "$HEAD"
-touch "${LLAMA_SERVER}"
-chmod +x "${LLAMA_SERVER}"
+touch "${LLAMA_SERVER}" "${LLAMA_BENCH}"
+chmod +x "${LLAMA_SERVER}" "${LLAMA_BENCH}"
 
 if llama_binary_is_current "rocm"; then
     pass "stamp match → binary is current (rocm @ ${HEAD:0:7})"

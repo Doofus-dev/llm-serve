@@ -5,7 +5,8 @@
 # Prepares a fresh clone of the llm-serve repo for first use:
 #   - Checks prerequisites (bash, git, cmake, C++ compiler, Python 3)
 #   - Clones llama.cpp if not present
-#   - Builds llama-server binary (auto-detects GPU: NVIDIA→CUDA, AMD→ROCm, else CPU)
+#   - Builds llama-server and llama-bench binaries (auto-detects GPU: NVIDIA→CUDA,
+#     AMD→ROCm, else CPU)
 #   - Creates a Python venv and installs TUI packages (textual, httpx)
 #   - Creates the shared data dir (~/.local/share/llm-serve): models/, logs/,
 #     and an empty models.json if none exists (or copies one from the checkout)
@@ -135,7 +136,7 @@ python_system_packages() {
 # ── Defaults ─────────────────────────────────────────────────────────────────
 LLAMA_DIR="${SCRIPT_DIR}/llama.cpp"
 LLAMA_SERVER="${LLAMA_DIR}/build/bin/llama-server"
-BUILD_FORCE=""   # empty=auto-detect, cpu, cuda, or rocm
+LLAMA_BENCH="${LLAMA_DIR}/build/bin/llama-bench"
 
 # shellcheck source=lib/llama-build.sh
 source "${SCRIPT_DIR}/lib/llama-build.sh"
@@ -417,7 +418,7 @@ else
 fi
 
 ###############################################################################
-# Phase 3: Sync llama.cpp + build llama-server (stamp-aware, auto-pull)
+# Phase 3: Sync llama.cpp + build llama-server/llama-bench (stamp-aware, auto-pull)
 ###############################################################################
 echo ""
 
@@ -438,11 +439,13 @@ fi
 
 if llama_binary_is_current "$BUILD_TYPE"; then
     llama_read_stamp
-    ok "llama-server is current (${BUILD_TYPE} build @ ${_LLAMA_STAMP_COMMIT:0:7}). Skipping build."
+    ok "llama-server + llama-bench are current (${BUILD_TYPE} build @ ${_LLAMA_STAMP_COMMIT:0:7}). Skipping build."
 else
-    if [[ -x "${LLAMA_SERVER}" ]]; then
+    if [[ -x "${LLAMA_SERVER}" || -x "${LLAMA_BENCH}" ]]; then
         llama_read_stamp
-        if [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
+        if [[ ! -x "${LLAMA_BENCH}" ]]; then
+            warn "llama-bench is missing from an otherwise current build. Rebuilding..."
+        elif [[ -z "$_LLAMA_STAMP_COMMIT" ]]; then
             warn "Existing binary has no build stamp. Rebuilding to establish one..."
         elif [[ "$_LLAMA_STAMP_TYPE" != "$BUILD_TYPE" ]]; then
             warn "Existing build is ${_LLAMA_STAMP_TYPE}; you requested ${BUILD_TYPE}. Rebuilding..."
@@ -452,7 +455,7 @@ else
         fi
     fi
 
-    info "Building llama-server (${BUILD_TYPE}, ${NPROC} cores)..."
+    info "Building llama-server + llama-bench (${BUILD_TYPE}, ${NPROC} cores)..."
     llama_wipe_build
     case "$BUILD_TYPE" in
         cuda) info "Configuring with CUDA support..." ;;
@@ -461,7 +464,7 @@ else
     esac
     info "Compiling (this may take a while)..."
     if llama_build_server "$BUILD_TYPE" "$NPROC"; then
-        ok "llama-server built successfully (${BUILD_TYPE} @ $(llama_local_head | cut -c1-7))"
+        ok "llama-server + llama-bench built successfully (${BUILD_TYPE} @ $(llama_local_head | cut -c1-7))"
     else
         fail "Build failed. Check the output above for errors."
     fi
@@ -469,6 +472,7 @@ fi
 
 # Show build info
 [[ -x "${LLAMA_SERVER}" ]] || fail "llama-server not found at ${LLAMA_SERVER}"
+[[ -x "${LLAMA_BENCH}" ]] || fail "llama-bench not found at ${LLAMA_BENCH}"
 "${LLAMA_SERVER}" --help 2>&1 | head -1
 
 ###############################################################################
