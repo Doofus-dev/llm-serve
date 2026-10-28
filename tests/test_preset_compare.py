@@ -136,6 +136,18 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
         set_preset(store, MODEL_SLUG, QUANT, slot, name, params)
         save_presets(self.harness.paths.presets_json, store)
 
+    async def _wait_editor_slot(self, screen, side: str, slot: int, app, pilot) -> None:
+        editor_id = f"#cmp-{side}-editor"
+        for _ in range(25):
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.05)
+            try:
+                if screen.query_one(editor_id, PresetEditor).slot == slot:
+                    return
+            except Exception:
+                pass
+        self.assertEqual(screen.query_one(editor_id, PresetEditor).slot, slot)
+
     async def test_compare_blocks_dashboard_delete(self) -> None:
         app = self.harness.app()
         gguf = self.harness.paths.models_dir / "demo" / "Demo-Q4_K_M.gguf"
@@ -175,18 +187,14 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 1)
             self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
             left.value = "3"
-            await app.workers.wait_for_complete()
-            await pilot.pause(0.3)
-            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 3)
+            await self._wait_editor_slot(screen, "left", 3, app, pilot)
             self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
             right = screen.query_one("#cmp-right-slot", Select)
             with self.assertRaises(Exception):
                 right.value = "3"
             right.value = "1"
-            await app.workers.wait_for_complete()
-            await pilot.pause(0.3)
+            await self._wait_editor_slot(screen, "right", 1, app, pilot)
             self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 3)
-            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 1)
 
     async def test_compare_updates_labels_after_rename_save(self) -> None:
         app = self.harness.app()
@@ -225,10 +233,7 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             left = screen.query_one("#cmp-left-slot", Select)
             left.value = "3"
             left.value = "4"
-            await pilot.pause(0.2)
-            await app.workers.wait_for_complete()
-            await pilot.pause(0.3)
-            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 4)
+            await self._wait_editor_slot(screen, "left", 4, app, pilot)
             self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 2)
 
     async def test_stale_replace_worker_keeps_latest_pair(self) -> None:
@@ -247,13 +252,10 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             left.value = "3"
             left.value = "4"
             right.value = "3"
-            await pilot.pause(0.2)
-            await app.workers.wait_for_complete()
-            await pilot.pause(0.3)
+            await self._wait_editor_slot(screen, "left", 4, app, pilot)
+            await self._wait_editor_slot(screen, "right", 3, app, pilot)
             self.assertEqual(screen.left_slot, 4)
             self.assertEqual(screen.right_slot, 3)
-            self.assertEqual(screen.query_one("#cmp-left-editor", PresetEditor).slot, 4)
-            self.assertEqual(screen.query_one("#cmp-right-editor", PresetEditor).slot, 3)
             self.assertEqual(str(left.value), "4")
             self.assertEqual(str(right.value), "3")
 
