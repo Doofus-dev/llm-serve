@@ -18,6 +18,7 @@ from tui.launch import (
     launch_background,
     prepare_launch,
     quant_file_rel,
+    resolve_mtp_draft,
     rotate_log,
     status_text,
     stop_server,
@@ -119,12 +120,14 @@ class ArgvTests(unittest.TestCase):
         self.assertIn("--metrics", args)
         self.assertNotIn("--n-cpu-moe", args)
         self.assertNotIn("--spec-type", args)
+        self.assertNotIn("-md", args)
         self.assertNotIn("--checkpoint-min-step", args)
         self.assertNotIn("--reasoning-format", args)
 
     def test_mtp_and_thinking_flags(self) -> None:
         from pathlib import Path
 
+        draft = Path("/tmp/mtp-m-Q8_0.gguf")
         args = build_server_args(
             model_path=Path("/tmp/m.gguf"),
             host="0.0.0.0",
@@ -136,12 +139,39 @@ class ArgvTests(unittest.TestCase):
                 "checkpoint_every": 256,
             },
             log_verbosity=3,
+            draft_path=draft,
         )
         self.assertIn("--spec-type", args)
         self.assertIn("draft-mtp", args)
+        md = args.index("-md")
+        self.assertEqual(args[md + 1], str(draft))
         i = args.index("--reasoning")
         self.assertEqual(args[i + 1], "off")
         self.assertIn("--checkpoint-min-step", args)
+
+    def test_mtp_on_without_draft_raises(self) -> None:
+        with self.assertRaises(LaunchError) as ctx:
+            build_server_args(
+                model_path=Path("/tmp/m.gguf"),
+                host="127.0.0.1",
+                port=8081,
+                params={**DEFAULT_PRESET_PARAMS, "mtp": 1},
+                log_verbosity=4,
+            )
+        self.assertIn("mtp-", str(ctx.exception).lower())
+
+    def test_mtp_off_never_passes_draft_flags(self) -> None:
+        args = build_server_args(
+            model_path=Path("/tmp/m.gguf"),
+            host="127.0.0.1",
+            port=8081,
+            params={**DEFAULT_PRESET_PARAMS, "mtp": 0},
+            log_verbosity=4,
+            draft_path=Path("/tmp/mtp-m-Q8_0.gguf"),
+        )
+        self.assertNotIn("-md", args)
+        self.assertNotIn("--spec-type", args)
+        self.assertNotIn("draft-mtp", args)
 
     def test_single_file_list_is_byte_identical_to_path(self) -> None:
         kwargs = {
@@ -279,6 +309,55 @@ class PrepareLaunchTests(unittest.TestCase):
         with self.assertRaises(LaunchError) as ctx:
             prepare_launch(FLASH_SLUG, paths=self.harness.paths)
         self.assertIn("00002-of-00003.gguf", str(ctx.exception))
+
+    def test_mtp_on_with_draft_file_passes_md(self) -> None:
+        draft = self.harness.paths.models_dir / "demo" / "mtp-Demo-Q8_0.gguf"
+        draft.write_bytes(b"GGUF-mtp")
+        presets = json.loads(self.harness.paths.presets_json.read_text())
+        presets[MODEL_SLUG][QUANT]["1"]["params"]["mtp"] = 1
+        self.harness.paths.presets_json.write_text(json.dumps(presets, indent=2) + "\n")
+        plan = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        md = plan.args.index("-md")
+        self.assertEqual(plan.args[md + 1], str(draft))
+        self.assertEqual(plan.args[plan.args.index("--spec-type") + 1], "draft-mtp")
+        self.assertEqual(plan.draft_path, draft)
+        self.assertTrue(any(str(draft) in line for line in plan.banner_lines))
+
+    def test_mtp_on_without_draft_file_raises(self) -> None:
+        presets = json.loads(self.harness.paths.presets_json.read_text())
+        presets[MODEL_SLUG][QUANT]["1"]["params"]["mtp"] = 1
+        self.harness.paths.presets_json.write_text(json.dumps(presets, indent=2) + "\n")
+        with self.assertRaises(LaunchError) as ctx:
+            prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        self.assertIn("mtp-", str(ctx.exception))
+
+    def test_enable_mtp_env_uses_same_draft_rules(self) -> None:
+        draft = self.harness.paths.models_dir / "demo" / "mtp-Demo-Q8_0.gguf"
+        draft.write_bytes(b"GGUF-mtp")
+        env = {**os.environ, "ENABLE_MTP": "1"}
+        plan = prepare_launch(MODEL_SLUG, env=env, paths=self.harness.paths)
+        self.assertEqual(plan.args[plan.args.index("-md") + 1], str(draft))
+
+    def test_enable_mtp_env_without_draft_raises(self) -> None:
+        env = {**os.environ, "ENABLE_MTP": "1"}
+        with self.assertRaises(LaunchError):
+            prepare_launch(MODEL_SLUG, env=env, paths=self.harness.paths)
+
+    def test_mtp_off_plan_omits_draft_flags(self) -> None:
+        draft = self.harness.paths.models_dir / "demo" / "mtp-Demo-Q8_0.gguf"
+        draft.write_bytes(b"GGUF-mtp")
+        plan = prepare_launch(MODEL_SLUG, paths=self.harness.paths)
+        self.assertNotIn("-md", plan.args)
+        self.assertNotIn("--spec-type", plan.args)
+
+    def test_resolve_mtp_draft_prefers_family_and_quant(self) -> None:
+        folder = self.harness.paths.models_dir / "demo"
+        other = folder / "mtp-OtherFamily-Q4_K_M.gguf"
+        match = folder / "mtp-Demo-Q4_K_M.gguf"
+        other.write_bytes(b"a")
+        match.write_bytes(b"b")
+        picked = resolve_mtp_draft(folder / "Demo-Q4_K_M.gguf")
+        self.assertEqual(picked, match)
 
 
 class RegistryShardTests(unittest.TestCase):

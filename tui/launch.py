@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from tui.data.capabilities import is_vision_enabled, local_mmproj_path
+from tui.data.quant import family_key, is_draft_gguf, quant_from_filename
 from tui.data.gpu import format_pid_vram, query_pid_vram_mb
 from tui.data.models_json import Registry, load_registry, quant_rel_paths, resolve_model_key
 from tui.data.pidfile import (
@@ -122,6 +123,7 @@ class LaunchPlan:
     banner_lines: list[str] = field(default_factory=list)
     model_files: list[str] = field(default_factory=list)
     model_paths: list[Path] = field(default_factory=list)
+    draft_path: Path | None = None
 
 
 def _present(value: object) -> bool:
@@ -226,6 +228,46 @@ def _as_model_paths(model_path: Path | Sequence[Path]) -> list[Path]:
     return [Path(p) for p in model_path]
 
 
+def _mtp_enabled(params: Mapping[str, object]) -> bool:
+    return str(params.get("mtp", "")).strip().lower() in {"1", "on", "true", "yes"}
+
+
+def _draft_family_key(filename: str) -> str:
+    name = Path(filename).name
+    if name.lower().startswith("mtp-"):
+        name = name[4:]
+    return family_key(name)
+
+
+def resolve_mtp_draft(model_path: Path) -> Path | None:
+    """Pick an ``mtp-*.gguf`` next to the launched model.
+
+    Same family folder only. Prefer a draft whose family and quant match
+    the main GGUF when several drafts exist.
+    """
+    folder = model_path.parent
+    if not folder.is_dir():
+        return None
+    drafts = [
+        path
+        for path in folder.iterdir()
+        if path.is_file() and path.suffix.lower() == ".gguf" and is_draft_gguf(path.name)
+    ]
+    if not drafts:
+        return None
+    model_family = family_key(model_path.name)
+    model_quant = quant_from_filename(model_path.name)
+
+    def score(path: Path) -> tuple:
+        return (
+            _draft_family_key(path.name) == model_family,
+            quant_from_filename(path.name) == model_quant,
+            path.name,
+        )
+
+    return max(drafts, key=score)
+
+
 def build_server_args(
     *,
     model_path: Path | Sequence[Path],
@@ -234,6 +276,7 @@ def build_server_args(
     params: Mapping[str, object],
     log_verbosity: int,
     mmproj_path: Path | None = None,
+    draft_path: Path | None = None,
 ) -> list[str]:
     args: list[str] = []
     # llama.cpp split GGUFs must be loaded from the first shard only; extra
@@ -277,8 +320,12 @@ def build_server_args(
     elif thinking == "on":
         args.extend(("--reasoning", "on"))
 
-    mtp = params.get("mtp", 0)
-    if str(mtp).strip() in {"1", "on", "true", "yes"}:
+    if _mtp_enabled(params):
+        if draft_path is None:
+            raise LaunchError(
+                "MTP is enabled but no draft GGUF (mtp-*.gguf) was found next to the model"
+            )
+        args.extend(("-md", str(draft_path)))
         args.extend(("--spec-type", "draft-mtp"))
         n_max = params.get("spec_draft_n_max", "")
         n_min = params.get("spec_draft_n_min", "")
@@ -379,8 +426,11 @@ def _banner(plan: LaunchPlan, params: Mapping[str, object], notes: str, model_ma
         lines.append("  Thinking:     enabled (--reasoning on)")
     else:
         lines.append("  Thinking:     auto (llama-server default)")
-    if str(params.get("mtp", "")).strip() in {"1", "on", "true", "yes"}:
-        lines.append(f"  MTP:          enabled (draft-mtp, n-max {params.get('spec_draft_n_max')})")
+    if _mtp_enabled(params):
+        draft = params.get("draft_path") or (plan.draft_path or "")
+        lines.append(
+            f"  MTP:          enabled (draft-mtp, n-max {params.get('spec_draft_n_max')}, -md {draft})"
+        )
     lines.append(f"  Notes:        {notes}")
     if plan.remote:
         lines.append("  Remote mode:  bound to 0.0.0.0 — reachable from other devices at:")
@@ -503,6 +553,15 @@ def prepare_launch(
         if mmproj_path is not None:
             params["mmproj_path"] = str(mmproj_path)
 
+    draft_path = None
+    if _mtp_enabled(params):
+        draft_path = resolve_mtp_draft(model_path)
+        if draft_path is None:
+            raise LaunchError(
+                f"MTP is enabled but no draft GGUF (mtp-*.gguf) was found next to {model_path}"
+            )
+        params["draft_path"] = str(draft_path)
+
     args = build_server_args(
         model_path=model_paths,
         host=host,
@@ -510,6 +569,7 @@ def prepare_launch(
         params=params,
         log_verbosity=verbosity,
         mmproj_path=mmproj_path,
+        draft_path=draft_path,
     )
     plan = LaunchPlan(
         requested=requested,
@@ -529,6 +589,7 @@ def prepare_launch(
         llama_server=paths.llama_server,
         args=args,
         env=gpu_runtime_env(env_map),
+        draft_path=draft_path,
     )
     plan.banner_lines = _banner(plan, params, cfg.notes, cfg.params.get("context_length"))
     model_max = cfg.params.get("context_length")
