@@ -61,8 +61,10 @@ MMPROJ_PREF = (
 class ModelCapabilities:
     vision: bool = False
     tools: bool = False
+    mtp: bool = False
     vision_source: str = ""
     tools_source: str = ""
+    mtp_source: str = ""
 
     def merge_fallback(self, other: ModelCapabilities) -> ModelCapabilities:
         """Keep HF/API detections; fill gaps from file/family fallback."""
@@ -76,15 +78,22 @@ class ModelCapabilities:
         if not tools and other.tools:
             tools = True
             tools_source = other.tools_source
+        mtp = self.mtp
+        mtp_source = self.mtp_source
+        if not mtp and other.mtp:
+            mtp = True
+            mtp_source = other.mtp_source
         return ModelCapabilities(
             vision=vision,
             tools=tools,
+            mtp=mtp,
             vision_source=vision_source,
             tools_source=tools_source,
+            mtp_source=mtp_source,
         )
 
     def to_json(self) -> dict[str, bool]:
-        return {"vision": self.vision, "tools": self.tools}
+        return {"vision": self.vision, "tools": self.tools, "mtp": self.mtp}
 
 
 def badge_markup(caps: ModelCapabilities) -> str:
@@ -92,6 +101,8 @@ def badge_markup(caps: ModelCapabilities) -> str:
     parts: list[str] = []
     if caps.vision:
         parts.append("[reverse cyan] vision [/]")
+    if caps.mtp:
+        parts.append("[reverse yellow] mtp [/]")
     if caps.tools:
         parts.append("[reverse magenta] tools [/]")
     return " ".join(parts) if parts else "[dim]—[/]"
@@ -153,13 +164,16 @@ def capabilities_from_files(
         if not is_draft_gguf(item.path if isinstance(item, HubFile) else str(item))
     ]
     vision = any(is_mmproj_gguf(name) for name in names)
+    mtp = any(is_draft_gguf(item.path if isinstance(item, HubFile) else str(item)) for item in files)
     haystack = " ".join([repo_id, *names])
     tools = bool(TOOL_FAMILY_RE.search(haystack))
     return ModelCapabilities(
         vision=vision,
         tools=tools,
+        mtp=mtp,
         vision_source="files" if vision else "",
         tools_source="family" if tools else "",
+        mtp_source="files" if mtp else "",
     )
 
 
@@ -169,11 +183,14 @@ def capabilities_from_stored(params: Mapping[str, Any]) -> ModelCapabilities:
         return ModelCapabilities()
     vision = bool(raw.get("vision"))
     tools = bool(raw.get("tools"))
+    mtp = bool(raw.get("mtp"))
     return ModelCapabilities(
         vision=vision,
         tools=tools,
+        mtp=mtp,
         vision_source="stored" if vision else "",
         tools_source="stored" if tools else "",
+        mtp_source="stored" if mtp else "",
     )
 
 
@@ -205,6 +222,9 @@ def identity_capability_inputs(
     mmproj = str(params.get("mmproj") or "").strip()
     if mmproj:
         files.append(mmproj)
+    mtp_file = str(params.get("mtp_file") or "").strip()
+    if mtp_file:
+        files.append(mtp_file)
     files.extend(coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file")))
     quants = params.get("quants")
     if isinstance(quants, dict):
@@ -221,12 +241,12 @@ def identity_capability_inputs(
 def nav_capability_icons(
     params: Mapping[str, Any] | None,
     models_dir: Path,
-) -> tuple[str | None, bool]:
-    """Main-list icon state: (vision_state, show_tools).
+) -> tuple[str | None, bool, str | None]:
+    """Main-list icon state: (vision_state, show_tools, mtp_state).
 
-    ``vision_state`` is None when the model has no vision capability,
-    otherwise ``missing`` (projector not on disk), ``off``, or ``on``.
-    Missing stays ``missing`` even if ``vision_enabled`` is toggled.
+    ``vision_state`` / ``mtp_state`` are None when the model has no such
+    sidecar. Otherwise ``missing`` (file not on disk), ``off``, or ``on``.
+    Missing stays ``missing`` even if the toggle is flipped.
     """
     files, repo_id = identity_capability_inputs(params)
     caps = resolve_capabilities(params=params, files=files, repo_id=repo_id)
@@ -239,7 +259,16 @@ def nav_capability_icons(
             vision_state = "on"
         else:
             vision_state = "off"
-    return vision_state, bool(caps.tools)
+    mtp_state = None
+    if caps.mtp:
+        _, ready = mtp_draft_ready(params, models_dir, files)
+        if not ready:
+            mtp_state = "missing"
+        elif is_mtp_enabled(params):
+            mtp_state = "on"
+        else:
+            mtp_state = "off"
+    return vision_state, bool(caps.tools), mtp_state
 
 
 def mmproj_files(files: Sequence[HubFile | str]) -> list[str]:
@@ -424,3 +453,177 @@ def vision_projector_ready(
     if path is not None:
         return path.name, True
     return name, False
+
+def mtp_files(files: Sequence[HubFile | str]) -> list[str]:
+    names = [
+        item.path if isinstance(item, HubFile) else str(item)
+        for item in files
+    ]
+    return [name for name in names if is_draft_gguf(name)]
+
+
+def pick_mtp_filename(
+    files: Sequence[HubFile | str],
+    *,
+    quant_filename: str | None = None,
+) -> str | None:
+    """Choose an MTP draft GGUF. Prefer self-contained Q8_0 over shared heads."""
+    candidates = mtp_files(files)
+    if not candidates:
+        return None
+    if quant_filename:
+        fam = family_key(quant_filename)
+        matched = [name for name in candidates if fam and fam in family_key(name)]
+        if matched:
+            candidates = matched
+
+    def score(name: str) -> tuple:
+        lower = Path(name).name.lower()
+        shared = 1 if "shared" in lower else 0
+        if "q8_0" in lower:
+            qrank = 0
+        elif "q4" in lower:
+            qrank = 1
+        elif "bf16" in lower or "f16" in lower:
+            qrank = 2
+        else:
+            qrank = 3
+        return (shared, qrank, name.count("/"), lower)
+
+    return sorted(candidates, key=score)[0]
+
+
+def apply_mtp_identity(
+    params: dict[str, Any],
+    *,
+    author: str,
+    mtp_filename: str | None,
+    caps: ModelCapabilities | None = None,
+) -> None:
+    if mtp_filename:
+        name = mtp_filename
+        if author and name.startswith(f"{author}/"):
+            rel = name
+        elif author:
+            rel = f"{author}/{name}"
+        else:
+            rel = name
+        params["mtp_file"] = rel
+    if caps is not None:
+        stored = dict(params.get("capabilities") or {})
+        stored.update(caps.to_json())
+        params["capabilities"] = stored
+
+
+def local_mtp_path(
+    params: Mapping[str, Any],
+    models_dir: Path,
+    *,
+    extra_files: Sequence[str] = (),
+) -> Path | None:
+    """Resolve an on-disk MTP draft GGUF."""
+    recorded = str(params.get("mtp_file") or "").strip()
+    if recorded:
+        path = models_dir / recorded
+        if path.is_file():
+            return path
+
+    candidates: list[Path] = []
+    author = ""
+    source = params.get("source")
+    if isinstance(source, Mapping):
+        author = str(source.get("author") or "")
+    if author:
+        folder = models_dir / author
+        if folder.is_dir():
+            candidates.extend(sorted(folder.rglob("mtp-*.gguf")))
+
+    for name in extra_files:
+        if is_draft_gguf(name):
+            path = models_dir / author / name if author else models_dir / name
+            if author:
+                path = models_dir / author / name
+            if path.is_file():
+                candidates.append(path)
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve() if path.exists() else path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    hint = _family_hint(params)
+    if hint:
+        fam = family_key(hint)
+        matched = [path for path in unique if fam and fam in family_key(path.name)]
+        if matched:
+            unique = matched
+    if not unique:
+        return None
+    picked = pick_mtp_filename([_mtp_rel(path, models_dir, author) for path in unique], quant_filename=hint)
+    if not picked:
+        return unique[0]
+    for path in unique:
+        rel = _mtp_rel(path, models_dir, author)
+        if rel == picked or path.name == Path(picked).name:
+            return path
+    return unique[0]
+
+
+def _mtp_rel(path: Path, models_dir: Path, author: str) -> str:
+    try:
+        return str(path.relative_to(models_dir / author if author else models_dir))
+    except ValueError:
+        return path.name
+
+
+def mtp_filename_for(
+    params: Mapping[str, Any] | None = None,
+    files: Sequence[object] = (),
+    *,
+    quant_filename: str | None = None,
+) -> str | None:
+    recorded = str((params or {}).get("mtp_file") or "").strip()
+    if recorded and is_draft_gguf(recorded):
+        # keep Hub-relative path (may include MTP/)
+        source = (params or {}).get("source")
+        author = ""
+        if isinstance(source, Mapping):
+            author = str(source.get("author") or "")
+        name = recorded
+        if author and name.startswith(f"{author}/"):
+            name = name[len(author) + 1 :]
+        return name
+    return pick_mtp_filename(files, quant_filename=quant_filename)
+
+
+def mtp_draft_ready(
+    params: Mapping[str, Any] | None,
+    models_dir: Path,
+    files: Sequence[object] = (),
+) -> tuple[str | None, bool]:
+    name = mtp_filename_for(params, files)
+    path = local_mtp_path(params or {}, models_dir, extra_files=[name] if name else ())
+    if path is not None:
+        return (str(path.relative_to(models_dir)) if models_dir in path.parents or path.parent == models_dir else path.name), True
+    return name, False
+
+
+def is_mtp_enabled(params: Mapping[str, Any] | None) -> bool:
+    """Identity toggle or preset ``mtp`` flag."""
+    if not params:
+        return False
+    for key in ("mtp_enabled", "mtp"):
+        raw = params.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, bool) and raw:
+            return True
+        if isinstance(raw, (int, float)) and raw:
+            return True
+        if str(raw).strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+

@@ -18,8 +18,10 @@ IDENTITY_KEYS = frozenset({
     "total_layers",
     "context_length",
     "mmproj",
+    "mtp_file",
     "capabilities",
     "vision_enabled",
+    "mtp_enabled",
 })
 
 # Legacy Hermes-only keys — stripped on migration.

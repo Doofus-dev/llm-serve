@@ -10,7 +10,7 @@ from textual.message import Message
 from textual.widgets import ListItem, ListView, OptionList, Static
 from textual.widgets.option_list import Option
 
-from tui.data.capabilities import is_vision_enabled, nav_capability_icons
+from tui.data.capabilities import is_mtp_enabled, is_vision_enabled, nav_capability_icons
 from tui.data.models_json import Registry, model_author_size_line, save_registry
 from tui.data.presets import (
     PresetStore,
@@ -25,15 +25,29 @@ from tui.widgets.health import fmt_ctx, fmt_model_runtime_line
 
 EYEBALL = "👁"
 HAMMER = "🔨"
+MTP_MARK = "M"
 VISION_TOOLTIPS = {
     "missing": "Vision projector not downloaded",
     "off": "Vision off",
     "on": "Vision on",
 }
+MTP_TOOLTIPS = {
+    "missing": "MTP draft GGUF not downloaded",
+    "off": "MTP off",
+    "on": "MTP on",
+}
 
 
 class ToggleVision(Message):
     """User clicked the eyeball on a model card."""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__()
+        self.model_name = model_name
+
+
+class ToggleMtp(Message):
+    """User clicked the MTP mark on a model card."""
 
     def __init__(self, model_name: str) -> None:
         super().__init__()
@@ -80,6 +94,46 @@ class VisionEyeball(Static):
     def on_click(self, event: Click) -> None:
         event.stop()
         self.post_message(ToggleVision(self.model_name))
+
+
+class MtpMark(Static):
+    """Clickable MTP icon; not focusable so card keyboard selection stays on ModelNav."""
+
+    can_focus = False
+    DEFAULT_CSS = """
+    MtpMark {
+        width: auto;
+        height: 1;
+        min-width: 3;
+        padding: 0 1 0 0;
+        content-align: left middle;
+    }
+    MtpMark.mtp-on {
+        color: $accent;
+        text-style: bold;
+    }
+    MtpMark.mtp-off {
+        color: $text-muted;
+    }
+    MtpMark.mtp-missing {
+        color: $warning;
+        text-style: bold;
+    }
+    MtpMark:hover {
+        text-style: bold underline;
+    }
+    """
+
+    def __init__(self, model_name: str, state: str) -> None:
+        label = f"{MTP_MARK}!" if state == "missing" else f"{MTP_MARK} "
+        super().__init__(label, classes=f"mtp-{state}", markup=False)
+        self.model_name = model_name
+        self.state = state
+        self.tooltip = MTP_TOOLTIPS[state]
+
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.post_message(ToggleMtp(self.model_name))
 
 
 class ToolsBadge(Static):
@@ -247,6 +301,15 @@ class ModelNav(ListView):
         if paths is not None:
             save_registry(paths.models_json, self.registry)
 
+    def _persist_mtp_enabled(self, model_name: str, enabled: bool) -> None:
+        cfg = self.registry.models.get(model_name)
+        if cfg is None:
+            return
+        cfg.params["mtp_enabled"] = bool(enabled)
+        paths = getattr(self.app, "paths", None)
+        if paths is not None:
+            save_registry(paths.models_json, self.registry)
+
     async def on_toggle_vision(self, event: ToggleVision) -> None:
         event.stop()
         cfg = self.registry.models.get(event.model_name)
@@ -254,6 +317,15 @@ class ModelNav(ListView):
             return
         self._highlight_model(event.model_name)
         self._persist_vision_enabled(event.model_name, not is_vision_enabled(cfg.params))
+        await self._refresh_cards()
+
+    async def on_toggle_mtp(self, event: ToggleMtp) -> None:
+        event.stop()
+        cfg = self.registry.models.get(event.model_name)
+        if cfg is None:
+            return
+        self._highlight_model(event.model_name)
+        self._persist_mtp_enabled(event.model_name, not is_mtp_enabled(cfg.params))
         await self._refresh_cards()
 
     def _build_entries(self) -> tuple[list[ListItem], dict[str, tuple], list[Option]]:
@@ -296,9 +368,9 @@ class ModelNav(ListView):
             data = ("model", name)
             option_data[option_id] = data
             option_order.append(Option(card, id=option_id))
-            vision_state, show_tools = nav_capability_icons(model.params, self.models_dir)
+            vision_state, show_tools, mtp_state = nav_capability_icons(model.params, self.models_dir)
             items.append(
-                self._model_item(option_id, card, name, vision_state, show_tools)
+                self._model_item(option_id, card, name, vision_state, show_tools, mtp_state)
             )
 
             for slot, preset in sorted(
@@ -331,10 +403,13 @@ class ModelNav(ListView):
         model_name: str,
         vision_state: str | None,
         show_tools: bool,
+        mtp_state: str | None = None,
     ) -> ListItem:
         caps: list[Static] = []
         if vision_state is not None:
             caps.append(VisionEyeball(model_name, vision_state))
+        if mtp_state is not None:
+            caps.append(MtpMark(model_name, mtp_state))
         if show_tools:
             caps.append(ToolsBadge())
         body = Static(card, markup=False, classes="nav-card-body")

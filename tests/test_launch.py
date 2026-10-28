@@ -173,6 +173,24 @@ class ArgvTests(unittest.TestCase):
         self.assertNotIn("--spec-type", args)
         self.assertNotIn("draft-mtp", args)
 
+    def test_mtp_draft_model_flag(self) -> None:
+        from pathlib import Path
+
+        args = build_server_args(
+            model_path=Path("/tmp/m.gguf"),
+            host="0.0.0.0",
+            port=9000,
+            params={**DEFAULT_PRESET_PARAMS, "mtp": 1},
+            log_verbosity=3,
+            draft_path=Path("/tmp/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"),
+        )
+        self.assertIn("-md", args)
+        self.assertEqual(
+            args[args.index("-md") + 1],
+            "/tmp/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+        )
+        self.assertIn("draft-mtp", args)
+
     def test_single_file_list_is_byte_identical_to_path(self) -> None:
         kwargs = {
             "host": "127.0.0.1",

@@ -31,9 +31,13 @@ from tui.data.capabilities import (
     badge_markup,
     capabilities_from_hf,
     capabilities_from_payload,
+    is_mtp_enabled,
     is_vision_enabled,
     mmproj_filename_for,
+    mtp_draft_ready,
+    mtp_filename_for,
     pick_mmproj_filename,
+    pick_mtp_filename,
     resolve_capabilities,
     vision_projector_ready,
 )
@@ -291,6 +295,25 @@ class HubScreen(Screen):
         margin: 0 1 0 0;
     }
 
+    #mtp-label {
+        width: auto;
+        height: 3;
+        content-align: left middle;
+        margin: 0 1 0 1;
+    }
+
+    #mtp-toggle {
+        width: auto;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+
+    #download-mtp {
+        min-width: 16;
+        height: 3;
+        margin: 0 1 0 0;
+    }
+
     #hub-help {
         height: 1;
         min-height: 1;
@@ -404,6 +427,7 @@ class HubScreen(Screen):
         self._filters_ready = False
         self._file_caps = ModelCapabilities()
         self._session_vision_enabled = True
+        self._session_mtp_enabled = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="hub-panel"):
@@ -452,6 +476,9 @@ class HubScreen(Screen):
                 yield Label("Vision:", id="vision-label")
                 yield Switch(value=True, id="vision-toggle")
                 yield Button("Download vision", id="download-vision")
+                yield Label("MTP:", id="mtp-label")
+                yield Switch(value=False, id="mtp-toggle")
+                yield Button("Download MTP", id="download-mtp")
             yield HubTable(id="hub-table", cursor_type="row")
             yield Static(
                 "[dim]Tab: fields · ←→ context · [ ] offload · Enter open · F filters · "
@@ -468,6 +495,7 @@ class HubScreen(Screen):
         self.query_one("#context-controls").display = False
         self.query_one("#hub-table", DataTable).focus()
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
         self._search_from_filters()
         self._filters_ready = True
 
@@ -519,6 +547,7 @@ class HubScreen(Screen):
         self.query_one("#select", Button).label = "Open / download"
         self._refresh_hub_title()
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
         self._render_repo_table()
         self.query_one("#hub-table", DataTable).focus()
 
@@ -533,6 +562,7 @@ class HubScreen(Screen):
         self.query_one("#select", Button).label = "Download file"
         self._refresh_hub_title()
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
         self._update_context_options(repo.context_length)
         self._file_load_id += 1
         self._load_files(repo, self._file_load_id)
@@ -716,6 +746,74 @@ class HubScreen(Screen):
             save_registry(self.models_json_path, self.registry)
         self._refresh_hub_title()
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
+
+    def _refresh_mtp_controls(self) -> None:
+        try:
+            label = self.query_one("#mtp-label", Label)
+            toggle = self.query_one("#mtp-toggle", Switch)
+            button = self.query_one("#download-mtp", Button)
+        except QueryError:
+            return
+        if self.mode != "files" or not self.selected_repo:
+            label.display = False
+            toggle.display = False
+            button.display = False
+            return
+        params = self._vision_params()
+        name, on_disk = mtp_draft_ready(params, self.models_dir, self.files)
+        show = bool(self._file_caps.mtp or name)
+        label.display = show
+        toggle.display = show
+        button.display = show and bool(name) and not on_disk
+        enabled = (
+            is_mtp_enabled(params)
+            if params
+            else self._session_mtp_enabled
+        )
+        self._syncing_controls = True
+        try:
+            toggle.value = enabled
+        finally:
+            self._syncing_controls = False
+
+    def _persist_mtp_enabled(self, enabled: bool) -> None:
+        self._session_mtp_enabled = enabled
+        cfg = self._registered_cfg()
+        if cfg is not None:
+            cfg.params["mtp_enabled"] = bool(enabled)
+            save_registry(self.models_json_path, self.registry)
+        self._refresh_hub_title()
+        self._refresh_mtp_controls()
+
+    def _download_mtp(self) -> None:
+        if not self.selected_repo:
+            self.notify("Open a repo first", severity="warning")
+            return
+        params = self._vision_params()
+        name = mtp_filename_for(params, self.files)
+        if not name:
+            self.notify("No MTP draft found for this repo", severity="warning")
+            return
+        _, on_disk = mtp_draft_ready(params, self.models_dir, self.files)
+        if on_disk:
+            self.notify("MTP draft is already on disk")
+            self._refresh_mtp_controls()
+            return
+        cfg = self._registered_cfg()
+        if cfg is not None:
+            self._start_download((cfg.display, cfg.name), name)
+            return
+        default_name = self._default_profile_name(self.selected_repo, name)
+        existing = next(iter(self.registry.models), None)
+        if existing:
+            clone = self.registry.models[existing]
+            self._start_download((clone.display, existing), name)
+            return
+        self.app.push_screen(
+            DownloadProfileDialog(self.registry, default_name),
+            lambda result: self._start_download(result, name),
+        )
 
     def _download_vision(self) -> None:
         if not self.selected_repo:
@@ -799,6 +897,7 @@ class HubScreen(Screen):
             table.add_row(*quant_file_row_cells(row), key=row.path)
         self._refresh_hub_title()
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
 
     def _log(self, message: str) -> None:
         if self._downloading:
@@ -898,6 +997,7 @@ class HubScreen(Screen):
         ctx_note = f" · max context {self._fmt_context(max_ctx)}" if max_ctx else ""
         self._log(f"Found {len(files)} GGUF files{ctx_note}")
         self._refresh_vision_controls()
+        self._refresh_mtp_controls()
         self.query_one("#hub-table", DataTable).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -913,11 +1013,16 @@ class HubScreen(Screen):
             self._handle_select()
         elif event.button.id == "download-vision":
             self._download_vision()
+        elif event.button.id == "download-mtp":
+            self._download_mtp()
 
     def on_switch_changed(self, event: Switch.Changed) -> None:
-        if self._syncing_controls or event.switch.id != "vision-toggle":
+        if self._syncing_controls:
             return
-        self._persist_vision_enabled(bool(event.value))
+        if event.switch.id == "vision-toggle":
+            self._persist_vision_enabled(bool(event.value))
+        elif event.switch.id == "mtp-toggle":
+            self._persist_mtp_enabled(bool(event.value))
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing_controls:
@@ -1021,14 +1126,19 @@ class HubScreen(Screen):
         display_name, clone_from = profile
         all_names = [f.path for f in self.files]
         extra_files: list[str] = []
-        from tui.data.quant import is_mmproj_gguf
+        from tui.data.quant import is_draft_gguf, is_mmproj_gguf
 
-        if not is_mmproj_gguf(filename):
+        if not is_mmproj_gguf(filename) and not is_draft_gguf(filename):
             mmproj = pick_mmproj_filename(self.files, quant_filename=filename)
             if mmproj:
                 local_mmproj = self.models_dir / self.selected_repo.author / mmproj
                 if not local_mmproj.is_file():
                     extra_files.append(mmproj)
+            mtp = pick_mtp_filename(self.files, quant_filename=filename)
+            if mtp:
+                local_mtp = self.models_dir / self.selected_repo.author / mtp
+                if not local_mtp.is_file():
+                    extra_files.append(mtp)
         plan = build_download_plan(
             self.selected_repo.id,
             filename,

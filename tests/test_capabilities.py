@@ -135,6 +135,18 @@ class DownloadPlanExtraTests(unittest.TestCase):
             ["Qwen3.8-27B-Q3_K_S.gguf", "mmproj-Qwen3.8-27B-f16.gguf"],
         )
 
+    def test_extra_mtp_is_included_once(self) -> None:
+        plan = build_download_plan(
+            "unsloth/Qwen3.8-Flash-Next-GGUF",
+            "Qwen3.8-Flash-Next-Q8_0.gguf",
+            Path("/models"),
+            extra_files=["mtp-Qwen3.8-Flash-Next-Q8_0.gguf", "Qwen3.8-Flash-Next-Q8_0.gguf"],
+        )
+        self.assertEqual(
+            plan.filenames,
+            ["Qwen3.8-Flash-Next-Q8_0.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"],
+        )
+
 
 class VisionToggleTests(unittest.TestCase):
     def test_defaults_on(self) -> None:
@@ -206,9 +218,10 @@ class VisionToggleTests(unittest.TestCase):
 
     def test_nav_icons_hidden_without_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            state, tools = nav_capability_icons({}, Path(tmp))
+            state, tools, mtp = nav_capability_icons({}, Path(tmp))
         self.assertIsNone(state)
         self.assertFalse(tools)
+        self.assertIsNone(mtp)
 
     def test_nav_icons_missing_projector_stays_missing_when_toggled_off(self) -> None:
         params = {
@@ -217,9 +230,10 @@ class VisionToggleTests(unittest.TestCase):
             "vision_enabled": False,
         }
         with tempfile.TemporaryDirectory() as tmp:
-            state, tools = nav_capability_icons(params, Path(tmp))
+            state, tools, mtp = nav_capability_icons(params, Path(tmp))
         self.assertEqual(state, "missing")
         self.assertFalse(tools)
+        self.assertIsNone(mtp)
 
     def test_nav_icons_vision_on_off_and_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -232,13 +246,50 @@ class VisionToggleTests(unittest.TestCase):
                 "mmproj": "demo/mmproj-Demo-f16.gguf",
                 "file": "demo/Qwen3.8-27B-Q4_K_M.gguf",
             }
-            state, tools = nav_capability_icons(params, models_dir)
+            state, tools, mtp = nav_capability_icons(params, models_dir)
             self.assertEqual(state, "on")
             self.assertTrue(tools)
+            self.assertIsNone(mtp)
             params["vision_enabled"] = False
-            state, tools = nav_capability_icons(params, models_dir)
+            state, tools, mtp = nav_capability_icons(params, models_dir)
             self.assertEqual(state, "off")
             self.assertTrue(tools)
+            self.assertIsNone(mtp)
+
+
+
+    def test_pick_mtp_prefers_self_contained_q8(self) -> None:
+        from tui.data.capabilities import pick_mtp_filename
+
+        picked = pick_mtp_filename(
+            [
+                "MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+                "MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf",
+                "mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+            ]
+        )
+        self.assertEqual(picked, "mtp-Qwen3.8-Flash-Next-Q8_0.gguf")
+
+    def test_nav_icons_mtp_missing_and_on(self) -> None:
+        params = {
+            "capabilities": {"vision": False, "tools": False, "mtp": True},
+            "mtp_file": "unsloth/mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+            "file": "unsloth/Qwen3.8-Flash-Next-Q8_0.gguf",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            state, tools, mtp = nav_capability_icons(params, Path(tmp))
+        self.assertIsNone(state)
+        self.assertEqual(mtp, "missing")
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            path = models_dir / "unsloth" / "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"gguf")
+            state, tools, mtp = nav_capability_icons(params, models_dir)
+            self.assertEqual(mtp, "off")
+            params["mtp_enabled"] = True
+            state, tools, mtp = nav_capability_icons(params, models_dir)
+            self.assertEqual(mtp, "on")
 
 
 class LaunchMmprojTests(unittest.TestCase):

@@ -21,12 +21,16 @@ from tui.data.downloads import DownloadJob, DownloadManager
 from tui.data.gpu import query_gpu
 from tui.data.capabilities import (
     apply_mmproj_identity,
+    apply_mtp_identity,
     is_vision_enabled,
     local_mmproj_path,
+    local_mtp_path,
     mmproj_filename_for,
+    mtp_filename_for,
     pick_mmproj_filename,
+    pick_mtp_filename,
 )
-from tui.data.quant import is_mmproj_gguf
+from tui.data.quant import is_draft_gguf, is_mmproj_gguf
 from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
 from tui.data.models_json import (
     AliasTarget,
@@ -342,6 +346,27 @@ class LLMServeApp(App):
                     on_complete()
                 return
 
+            if is_draft_gguf(filename):
+                reg = load_registry(self.paths.models_json, models_dir=self.paths.models_dir)
+                slug = find_model_by_repo(reg, repo)
+                if slug is None and clone_from in reg.models:
+                    source = reg.models[clone_from].params.get("source")
+                    if isinstance(source, dict) and source.get("repo") == repo:
+                        slug = clone_from
+                cfg = reg.models.get(slug) if slug else None
+                if cfg is not None:
+                    apply_mtp_identity(
+                        cfg.params,
+                        author=plan.author,
+                        mtp_filename=filename,
+                    )
+                    save_registry(self.paths.models_json, reg)
+                self._reload_registry()
+                self.notify(f"Downloaded MTP draft {Path(filename).name}")
+                if on_complete:
+                    on_complete()
+                return
+
             base_params = (
                 dict(self.registry.models[clone_from].params)
                 if clone_from in self.registry.models
@@ -362,15 +387,23 @@ class LLMServeApp(App):
                 hf_context=hf_context,
             )
             mmproj_name = pick_mmproj_filename(plan.filenames, quant_filename=filename)
-            if mmproj_name:
+            mtp_name = pick_mtp_filename(plan.filenames, quant_filename=filename)
+            if mmproj_name or mtp_name:
                 reg = load_registry(self.paths.models_json, models_dir=self.paths.models_dir)
                 cfg = reg.models.get(slug)
                 if cfg is not None:
-                    apply_mmproj_identity(
-                        cfg.params,
-                        author=plan.author,
-                        mmproj_filename=mmproj_name,
-                    )
+                    if mmproj_name:
+                        apply_mmproj_identity(
+                            cfg.params,
+                            author=plan.author,
+                            mmproj_filename=mmproj_name,
+                        )
+                    if mtp_name:
+                        apply_mtp_identity(
+                            cfg.params,
+                            author=plan.author,
+                            mtp_filename=mtp_name,
+                        )
                     save_registry(self.paths.models_json, reg)
             self._reload_registry()
             extra = ""
@@ -422,7 +455,7 @@ class LLMServeApp(App):
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
             extra_files: list[str] = []
-            if not is_mmproj_gguf(filename):
+            if not is_mmproj_gguf(filename) and not is_draft_gguf(filename):
                 mmproj_rel = str(cfg.params.get("mmproj") or "")
                 mmproj_name = mmproj_filename_for(
                     cfg.params,
@@ -433,6 +466,16 @@ class LLMServeApp(App):
                     local = self.paths.models_dir / (mmproj_rel or f"{source.get('author', '')}/{mmproj_name}")
                     if not local.is_file():
                         extra_files.append(mmproj_name)
+                mtp_rel = str(cfg.params.get("mtp_file") or "")
+                mtp_name = mtp_filename_for(
+                    cfg.params,
+                    [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
+                    quant_filename=filename,
+                )
+                if mtp_name:
+                    local = local_mtp_path(cfg.params, self.paths.models_dir, extra_files=[mtp_name])
+                    if local is None:
+                        extra_files.append(mtp_name)
             plan = build_download_plan(
                 source["repo"],
                 filename,
