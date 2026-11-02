@@ -7,8 +7,11 @@ import tempfile
 from pathlib import Path
 
 from tui.data.capabilities import (
+    ADDON_BY_ID,
     capabilities_from_files,
     capabilities_from_hf,
+    capabilities_from_payload,
+    extra_download_files,
     is_vision_enabled,
     local_mmproj_path,
     mmproj_filename_for,
@@ -19,8 +22,17 @@ from tui.data.capabilities import (
 )
 from tui.data.hf import HubFile, HubRepo, build_download_plan
 from tui.data.models_json import merge_repo_catalog
-from tui.data.quant import is_mmproj_gguf, is_sidecar_gguf
-from tui.data.quant_table import build_quant_file_rows
+from tui.data.quant import (
+    ROLE_IMATRIX,
+    ROLE_MTP,
+    ROLE_PROJECTOR,
+    gguf_role,
+    is_draft_gguf,
+    is_hidden_sidecar,
+    is_mmproj_gguf,
+    is_sidecar_gguf,
+)
+from tui.data.quant_table import build_quant_file_rows, quant_file_row_cells
 from tui.data.gpu import GPUStats
 from tui.launch import build_server_args
 
@@ -36,6 +48,45 @@ class CapabilityDetectionTests(unittest.TestCase):
         caps = capabilities_from_hf(tags=["gguf", "function-calling"])
         self.assertTrue(caps.tools)
         self.assertEqual(caps.tools_source, "hf")
+
+    def test_hf_tags_mark_mtp(self) -> None:
+        caps = capabilities_from_hf(tags=["gguf", "mtp", "speculative-decoding"])
+        self.assertTrue(caps.mtp)
+        self.assertEqual(caps.mtp_source, "hf")
+
+    def test_repo_id_marks_mtp_without_opening_files(self) -> None:
+        caps = capabilities_from_hf(
+            tags=["gguf"],
+            repo_id="unsloth/Qwen3.8-27B-MTP-GGUF",
+        )
+        self.assertTrue(caps.mtp)
+
+    def test_audio_pipeline_marks_audio(self) -> None:
+        caps = capabilities_from_hf(pipeline_tag="audio-text-to-text", tags=["gguf"])
+        self.assertTrue(caps.audio)
+        self.assertFalse(caps.vision)
+
+    def test_any_to_any_marks_vision_and_audio(self) -> None:
+        caps = capabilities_from_hf(pipeline_tag="any-to-any", tags=["multimodal"])
+        self.assertTrue(caps.vision)
+        self.assertTrue(caps.audio)
+
+    def test_siblings_in_payload_mark_mtp(self) -> None:
+        caps = capabilities_from_payload(
+            {
+                "id": "unsloth/Qwen3.8-Flash-Next-GGUF",
+                "tags": ["gguf"],
+                "pipeline_tag": "image-text-to-text",
+                "siblings": [
+                    {"rfilename": "Qwen3.8-Flash-Next-Q8_0.gguf"},
+                    {"rfilename": "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"},
+                    {"rfilename": "mmproj-F16.gguf"},
+                ],
+            }
+        )
+        self.assertTrue(caps.mtp)
+        self.assertEqual(caps.mtp_source, "files")
+        self.assertTrue(caps.vision)
 
     def test_file_fallback_when_hf_is_silent(self) -> None:
         files = [
@@ -61,6 +112,29 @@ class CapabilityDetectionTests(unittest.TestCase):
         self.assertTrue(caps.vision)
         self.assertEqual(caps.vision_source, "hf")
 
+    def test_audio_only_hf_does_not_gain_vision_from_mmproj(self) -> None:
+        files = [HubFile(path="mmproj-ultravox-v0_5-llama-3_2-1b-f16.gguf", size=1)]
+        caps = resolve_capabilities(
+            hf=capabilities_from_hf(pipeline_tag="audio-text-to-text"),
+            files=files,
+            repo_id="ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF",
+        )
+        self.assertTrue(caps.audio)
+        self.assertFalse(caps.vision)
+
+    def test_mtp_from_files_when_hf_is_silent(self) -> None:
+        files = [
+            HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=10),
+            HubFile(path="MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf", size=2),
+        ]
+        caps = resolve_capabilities(
+            hf=capabilities_from_hf(tags=["gguf"]),
+            files=files,
+            repo_id="unsloth/Qwen3.8-Flash-Next-GGUF",
+        )
+        self.assertTrue(caps.mtp)
+        self.assertEqual(caps.mtp_source, "files")
+
 
 class MmprojPickTests(unittest.TestCase):
     def test_prefers_f16_projector_for_family(self) -> None:
@@ -77,6 +151,16 @@ class MmprojPickTests(unittest.TestCase):
         self.assertTrue(is_sidecar_gguf("mmproj-Qwen3.8-27B-f16.gguf"))
         self.assertTrue(is_sidecar_gguf("Qwen3.8-27B-imatrix.gguf"))
         self.assertFalse(is_sidecar_gguf("Qwen3.8-27B-Q3_K_S.gguf"))
+        self.assertEqual(gguf_role("mmproj-F16.gguf"), ROLE_PROJECTOR)
+        self.assertEqual(gguf_role("mtp-Qwen3.8-Flash-Next-Q8_0.gguf"), ROLE_MTP)
+        self.assertEqual(gguf_role("MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"), ROLE_MTP)
+        self.assertEqual(gguf_role("imatrix_unsloth.gguf"), ROLE_IMATRIX)
+        self.assertTrue(is_draft_gguf("MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf"))
+        self.assertTrue(is_hidden_sidecar("imatrix_unsloth.gguf"))
+        self.assertFalse(is_hidden_sidecar("mmproj-F16.gguf"))
+        self.assertEqual(ADDON_BY_ID["projector"].launch_flag, "--mmproj")
+        self.assertEqual(ADDON_BY_ID["mtp"].launch_flag, "-md")
+        self.assertIsNone(ADDON_BY_ID["imatrix"].launch_flag)
 
 
 class MergeCatalogSidecarTests(unittest.TestCase):
@@ -107,11 +191,12 @@ class MergeCatalogSidecarTests(unittest.TestCase):
 
 
 class QuantTableSidecarTests(unittest.TestCase):
-    def test_sidecar_files_are_not_quant_rows(self) -> None:
+    def test_imatrix_hidden_addons_labeled(self) -> None:
         rows = build_quant_file_rows(
             [
                 HubFile(path="Qwen3.8-27B-Q3_K_S.gguf", size=1000),
                 HubFile(path="mmproj-Qwen3.8-27B-f16.gguf", size=200),
+                HubFile(path="mtp-Qwen3.8-27B-Q8_0.gguf", size=80),
                 HubFile(path="Qwen3.8-27B-imatrix.gguf", size=50),
             ],
             gpu=GPUStats(),
@@ -119,7 +204,16 @@ class QuantTableSidecarTests(unittest.TestCase):
             offload_ratio=1.0,
             baselines_path=None,
         )
-        self.assertEqual([row.path for row in rows], ["Qwen3.8-27B-Q3_K_S.gguf"])
+        by_path = {row.path: row for row in rows}
+        self.assertIn("Qwen3.8-27B-Q3_K_S.gguf", by_path)
+        self.assertNotIn("Qwen3.8-27B-imatrix.gguf", by_path)
+        self.assertEqual(by_path["mmproj-Qwen3.8-27B-f16.gguf"].addon_kind, ROLE_PROJECTOR)
+        self.assertEqual(by_path["mtp-Qwen3.8-27B-Q8_0.gguf"].addon_kind, ROLE_MTP)
+        vision_cell = str(quant_file_row_cells(by_path["mmproj-Qwen3.8-27B-f16.gguf"])[1])
+        mtp_cell = str(quant_file_row_cells(by_path["mtp-Qwen3.8-27B-Q8_0.gguf"])[1])
+        self.assertIn("vision", vision_cell.lower())
+        self.assertIn("mtp", mtp_cell.lower())
+        self.assertNotIn("mystery", vision_cell.lower())
 
 
 class DownloadPlanExtraTests(unittest.TestCase):
@@ -146,6 +240,52 @@ class DownloadPlanExtraTests(unittest.TestCase):
             plan.filenames,
             ["Qwen3.8-Flash-Next-Q8_0.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"],
         )
+
+    def test_extra_download_files_pulls_projector_and_mtp(self) -> None:
+        files = [
+            HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=10),
+            HubFile(path="mmproj-F16.gguf", size=2),
+            HubFile(path="mtp-Qwen3.8-Flash-Next-Q8_0.gguf", size=3),
+        ]
+        extras = extra_download_files(
+            files,
+            quant_filename="Qwen3.8-Flash-Next-Q8_0.gguf",
+            models_dir=Path("/models"),
+            author="unsloth",
+        )
+        self.assertEqual(extras, ["mmproj-F16.gguf", "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"])
+
+    def test_extra_download_files_skips_when_selecting_an_addon(self) -> None:
+        files = [
+            HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=10),
+            HubFile(path="mmproj-F16.gguf", size=2),
+        ]
+        extras = extra_download_files(
+            files,
+            quant_filename="mmproj-F16.gguf",
+            models_dir=Path("/models"),
+            author="unsloth",
+        )
+        self.assertEqual(extras, [])
+
+    def test_extra_download_files_skips_on_disk_addons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            folder = models_dir / "unsloth"
+            folder.mkdir()
+            (folder / "mmproj-F16.gguf").write_bytes(b"gguf")
+            files = [
+                HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=10),
+                HubFile(path="mmproj-F16.gguf", size=2),
+                HubFile(path="mtp-Qwen3.8-Flash-Next-Q8_0.gguf", size=3),
+            ]
+            extras = extra_download_files(
+                files,
+                quant_filename="Qwen3.8-Flash-Next-Q8_0.gguf",
+                models_dir=models_dir,
+                author="unsloth",
+            )
+            self.assertEqual(extras, ["mtp-Qwen3.8-Flash-Next-Q8_0.gguf"])
 
 
 class VisionToggleTests(unittest.TestCase):

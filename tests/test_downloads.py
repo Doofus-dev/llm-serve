@@ -5,8 +5,9 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from tui.data.capabilities import extra_download_files
 from tui.data.downloads import DownloadJob, DownloadManager, DownloadState
-from tui.data.hf import DownloadPlan
+from tui.data.hf import DownloadPlan, HubFile, build_download_plan
 
 
 def _job(filename: str, author: str = "author") -> DownloadJob:
@@ -94,6 +95,31 @@ class DownloadStateTests(unittest.TestCase):
         mgr.unsubscribe(listener)
         mgr.enqueue(_job("b.gguf"))
         self.assertEqual(seen, [1])
+
+
+class DownloadAddonPlanTests(unittest.TestCase):
+    def test_quant_plan_includes_runtime_addons(self) -> None:
+        files = [
+            HubFile(path="Model-Q8_0.gguf", size=10),
+            HubFile(path="mmproj-F16.gguf", size=2),
+            HubFile(path="mtp-Model-Q8_0.gguf", size=3),
+        ]
+        extras = extra_download_files(
+            files,
+            quant_filename="Model-Q8_0.gguf",
+            models_dir=Path("/models"),
+            author="unsloth",
+        )
+        plan = build_download_plan(
+            "unsloth/Model-GGUF",
+            "Model-Q8_0.gguf",
+            Path("/models"),
+            extra_files=extras,
+        )
+        self.assertEqual(
+            plan.filenames,
+            ["Model-Q8_0.gguf", "mmproj-F16.gguf", "mtp-Model-Q8_0.gguf"],
+        )
 
 
 if __name__ == "__main__":

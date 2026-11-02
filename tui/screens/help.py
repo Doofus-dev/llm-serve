@@ -188,10 +188,11 @@ class HelpScreen(ModalScreen[None]):
                 )
                 yield Static(
                     "• Press H to open the Hub and browse/download models\n"
-                    "  from Hugging Face. Caps chips show vision (needs a\n"
-                    "  mmproj sidecar) and tools. Use Download vision when\n"
-                    "  the projector is missing, and the Vision switch to\n"
-                    "  pass or skip --mmproj on launch.",
+                    "  from Hugging Face. Caps chips show vision/audio\n"
+                    "  (mmproj projector), MTP (mtp- draft), and tools.\n"
+                    "  File rows label those add-ons. Downloading a quant\n"
+                    "  also pulls missing projector and MTP files. Toggles\n"
+                    "  pass or skip --mmproj / -md on launch.",
                     classes="help-tip",
                 )
                 yield Static(

@@ -13,8 +13,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 HF_INSTALL_HINT = "Install: curl -LsSf https://hf.co/cli/install.sh | bash -s"
-HUB_REPO_EXPAND = "downloads,likes,gguf,tags,pipeline_tag"
-HUB_INFO_EXPAND = "tags,pipeline_tag,cardData,gguf"
+HUB_REPO_EXPAND = "downloads,likes,gguf,tags,pipeline_tag,siblings"
+HUB_INFO_EXPAND = "tags,pipeline_tag,cardData,gguf,siblings"
 HUB_LIST_LIMIT = 50
 HUB_FILTER_FETCH_LIMIT = 150
 
@@ -29,6 +29,26 @@ def _tuple_tags(raw: Any) -> tuple[str, ...]:
     return ()
 
 
+def sibling_filenames(raw: Any) -> tuple[str, ...]:
+    """GGUF paths from Hub ``siblings`` (rfilename) or a plain name list."""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            name = str(item.get("rfilename") or item.get("path") or "")
+        else:
+            continue
+        if not name.lower().endswith(".gguf") or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return tuple(names)
+
+
 @dataclass(frozen=True)
 class HubRepo:
     id: str
@@ -40,6 +60,7 @@ class HubRepo:
     context_length: int | None = None
     tags: tuple[str, ...] = ()
     pipeline_tag: str | None = None
+    filenames: tuple[str, ...] = ()
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> HubRepo:
@@ -64,6 +85,9 @@ class HubRepo:
             ),
             tags=_tuple_tags(data.get("tags")),
             pipeline_tag=str(pipeline).strip() if pipeline else None,
+            filenames=sibling_filenames(
+                data.get("siblings") or data.get("files") or data.get("filenames")
+            ),
         )
 
 

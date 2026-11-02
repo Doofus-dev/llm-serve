@@ -32,6 +32,7 @@ from tui.data.capabilities import (
     mtp_filename_for,
     pick_mmproj_filename,
     pick_mtp_filename,
+    projector_control_label,
     resolve_capabilities,
     vision_projector_ready,
 )
@@ -340,6 +341,11 @@ class QuantPickerScreen(ModalScreen[str | None]):
             baselines_path=self.baselines_path,
             models_dir=self.models_dir,
             author=self._repo_author(),
+            caps=resolve_capabilities(
+                params=self.cfg.params,
+                files=self._files,
+                repo_id=self._repo_id(),
+            ),
         )
 
     def _download_key(self, path: str) -> str:
@@ -387,13 +393,16 @@ class QuantPickerScreen(ModalScreen[str | None]):
         name, on_disk = vision_projector_ready(
             self.cfg.params, self.models_dir, self._files
         )
-        show = bool(caps.vision or name)
+        show = bool(caps.vision or caps.audio or name)
         try:
             label = self.query_one("#vision-label", Label)
             toggle = self.query_one("#vision-toggle", Switch)
             button = self.query_one("#download-vision", Button)
         except Exception:
             return
+        kind = projector_control_label(caps)
+        label.update(kind)
+        button.label = f"Download {kind.lower()}"
         label.display = show
         toggle.display = show
         button.display = show and bool(name) and not on_disk
@@ -513,7 +522,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             # updates and ``_selected_row`` resolve. Drafts are selectable
             # downloads, not main quants; ``quant_file_row_cells`` marks them.
             table.add_row(*quant_file_row_cells(row), key=row.path)
-            if not row.is_draft and row.quant_id == active:
+            if not row.addon_kind and row.quant_id == active:
                 cursor_row = idx
 
         status = self.query_one("#quant-picker-status", Static)
@@ -742,6 +751,22 @@ class QuantPickerScreen(ModalScreen[str | None]):
         picked = self._selected_row()
         if not picked:
             self.notify("Select a quant", severity="warning")
+            return
+        if picked.addon_kind:
+            if picked.downloaded:
+                self.notify(f"{picked.path} is already on disk")
+                return
+            if self.download_manager is not None and self.download_manager.has_job(
+                self._download_key(picked.path)
+            ):
+                self.notify(f"{picked.path} is already downloading", severity="information")
+                return
+            if self.on_download:
+                self.on_download(self.model_name, picked.path, picked.size)
+                if self.download_manager is not None:
+                    self._apply_download_state(self.download_manager.state)
+                return
+            self.notify("Download handler unavailable", severity="error")
             return
         if picked.downloaded:
             self.dismiss(picked.quant_id)

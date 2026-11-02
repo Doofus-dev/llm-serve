@@ -22,11 +22,10 @@ from tui.data.gpu import query_gpu
 from tui.data.capabilities import (
     apply_mmproj_identity,
     apply_mtp_identity,
+    extra_download_files,
+    identity_capability_inputs,
     is_vision_enabled,
     local_mmproj_path,
-    local_mtp_path,
-    mmproj_filename_for,
-    mtp_filename_for,
     pick_mmproj_filename,
     pick_mtp_filename,
 )
@@ -454,28 +453,14 @@ class LLMServeApp(App):
                 self.notify("No Hub repo for this model", severity="error")
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
-            extra_files: list[str] = []
-            if not is_mmproj_gguf(filename) and not is_draft_gguf(filename):
-                mmproj_rel = str(cfg.params.get("mmproj") or "")
-                mmproj_name = mmproj_filename_for(
-                    cfg.params,
-                    [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
-                    quant_filename=filename,
-                )
-                if mmproj_name:
-                    local = self.paths.models_dir / (mmproj_rel or f"{source.get('author', '')}/{mmproj_name}")
-                    if not local.is_file():
-                        extra_files.append(mmproj_name)
-                mtp_rel = str(cfg.params.get("mtp_file") or "")
-                mtp_name = mtp_filename_for(
-                    cfg.params,
-                    [str(entry.get("filename") or "") for entry in (cfg.params.get("quants") or {}).values() if isinstance(entry, dict)],
-                    quant_filename=filename,
-                )
-                if mtp_name:
-                    local = local_mtp_path(cfg.params, self.paths.models_dir, extra_files=[mtp_name])
-                    if local is None:
-                        extra_files.append(mtp_name)
+            known_files, _ = identity_capability_inputs(cfg.params)
+            extra_files = extra_download_files(
+                known_files,
+                quant_filename=filename,
+                models_dir=self.paths.models_dir,
+                author=str(source.get("author") or ""),
+                params=cfg.params,
+            )
             plan = build_download_plan(
                 source["repo"],
                 filename,

@@ -12,6 +12,7 @@ from tui.data.hf import (
     HF_INSTALL_HINT,
     HUB_FILTER_FETCH_LIMIT,
     HUB_LIST_LIMIT,
+    HUB_INFO_EXPAND,
     HUB_REPO_EXPAND,
     AuthStatus,
     DownloadPlan,
@@ -29,6 +30,7 @@ from tui.data.hf import (
     list_gguf_repos,
     list_repo_ggufs,
     shard_filenames,
+    sibling_filenames,
     _run_hf_async,
 )
 from tui.data.models_json import create_downloaded_model, load_registry, merge_editor_params, update_model
@@ -267,6 +269,35 @@ class HFCliTests(unittest.TestCase):
         limit_idx = mock_run.call_args.args[0].index("--limit")
         self.assertEqual(mock_run.call_args.args[0][limit_idx + 1], str(HUB_LIST_LIMIT))
         self.assertEqual(HUB_LIST_LIMIT, 50)
+        self.assertIn("siblings", HUB_REPO_EXPAND)
+        self.assertIn("siblings", HUB_INFO_EXPAND)
+
+    def test_from_json_keeps_sibling_ggufs(self) -> None:
+        repo = HubRepo.from_json(
+            {
+                "id": "unsloth/Qwen3.8-Flash-Next-GGUF",
+                "downloads": 1,
+                "likes": 0,
+                "siblings": [
+                    {"rfilename": "Qwen3.8-Flash-Next-Q8_0.gguf"},
+                    {"rfilename": "mtp-Qwen3.8-Flash-Next-Q8_0.gguf"},
+                    {"rfilename": "README.md"},
+                    {"rfilename": "mmproj-F16.gguf"},
+                ],
+            }
+        )
+        self.assertEqual(
+            repo.filenames,
+            (
+                "Qwen3.8-Flash-Next-Q8_0.gguf",
+                "mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+                "mmproj-F16.gguf",
+            ),
+        )
+        self.assertEqual(
+            sibling_filenames([{"rfilename": "mtp-Model-Q8_0.gguf"}, "notes.txt"]),
+            ("mtp-Model-Q8_0.gguf",),
+        )
 
     @patch("tui.data.hf._run_hf")
     def test_list_gguf_repos_filters_min_context(self, mock_run) -> None:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from tests.support import Harness
 from textual.widgets import DataTable, Select
 
+from tui.data.capabilities import resolve_capabilities
 from tui.data.hf import HubFile, HubRepo
 from tui.data.models_json import ModelConfig, Registry, downloaded_repo_ids
 from tui.data.settings import TUISettings
@@ -138,6 +139,94 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
                     screen._handle_select()
                     self.assertEqual(screen.mode, "files")
                     self.assertEqual(screen.selected_repo.id, "bartowski/Model-GGUF")
+
+    async def test_repo_table_shows_mtp_from_siblings_without_opening(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self.harness.app()
+            screen = HubScreen(
+                registry=Registry(),
+                settings=TUISettings(),
+                settings_path=root / "settings.json",
+                models_json_path=root / "models.json",
+                models_dir=root / "models",
+            )
+            with (
+                patch.object(HubScreen, "_request_repos", lambda *a, **k: None),
+                patch.object(HubScreen, "_load_files", lambda *a, **k: None),
+            ):
+                async with app.run_test(size=(120, 45)) as pilot:
+                    app.push_screen(screen)
+                    await pilot.pause()
+
+                    screen.repos = [
+                        _repo(
+                            "unsloth/Qwen3.8-Flash-Next-GGUF",
+                            filenames=(
+                                "Qwen3.8-Flash-Next-Q8_0.gguf",
+                                "mmproj-F16.gguf",
+                                "mtp-Qwen3.8-Flash-Next-Q8_0.gguf",
+                            ),
+                        ),
+                    ]
+                    screen._set_mode_repos()
+
+                    table = screen.query_one("#hub-table", DataTable)
+                    caps = str(table.get_row_at(0)[2]).lower()
+                    self.assertIn("mtp", caps)
+                    self.assertIn("vision", caps)
+
+                    screen._set_mode_files(screen.repos[0])
+                    self.assertTrue(screen._file_caps.mtp)
+                    self.assertTrue(screen._file_caps.vision)
+                    file_table = screen.query_one("#hub-table", DataTable)
+                    labels = [
+                        str(file_table.get_row_at(i)[1]).lower()
+                        for i in range(file_table.row_count)
+                    ]
+                    self.assertTrue(any("mtp" in cell for cell in labels))
+                    self.assertTrue(any("vision" in cell for cell in labels))
+
+    async def test_file_table_labels_addons_and_hides_imatrix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app = self.harness.app()
+            screen = HubScreen(
+                registry=Registry(),
+                settings=TUISettings(),
+                settings_path=root / "settings.json",
+                models_json_path=root / "models.json",
+                models_dir=root / "models",
+            )
+            with patch.object(HubScreen, "_request_repos", lambda *a, **k: None):
+                async with app.run_test(size=(120, 45)) as pilot:
+                    app.push_screen(screen)
+                    await pilot.pause()
+
+                    screen.mode = "files"
+                    screen.selected_repo = _repo("unsloth/Qwen3.8-Flash-Next-GGUF")
+                    screen.files = [
+                        HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=2000),
+                        HubFile(path="mtp-Qwen3.8-Flash-Next-Q8_0.gguf", size=100),
+                        HubFile(path="mmproj-F16.gguf", size=50),
+                        HubFile(path="imatrix_unsloth.gguf", size=10),
+                    ]
+                    screen._file_caps = resolve_capabilities(
+                        files=screen.files,
+                        repo_id=screen.selected_repo.id,
+                    )
+                    screen._render_file_table()
+
+                    table = screen.query_one("#hub-table", DataTable)
+                    labels = [
+                        str(table.get_row_at(i)[1])
+                        for i in range(table.row_count)
+                    ]
+                    joined = " ".join(labels).lower()
+                    self.assertIn("mtp", joined)
+                    self.assertIn("vision", joined)
+                    self.assertNotIn("imatrix", joined)
+                    self.assertEqual(table.row_count, 3)
 
     async def test_disk_column_and_select_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

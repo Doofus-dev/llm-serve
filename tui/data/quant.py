@@ -41,35 +41,74 @@ def parse_gguf_filename(filename: str) -> tuple[str | None, str | None, str | No
     return size, variant, quant
 
 
+# Companion GGUF roles that ship next to a model's quants. A role other than
+# ``model`` is never a catalog quant. See ``tui.data.capabilities.ADDON_KINDS``.
+ROLE_MODEL = "model"
+ROLE_PROJECTOR = "projector"  # mmproj-*.gguf — vision and/or audio via --mmproj
+ROLE_MTP = "mtp"              # mtp-*.gguf — speculative draft via -md
+ROLE_IMATRIX = "imatrix"      # *imatrix* — quant calibration, not a runtime file
+
+
 def family_key(filename: str) -> str:
     """Stable id for sibling quants of the same GGUF, e.g. Qwen 3.5 9B."""
     stem = Path(filename).stem.lower()
     stem = re.sub(r"^mmproj[-_]", "", stem)
+    stem = re.sub(r"^mtp[-_]", "", stem)
+    stem = re.sub(r"^draft[-_]", "", stem)
     stem = re.sub(r"[-_]imatrix$", "", stem)
     stem = QUANT_RE.sub("", stem)
     return re.sub(r"[-_\.]+", "-", stem).strip("-")
 
 
+def gguf_role(filename: str) -> str:
+    """Classify a GGUF as a main quant or a known companion role.
+
+    Split shards stay ``model``. LoRA adapters and generic ``draft-*`` small
+    models ship as their own Hub repos, not companions here, so they are not
+    roles. Audio/speech uses the same ``mmproj`` projector as vision.
+    """
+    name = Path(filename).name.lower()
+    if name.startswith("mmproj"):
+        return ROLE_PROJECTOR
+    if "imatrix" in name:
+        return ROLE_IMATRIX
+    if name.startswith("mtp-"):
+        return ROLE_MTP
+    return ROLE_MODEL
+
+
 def is_mmproj_gguf(filename: str) -> bool:
-    """True for multimodal projector GGUFs (the vision sidecar)."""
-    return Path(filename).name.lower().startswith("mmproj")
+    """True for multimodal projector GGUFs (vision and/or audio via --mmproj)."""
+    return gguf_role(filename) == ROLE_PROJECTOR
 
 
 def is_sidecar_gguf(filename: str) -> bool:
-    """True for non-model companion GGUFs (vision projector, imatrix)."""
-    name = Path(filename).name.lower()
-    return is_mmproj_gguf(name) or "imatrix" in name
+    """True for non-model companions that must not enter the quant catalog.
+
+    Projectors and imatrix files. MTP drafts use ``is_draft_gguf`` so they can
+    still appear as labeled download rows.
+    """
+    return gguf_role(filename) in {ROLE_PROJECTOR, ROLE_IMATRIX}
 
 
 def is_draft_gguf(filename: str) -> bool:
     """True for MTP speculative-decoding draft GGUFs (e.g. mtp-Model-Q8_0.gguf).
 
-    Drafts are selectable downloads, not sidecars: they must appear in the
-    quant/file picker but stay out of the quant catalog, VRAM calibration,
-    and capability/mmproj matching, where they would masquerade as the
-    model's main quant.
+    Drafts are selectable downloads, not catalog quants: they must appear in
+    the file picker but stay out of the quant catalog, VRAM calibration, and
+    projector matching, where they would masquerade as the model's main quant.
     """
-    return Path(filename).name.lower().startswith("mtp-")
+    return gguf_role(filename) == ROLE_MTP
+
+
+def is_runtime_addon(filename: str) -> bool:
+    """True for companions llama.cpp loads at launch (projector or MTP draft)."""
+    return gguf_role(filename) in {ROLE_PROJECTOR, ROLE_MTP}
+
+
+def is_hidden_sidecar(filename: str) -> bool:
+    """True for companions that should not appear as Hub/picker rows (imatrix)."""
+    return gguf_role(filename) == ROLE_IMATRIX
 
 
 def quant_from_filename(filename: str) -> str:

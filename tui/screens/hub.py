@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -31,13 +32,13 @@ from tui.data.capabilities import (
     badge_markup,
     capabilities_from_hf,
     capabilities_from_payload,
+    extra_download_files,
     is_mtp_enabled,
     is_vision_enabled,
     mmproj_filename_for,
     mtp_draft_ready,
     mtp_filename_for,
-    pick_mmproj_filename,
-    pick_mtp_filename,
+    projector_control_label,
     resolve_capabilities,
     vision_projector_ready,
 )
@@ -555,8 +556,16 @@ class HubScreen(Screen):
         self._repo_load_id += 1
         self.mode = "files"
         self.selected_repo = repo
-        self.files = []
-        self._file_caps = ModelCapabilities()
+        self.files = [HubFile(path=name, size=0) for name in repo.filenames]
+        self._file_caps = resolve_capabilities(
+            hf=capabilities_from_hf(
+                tags=repo.tags,
+                pipeline_tag=repo.pipeline_tag,
+                repo_id=repo.id,
+            ),
+            files=repo.filenames,
+            repo_id=repo.id,
+        )
         self.query_one("#context-controls").display = True
         self.query_one("#back", Button).disabled = False
         self.query_one("#select", Button).label = "Download file"
@@ -660,6 +669,7 @@ class HubScreen(Screen):
             baselines_path=self.baselines_path,
             models_dir=self.models_dir,
             author=self.selected_repo.author if self.selected_repo else "",
+            caps=self._file_caps,
         )
         for row in self._rows:
             try:
@@ -723,7 +733,10 @@ class HubScreen(Screen):
             return
         params = self._vision_params()
         name, on_disk = vision_projector_ready(params, self.models_dir, self.files)
-        show = bool(self._file_caps.vision or name)
+        show = bool(self._file_caps.vision or self._file_caps.audio or name)
+        kind = projector_control_label(self._file_caps)
+        label.update(f"{kind}:")
+        button.label = f"Download {kind.lower()}"
         label.display = show
         toggle.display = show
         button.display = show and bool(name) and not on_disk
@@ -849,7 +862,7 @@ class HubScreen(Screen):
         table.clear(columns=True)
         table.add_column("Disk", width=4, key="disk")
         table.add_column("Repo / author", width=30, key="repo")
-        table.add_column("Caps", width=16, key="caps")
+        table.add_column("Caps", width=24, key="caps")
         table.add_column("Context", width=9, key="context")
         table.add_column("Size", width=11, key="size")
         table.add_column("Downloads", width=12, key="downloads")
@@ -860,7 +873,9 @@ class HubScreen(Screen):
                 hf=capabilities_from_hf(
                     tags=repo.tags,
                     pipeline_tag=repo.pipeline_tag,
+                    repo_id=repo.id,
                 ),
+                files=repo.filenames,
                 repo_id=repo.id,
             )
             table.add_row(
@@ -892,6 +907,7 @@ class HubScreen(Screen):
             baselines_path=self.baselines_path,
             models_dir=self.models_dir,
             author=self.selected_repo.author if self.selected_repo else "",
+            caps=self._file_caps,
         )
         for row in self._rows:
             table.add_row(*quant_file_row_cells(row), key=row.path)
@@ -979,9 +995,17 @@ class HubScreen(Screen):
             self._log(f"[bold $error]{error}[/]")
             return
         self.files = files
+        if self.selected_repo is not None:
+            listed = tuple(item.path for item in files) or self.selected_repo.filenames
+            updated = replace(self.selected_repo, filenames=listed)
+            self.selected_repo = updated
+            self.repos = [
+                updated if item.id == updated.id else item for item in self.repos
+            ]
         hf_caps = capabilities_from_hf(
             tags=self.selected_repo.tags if self.selected_repo else (),
             pipeline_tag=self.selected_repo.pipeline_tag if self.selected_repo else None,
+            repo_id=self.selected_repo.id if self.selected_repo else "",
         )
         if info:
             hf_caps = hf_caps.merge_fallback(capabilities_from_payload(info))
@@ -1125,20 +1149,13 @@ class HubScreen(Screen):
             return
         display_name, clone_from = profile
         all_names = [f.path for f in self.files]
-        extra_files: list[str] = []
-        from tui.data.quant import is_draft_gguf, is_mmproj_gguf
-
-        if not is_mmproj_gguf(filename) and not is_draft_gguf(filename):
-            mmproj = pick_mmproj_filename(self.files, quant_filename=filename)
-            if mmproj:
-                local_mmproj = self.models_dir / self.selected_repo.author / mmproj
-                if not local_mmproj.is_file():
-                    extra_files.append(mmproj)
-            mtp = pick_mtp_filename(self.files, quant_filename=filename)
-            if mtp:
-                local_mtp = self.models_dir / self.selected_repo.author / mtp
-                if not local_mtp.is_file():
-                    extra_files.append(mtp)
+        extra_files = extra_download_files(
+            self.files,
+            quant_filename=filename,
+            models_dir=self.models_dir,
+            author=self.selected_repo.author,
+            params=self._vision_params(),
+        )
         plan = build_download_plan(
             self.selected_repo.id,
             filename,

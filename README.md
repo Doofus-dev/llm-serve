@@ -137,6 +137,16 @@ Need the `hf` CLI for browse/download. Local models still work without it.
 
 File tables show estimated VRAM and tok/s for this GPU, plus **Act.** columns from runs saved in `tui-baselines.json` (written while a server is up). Context and GPU-offload sliders change the estimates. You can start several quant downloads at once from Hub or the quant picker (● on disk, ⬇ downloading, — missing); they keep running if you close those screens. Gated repos need **Login** (Hugging Face token) — that is not API auth for llama-server.
 
+**Caps** on the repo list (and the file view title) mark add-ons that actually ship as companion GGUFs in the same Hugging Face repo. Downloading a quant also pulls any missing runtime add-on. File rows are labeled so they are not mistaken for extra quants.
+
+| Add-on | Files | When to download | Launch flag |
+|--------|-------|------------------|-------------|
+| **Vision / audio projector** | `mmproj-*.gguf` | Needed for image and/or speech input. One projector per process; llama.cpp cannot load two. Audio models (Ultravox, Voxtral, Qwen-ASR, Omni) use this same file, not a separate vocoder. | `--mmproj` (Vision/Audio toggle) |
+| **MTP draft** | `mtp-*.gguf` (sometimes under `MTP/`) | Speculative decoding for models that publish a multi-token prediction head. Download it with the quant if you want MTP; the Hub **mtp** chip is the signal. | `-md` and `--spec-type draft-mtp` (MTP toggle) |
+| **imatrix** | `*imatrix*` | Do not download. Calibration data for making quants, not a runtime file. Stripped from the catalog. | none |
+
+LoRA adapters (`--lora`) and generic `draft-*` small models live in their own Hub repos, not as companions next to a base GGUF, so they are not auto-attached here. Split GGUF shards are grouped as one quant, not as add-ons.
+
 ### Benchmark
 
 **B** opens a Benchmark page that runs this checkout's `llama-bench` against GGUFs already in the catalog (no live `llama-server`, no Hub download). Knobs use the same names as the rest of the TUI: **Prompt tokens**, **Gen tokens**, **Repeats** (llama-bench `-p` / `-n` / `-r`, defaults 512 / 128 / 5). **Run selected** (or **R**) runs the picked rows, or the cursor row if nothing is picked. **Run all** (Ctrl+R) queues every local GGUF. Either way they run **one at a time**. Each saved row stores Prompt/Gen/Repeats plus Prompt t/s, Gen t/s, gpu_layers, and threads. Re-running the same knobs on this host rewrites that row; change any knob and a new row is kept so you can compare. Results sort fastest Gen t/s first. File: `tui-benchmarks.json` in the shared data dir, not the live STATUS sampler in `tui-baselines.json`. Missing `llama-bench` fails loudly.

@@ -1,4 +1,4 @@
-"""Vision and tool-call capability detection for Hub/quant UI and launch."""
+"""Hub add-on taxonomy: projectors, MTP drafts, and capability badges."""
 
 from __future__ import annotations
 
@@ -9,7 +9,16 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from tui.data.hf import HubFile
 from tui.data.models_json import coerce_rel_paths, quant_entry_rel_paths
-from tui.data.quant import family_key, is_draft_gguf, is_mmproj_gguf, is_sidecar_gguf
+from tui.data.quant import (
+    ROLE_IMATRIX,
+    ROLE_MTP,
+    ROLE_PROJECTOR,
+    family_key,
+    is_draft_gguf,
+    is_mmproj_gguf,
+    is_runtime_addon,
+    is_sidecar_gguf,
+)
 
 VISION_PIPELINE_TAGS = frozenset({
     "image-text-to-text",
@@ -41,6 +50,115 @@ TOOL_TAGS = frozenset({
     "tool-calling",
 })
 
+AUDIO_PIPELINE_TAGS = frozenset({
+    "audio-text-to-text",
+    "automatic-speech-recognition",
+    "text-to-audio",
+    "text-to-speech",
+    "audio-to-audio",
+    "any-to-any",
+})
+
+AUDIO_TAGS = frozenset({
+    "audio",
+    "speech",
+    "asr",
+    "tts",
+    "ultravox",
+    "voxtral",
+    "audio-text-to-text",
+    "automatic-speech-recognition",
+    "any-to-any",
+})
+
+# Same-repo companion GGUFs, not standalone adapter/draft Hub repos.
+MTP_TAGS = frozenset({
+    "mtp",
+    "speculative-decoding",
+    "fastmtp",
+    "draft-mtp",
+})
+
+MTP_REPO_RE = re.compile(r"(^|[-_/])mtp($|[-_/])", re.IGNORECASE)
+AUDIO_REPO_RE = re.compile(
+    r"(ultravox|voxtral|whisper|qwen2-audio|qwen2\.5-omni|qwen2-5-omni|"
+    r"[-_/]asr[-_/]|(^|[-_/])asr($|[-_/]))",
+    re.IGNORECASE,
+)
+
+@dataclass(frozen=True)
+class AddonKind:
+    """One llama.cpp companion that can ship next to GGUF quants.
+
+    Inventory (same-repo files only — do not add theoretical slots):
+    - projector (``mmproj-*.gguf``, ``--mmproj``): vision and/or audio. One
+      file, one flag; llama.cpp cannot load two projectors.
+    - mtp (``mtp-*.gguf``, ``-md --spec-type draft-mtp``): speculative draft.
+    - imatrix (``*imatrix*``): quant calibration. Never a runtime download.
+    LoRA adapters (``--lora``) and generic ``draft-*`` small models live in
+    their own Hub repos, not as companions of a base GGUF. TTS vocoders are
+    not published as separate GGUFs; audio goes through mmproj.
+    """
+
+    id: str
+    role: str
+    label: str
+    launch_flag: str | None
+    extra_flags: tuple[str, ...]
+    file_key: str
+    enabled_key: str
+    default_enabled: bool
+    togglable: bool
+    downloadable: bool
+    show_in_file_table: bool
+
+
+ADDON_KINDS: tuple[AddonKind, ...] = (
+    AddonKind(
+        id="projector",
+        role=ROLE_PROJECTOR,
+        label="vision",
+        launch_flag="--mmproj",
+        extra_flags=(),
+        file_key="mmproj",
+        enabled_key="vision_enabled",
+        default_enabled=True,
+        togglable=True,
+        downloadable=True,
+        show_in_file_table=True,
+    ),
+    AddonKind(
+        id="mtp",
+        role=ROLE_MTP,
+        label="MTP",
+        launch_flag="-md",
+        extra_flags=("--spec-type", "draft-mtp"),
+        file_key="mtp_file",
+        enabled_key="mtp_enabled",
+        default_enabled=False,
+        togglable=True,
+        downloadable=True,
+        show_in_file_table=True,
+    ),
+    AddonKind(
+        id="imatrix",
+        role=ROLE_IMATRIX,
+        label="imatrix",
+        launch_flag=None,
+        extra_flags=(),
+        file_key="",
+        enabled_key="",
+        default_enabled=False,
+        togglable=False,
+        downloadable=False,
+        show_in_file_table=False,
+    ),
+)
+
+ADDON_BY_ID = {kind.id: kind for kind in ADDON_KINDS}
+ADDON_BY_ROLE = {kind.role: kind for kind in ADDON_KINDS}
+RUNTIME_ADDONS = tuple(kind for kind in ADDON_KINDS if kind.downloadable)
+
 # Families llama.cpp routinely serves with --jinja tool parsers.
 TOOL_FAMILY_RE = re.compile(
     r"(qwen|llama|mistral|mixtral|gemma|glm|deepseek|kimi|phi-?\d|"
@@ -60,17 +178,28 @@ MMPROJ_PREF = (
 @dataclass(frozen=True)
 class ModelCapabilities:
     vision: bool = False
+    audio: bool = False
     tools: bool = False
     mtp: bool = False
     vision_source: str = ""
+    audio_source: str = ""
     tools_source: str = ""
     mtp_source: str = ""
 
     def merge_fallback(self, other: ModelCapabilities) -> ModelCapabilities:
-        """Keep HF/API detections; fill gaps from file/family fallback."""
+        """Keep HF/API detections; fill gaps from file/family fallback.
+
+        An audio-only Hub tag means the mmproj is the speech projector, so a
+        file-based vision fallback must not override that.
+        """
+        audio = self.audio
+        audio_source = self.audio_source
+        if not audio and other.audio:
+            audio = True
+            audio_source = other.audio_source
         vision = self.vision
         vision_source = self.vision_source
-        if not vision and other.vision:
+        if not vision and other.vision and not (audio and not self.vision):
             vision = True
             vision_source = other.vision_source
         tools = self.tools
@@ -85,15 +214,22 @@ class ModelCapabilities:
             mtp_source = other.mtp_source
         return ModelCapabilities(
             vision=vision,
+            audio=audio,
             tools=tools,
             mtp=mtp,
             vision_source=vision_source,
+            audio_source=audio_source,
             tools_source=tools_source,
             mtp_source=mtp_source,
         )
 
     def to_json(self) -> dict[str, bool]:
-        return {"vision": self.vision, "tools": self.tools, "mtp": self.mtp}
+        return {
+            "vision": self.vision,
+            "audio": self.audio,
+            "tools": self.tools,
+            "mtp": self.mtp,
+        }
 
 
 def badge_markup(caps: ModelCapabilities) -> str:
@@ -101,11 +237,32 @@ def badge_markup(caps: ModelCapabilities) -> str:
     parts: list[str] = []
     if caps.vision:
         parts.append("[reverse cyan] vision [/]")
+    if caps.audio:
+        parts.append("[reverse blue] audio [/]")
     if caps.mtp:
         parts.append("[reverse yellow] mtp [/]")
     if caps.tools:
         parts.append("[reverse magenta] tools [/]")
     return " ".join(parts) if parts else "[dim]—[/]"
+
+
+def addon_row_label(role: str, caps: ModelCapabilities | None = None) -> str:
+    """File-table prefix for a companion GGUF (MTP, vision, audio)."""
+    kind = ADDON_BY_ROLE.get(role)
+    if role == ROLE_PROJECTOR:
+        if caps and caps.audio and not caps.vision:
+            return "audio"
+        return "vision"
+    if kind is not None:
+        return kind.label
+    return role
+
+
+def projector_control_label(caps: ModelCapabilities) -> str:
+    """Hub/picker toggle name for the single --mmproj slot."""
+    if caps.audio and not caps.vision:
+        return "Audio"
+    return "Vision"
 
 
 def _lower_tags(tags: Iterable[object]) -> set[str]:
@@ -117,8 +274,9 @@ def capabilities_from_hf(
     tags: Sequence[object] = (),
     pipeline_tag: str | None = None,
     card_data: Mapping[str, Any] | None = None,
+    repo_id: str = "",
 ) -> ModelCapabilities:
-    """Primary detector: Hub tags / pipeline_tag / model card."""
+    """Primary detector: Hub tags / pipeline_tag / model card / repo id."""
     collected = _lower_tags(tags)
     pipe = (pipeline_tag or "").strip().lower()
     if isinstance(card_data, Mapping):
@@ -128,13 +286,24 @@ def capabilities_from_hf(
             pipe = card_pipe
         collected |= _lower_tags(card_data.get("tasks") or [])
 
+    haystack = repo_id
     vision = pipe in VISION_PIPELINE_TAGS or bool(collected & VISION_TAGS)
+    audio = (
+        pipe in AUDIO_PIPELINE_TAGS
+        or bool(collected & AUDIO_TAGS)
+        or bool(AUDIO_REPO_RE.search(haystack))
+    )
     tools = bool(collected & TOOL_TAGS)
+    mtp = bool(collected & MTP_TAGS) or bool(MTP_REPO_RE.search(haystack))
     return ModelCapabilities(
         vision=vision,
+        audio=audio,
         tools=tools,
+        mtp=mtp,
         vision_source="hf" if vision else "",
+        audio_source="hf" if audio else "",
         tools_source="hf" if tools else "",
+        mtp_source="hf" if mtp else "",
     )
 
 
@@ -145,11 +314,34 @@ def capabilities_from_payload(data: Mapping[str, Any]) -> ModelCapabilities:
     card = data.get("cardData") or data.get("card_data")
     if not isinstance(card, Mapping):
         card = None
-    return capabilities_from_hf(
+    sibling_files = _payload_filenames(data)
+    caps = capabilities_from_hf(
         tags=tags,
         pipeline_tag=str(data.get("pipeline_tag") or "") or None,
         card_data=card,
+        repo_id=str(data.get("id") or ""),
     )
+    if sibling_files:
+        caps = caps.merge_fallback(
+            capabilities_from_files(sibling_files, repo_id=str(data.get("id") or ""))
+        )
+    return caps
+
+
+def _payload_filenames(data: Mapping[str, Any]) -> list[str]:
+    names: list[str] = []
+    for key in ("siblings", "files", "filenames"):
+        raw = data.get(key)
+        if not isinstance(raw, (list, tuple)):
+            continue
+        for item in raw:
+            if isinstance(item, str) and item.lower().endswith(".gguf"):
+                names.append(item)
+            elif isinstance(item, Mapping):
+                name = str(item.get("rfilename") or item.get("path") or "")
+                if name.lower().endswith(".gguf"):
+                    names.append(name)
+    return names
 
 
 def capabilities_from_files(
@@ -157,21 +349,24 @@ def capabilities_from_files(
     *,
     repo_id: str = "",
 ) -> ModelCapabilities:
-    """Offline fallback: mmproj sidecar => vision; known family => tools."""
+    """Offline fallback: mmproj => vision; mtp-* => MTP; known family => tools."""
     names = [
         item.path if isinstance(item, HubFile) else str(item)
         for item in files
-        if not is_draft_gguf(item.path if isinstance(item, HubFile) else str(item))
     ]
-    vision = any(is_mmproj_gguf(name) for name in names)
-    mtp = any(is_draft_gguf(item.path if isinstance(item, HubFile) else str(item)) for item in files)
+    projector = any(is_mmproj_gguf(name) for name in names)
+    mtp = any(is_draft_gguf(name) for name in names)
     haystack = " ".join([repo_id, *names])
+    audio = bool(AUDIO_REPO_RE.search(haystack))
+    vision = projector and not audio
     tools = bool(TOOL_FAMILY_RE.search(haystack))
     return ModelCapabilities(
         vision=vision,
+        audio=audio,
         tools=tools,
         mtp=mtp,
         vision_source="files" if vision else "",
+        audio_source="files" if audio else "",
         tools_source="family" if tools else "",
         mtp_source="files" if mtp else "",
     )
@@ -182,13 +377,16 @@ def capabilities_from_stored(params: Mapping[str, Any]) -> ModelCapabilities:
     if not isinstance(raw, dict):
         return ModelCapabilities()
     vision = bool(raw.get("vision"))
+    audio = bool(raw.get("audio"))
     tools = bool(raw.get("tools"))
     mtp = bool(raw.get("mtp"))
     return ModelCapabilities(
         vision=vision,
+        audio=audio,
         tools=tools,
         mtp=mtp,
         vision_source="stored" if vision else "",
+        audio_source="stored" if audio else "",
         tools_source="stored" if tools else "",
         mtp_source="stored" if mtp else "",
     )
@@ -251,7 +449,7 @@ def nav_capability_icons(
     files, repo_id = identity_capability_inputs(params)
     caps = resolve_capabilities(params=params, files=files, repo_id=repo_id)
     vision_state = None
-    if caps.vision:
+    if caps.vision or caps.audio:
         _, ready = vision_projector_ready(params, models_dir, files)
         if not ready:
             vision_state = "missing"
@@ -626,4 +824,49 @@ def is_mtp_enabled(params: Mapping[str, Any] | None) -> bool:
         if str(raw).strip().lower() in {"1", "true", "yes", "on"}:
             return True
     return False
+
+
+def pick_addon_filename(
+    kind_id: str,
+    files: Sequence[HubFile | str],
+    *,
+    quant_filename: str | None = None,
+) -> str | None:
+    """Pick the companion file for a runtime add-on kind."""
+    if kind_id == "projector":
+        return pick_mmproj_filename(files, quant_filename=quant_filename)
+    if kind_id == "mtp":
+        return pick_mtp_filename(files, quant_filename=quant_filename)
+    return None
+
+
+def extra_download_files(
+    files: Sequence[HubFile | str],
+    *,
+    quant_filename: str,
+    models_dir: Path,
+    author: str = "",
+    params: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Companions to fetch with a main quant (projector and/or MTP draft).
+
+    Skip when the selected row is itself an add-on. Skip files already on disk.
+    """
+    if is_runtime_addon(quant_filename) or is_sidecar_gguf(quant_filename):
+        return []
+    extras: list[str] = []
+    for kind in RUNTIME_ADDONS:
+        name = pick_addon_filename(kind.id, files, quant_filename=quant_filename)
+        if not name and params:
+            name = str(params.get(kind.file_key) or "").strip() or None
+        if not name:
+            continue
+        if author and name.startswith(f"{author}/"):
+            name = name[len(author) + 1 :]
+        local = models_dir / author / name if author else models_dir / name
+        if local.is_file():
+            continue
+        if name not in extras:
+            extras.append(name)
+    return extras
 

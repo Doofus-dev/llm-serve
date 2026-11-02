@@ -10,7 +10,14 @@ from rich.text import Text
 from tui.data.baselines import load_baselines, lookup_baseline
 from tui.data.gpu import GPUStats
 from tui.data.hf import HubFile, fmt_size
-from tui.data.quant import is_draft_gguf, is_sidecar_gguf, quant_from_filename
+from tui.data.capabilities import ModelCapabilities, addon_row_label
+from tui.data.quant import (
+    ROLE_MODEL,
+    gguf_role,
+    is_hidden_sidecar,
+    is_runtime_addon,
+    quant_from_filename,
+)
 from tui.data.vram import (
     classify_vram,
     estimate_gen_tps_calibrated,
@@ -34,6 +41,8 @@ class QuantFileRow:
     est_tps: str
     act_tps: str
     is_draft: bool = False
+    addon_kind: str | None = None
+    addon_label: str = ""
 
 
 def local_file_size(models_dir: Path, author: str, filename: str) -> int:
@@ -53,13 +62,18 @@ def build_quant_file_rows(
     baselines_path: Path | None,
     models_dir: Path | None = None,
     author: str = "",
+    caps: ModelCapabilities | None = None,
 ) -> list[QuantFileRow]:
-    """Build quant rows sorted by file size, with VRAM/speed estimates."""
+    """Build quant rows sorted by file size, with VRAM/speed estimates.
+
+    Runtime add-ons (mmproj, MTP) are labeled rows, not mystery quants.
+    Imatrix calibration files stay hidden.
+    """
     runs = load_baselines(baselines_path) if baselines_path else []
     rows: list[QuantFileRow] = []
 
     for item in files:
-        if is_sidecar_gguf(item.path):
+        if is_hidden_sidecar(item.path):
             continue
         downloaded = False
         size = item.size
@@ -68,6 +82,29 @@ def build_quant_file_rows(
             downloaded = local_size > 0
             if downloaded and size <= 0:
                 size = local_size
+
+        role = gguf_role(item.path)
+        addon_kind = role if role != ROLE_MODEL else None
+        addon_label = addon_row_label(role, caps) if addon_kind else ""
+        if is_runtime_addon(item.path):
+            dash = Text("—")
+            rows.append(
+                QuantFileRow(
+                    path=item.path,
+                    quant_id=quant_from_filename(item.path),
+                    size=size,
+                    downloaded=downloaded,
+                    vram_cell=dash,
+                    act_vram_off="—",
+                    act_vram_on="—",
+                    est_tps="—",
+                    act_tps="—",
+                    is_draft=role == "mtp",
+                    addon_kind=addon_kind,
+                    addon_label=addon_label,
+                )
+            )
+            continue
 
         estimate = classify_vram(
             estimate_vram_calibrated(
@@ -126,7 +163,9 @@ def build_quant_file_rows(
                 act_vram_on=act_vram_on,
                 est_tps=fmt_tps(tps),
                 act_tps=act_tps,
-                is_draft=is_draft_gguf(item.path),
+                is_draft=False,
+                addon_kind=None,
+                addon_label="",
             )
         )
 
@@ -154,7 +193,11 @@ def fmt_disk_cell(*, downloaded: bool, transferring: bool = False) -> str:
 
 def quant_file_row_cells(row: QuantFileRow) -> tuple:
     """Cell values for the shared Disk + estimate file table."""
-    label = f"[dim]draft · {row.path}[/]" if row.is_draft else row.path
+    if row.addon_kind:
+        tag = row.addon_label or row.addon_kind
+        label = f"[bold]{tag}[/] · {row.path}"
+    else:
+        label = row.path
     return (
         fmt_downloaded_cell(row.downloaded),
         label,
