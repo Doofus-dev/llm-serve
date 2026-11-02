@@ -248,8 +248,7 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Quant", grid)
             self.assertIn("Preset", grid)
             self.assertIn("Max context", grid)
-            # Wide layout (width >= 100) puts identity and runtime side by side
-            # without a "RUNTIME CONFIG" header; narrow layout has one.
+            self.assertIn("RUNTIME CONFIG", grid)
             self.assertIn("ctx", grid)
             self.assertIn("gpu_layers", grid)
             self.assertIn(f"[{ERR}]16384", grid)
@@ -312,6 +311,37 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
         identity_block = narrow.split("[bold dim]RUNTIME CONFIG[/]", 1)[0]
         self.assertNotIn(f"[{OK}]", identity_block)
         self.assertNotIn(f"[{ERR}]", identity_block)
+
+    def test_identity_and_runtime_share_column_widths(self) -> None:
+        identity = {
+            "display": "Demo",
+            "active_quant": "Q4_K_M",
+            "file": "demo/Demo-Q4_K_M.gguf",
+        }
+        left = Preset(
+            slot=2,
+            name="small",
+            params={"ctx": 8192, "gpu_layers": 99, "cache_k": "q4_0"},
+        )
+        right = Preset(
+            slot=1,
+            name="default",
+            params={"ctx": 16384, "gpu_layers": 99, "cache_k": "q4_0"},
+        )
+        grid = build_preset_column((identity, left), (identity, right), None)
+        import re
+
+        def plain(line: str) -> str:
+            return re.sub(r"\[[^\]]*\]", "", line)
+
+        model_line = next(plain(line) for line in grid.splitlines() if "Model" in line)
+        layers_line = next(
+            plain(line) for line in grid.splitlines() if "gpu_layers" in line
+        )
+        self.assertEqual(
+            model_line.index("Demo"),
+            layers_line.index("99"),
+        )
 
     async def test_cross_model_shows_caveat(self) -> None:
         write_pid_file(

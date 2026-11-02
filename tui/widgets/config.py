@@ -102,22 +102,34 @@ def _paired_markup(rows: list[tuple[str, object]]) -> list[str]:
     return lines
 
 
+def _plain_cell(value: object) -> str:
+    return "" if value == "" else str(value)
+
+
+def _cell_width(value: object) -> int:
+    text = _plain_cell(value)
+    return len(text) if text else 1
+
+
 def _markup_pair(
     label: str,
     left_value: object,
     right_value: object,
     label_w: int,
     left_w: int,
+    right_w: int | None = None,
     *,
     color_diff: bool = False,
 ) -> str:
     """One aligned row: label, left value, right value with computed column widths."""
-    left_str = "" if left_value == "" else str(left_value)
-    right_str = "" if right_value == "" else str(right_value)
-    # Pad plain text to column width, then apply markup
+    left_str = _plain_cell(left_value)
+    right_str = _plain_cell(right_value)
     label_padded = f"{label:<{label_w}}"
-    left_padded = f"{left_str:<{left_w}}" if left_str else "—"
-    right_padded = right_str
+    left_padded = f"{left_str:<{left_w}}" if left_str else f"{'—':<{left_w}}"
+    if right_w is None:
+        right_padded = right_str if right_str else "—"
+    else:
+        right_padded = f"{right_str:<{right_w}}" if right_str else f"{'—':<{right_w}}"
     label_part = f"[{ACCENT}]{escape(label_padded)}[/]"
     left_style = WARN_STYLE
     right_style = WARN_STYLE
@@ -130,20 +142,25 @@ def _markup_pair(
             if right_style == WARN
             else (ERR if right_style == OK else OK)
         )
-    left_part = f"[{left_style}]{escape(left_padded)}[/]" if left_str else "[dim]—[/]"
-    right_part = f"[{right_style}]{escape(right_padded)}[/]" if right_str else "[dim]—[/]"
+    left_part = f"[{left_style}]{escape(left_padded)}[/]" if left_str else f"[dim]{'—':<{left_w}}[/]"
+    if right_str:
+        right_part = f"[{right_style}]{escape(right_padded)}[/]"
+    else:
+        pad = right_w if right_w is not None else 1
+        right_part = f"[dim]{'—':<{pad}}[/]"
     return f"{label_part}  {left_part}  {right_part}"
 
 
-def build_preset_column(
+def preset_compare_rows(
     left: tuple[dict, Preset],
     right: tuple[dict, Preset],
     models_dir: Path | None,
-) -> str:
-    """Side-by-side rich markup: each row shows label, left value, right value."""
+) -> tuple[list[tuple[str, object, object]], list[tuple[str, object, object]]]:
+    """Identity rows then runtime rows as (label, left, right)."""
     left_fields = _identity_fields(left[0], left[1], models_dir)
     right_fields = _identity_fields(right[0], right[1], models_dir)
     field_names = ("Model", "Quant", "Preset", "Author", "Max context", "File")
+    identity_rows = [(name, left_fields[name], right_fields[name]) for name in field_names]
     left_settings = _runtime_settings(left[0], left[1])
     right_settings = _runtime_settings(right[0], right[1])
     rows: dict[str, tuple[object, object]] = {key: (value, "") for key, value in left_settings}
@@ -152,29 +169,59 @@ def build_preset_column(
             rows[key] = (rows[key][0], value)
         else:
             rows[key] = ("", value)
-
-    # Compute column widths separately for identity and runtime sections
-    identity_rows = [(name, left_fields[name], right_fields[name]) for name in field_names]
     runtime_rows = [(key, lv, rv) for key, (lv, rv) in rows.items()]
+    return identity_rows, runtime_rows
 
-    id_label_w = max(len(name) for name, _, _ in identity_rows)
-    id_left_w = max(len(str(lv)) if lv != "" else 1 for _, lv, _ in identity_rows)
-    id_left_w = max(id_left_w, len("—"))
 
-    rt_label_w = max(len(name) for name, _, _ in runtime_rows) if runtime_rows else 0
-    rt_left_w = max(
-        (len(str(lv)) if lv != "" else 1 for _, lv, _ in runtime_rows), default=1
-    )
-    rt_left_w = max(rt_left_w, len("—"))
+def compare_column_widths(
+    *row_groups: list[tuple[str, object, object]],
+    extra_labels: tuple[str, ...] = (),
+    extra_left: tuple[str, ...] = (),
+    extra_right: tuple[str, ...] = (),
+) -> tuple[int, int, int]:
+    """One label/left/right width for stacked compare sections."""
+    labels = list(extra_labels)
+    lefts: list[object] = list(extra_left)
+    rights: list[object] = list(extra_right)
+    for group in row_groups:
+        for name, lv, rv in group:
+            labels.append(name)
+            lefts.append(lv)
+            rights.append(rv)
+    label_w = max((len(str(name)) for name in labels), default=1)
+    left_w = max((_cell_width(value) for value in lefts), default=1)
+    right_w = max((_cell_width(value) for value in rights), default=1)
+    left_w = max(left_w, 1)
+    right_w = max(right_w, 1)
+    return label_w, left_w, right_w
+
+
+def build_preset_column(
+    left: tuple[dict, Preset],
+    right: tuple[dict, Preset],
+    models_dir: Path | None,
+    *,
+    widths: tuple[int, int, int] | None = None,
+) -> str:
+    """Side-by-side rich markup: each row shows label, left value, right value.
+
+    Identity (model/quant/preset) and runtime use the same column widths so
+    the top block lines up with the columns below.
+    """
+    identity_rows, runtime_rows = preset_compare_rows(left, right, models_dir)
+    if widths is None:
+        label_w, left_w, right_w = compare_column_widths(identity_rows, runtime_rows)
+    else:
+        label_w, left_w, right_w = widths
 
     lines: list[str] = []
     for name, lv, rv in identity_rows:
-        lines.append(_markup_pair(name, lv, rv, id_label_w, id_left_w))
+        lines.append(_markup_pair(name, lv, rv, label_w, left_w, right_w))
     lines.append("")
     lines.append("[bold dim]RUNTIME CONFIG[/]")
     for key, lv, rv in runtime_rows:
         lines.append(
-            _markup_pair(key, lv, rv, rt_label_w, rt_left_w, color_diff=True)
+            _markup_pair(key, lv, rv, label_w, left_w, right_w, color_diff=True)
         )
     return "\n".join(lines)
 

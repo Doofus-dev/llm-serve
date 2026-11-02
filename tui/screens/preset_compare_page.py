@@ -16,6 +16,7 @@ from rich.text import Text
 
 from tui.data.baselines import load_baselines
 from tui.data.compare_metrics import (
+    _plain_metric_text,
     compare_presets_metrics,
     format_metrics_table,
     resolve_baseline,
@@ -28,7 +29,11 @@ from tui.data.presets import (
     list_presets_for_quant,
 )
 from tui.widgets.action_bar import ActionBar
-from tui.widgets.config import build_preset_column, build_preset_column_wide
+from tui.widgets.config import (
+    build_preset_column,
+    compare_column_widths,
+    preset_compare_rows,
+)
 
 
 @dataclass
@@ -108,11 +113,11 @@ class PresetComparePage(ModalScreen[None]):
     }
     #pcp-metrics {
         height: auto;
-        padding: 1 2;
+        padding: 0 1;
         color: $foreground;
         border: round $border;
         background: $panel;
-        margin-bottom: 1;
+        margin-bottom: 0;
     }
     #pcp-help {
         height: auto;
@@ -236,31 +241,13 @@ class PresetComparePage(ModalScreen[None]):
         else:
             status.update("")
 
-        config_title.update(
-            Text(
-                f"{self.left.title}  vs  {self.right.title}",
-                style="bold cyan",
-            )
+        left_pair = (self.left.identity, self.left.preset)
+        right_pair = (self.right.identity, self.right.preset)
+        identity_rows, runtime_rows = preset_compare_rows(
+            left_pair, right_pair, self.models_dir
         )
-        # Use two-column layout when terminal is wide enough
-        width = self.app.size.width
-        if width >= 100:
-            config_grid.update(
-                build_preset_column_wide(
-                    (self.left.identity, self.left.preset),
-                    (self.right.identity, self.right.preset),
-                    self.models_dir,
-                    width,
-                )
-            )
-        else:
-            config_grid.update(
-                build_preset_column(
-                    (self.left.identity, self.left.preset),
-                    (self.right.identity, self.right.preset),
-                    self.models_dir,
-                )
-            )
+        extra_left = (self.left.title,)
+        extra_right = (self.right.title,)
 
         baselines = (
             load_baselines(self.baselines_path) if self.baselines_path else []
@@ -289,11 +276,41 @@ class PresetComparePage(ModalScreen[None]):
             live=self.live if self.right.role == "running" else None,
             history=self.history if self.right.role == "running" else None,
         )
+        metric_rows = compare_presets_metrics(left_run, right_run)
+        extra_labels = ("Metric",) + tuple(str(row["name"]) for row in metric_rows)
+        extra_left = extra_left + tuple(
+            _plain_metric_text(row["left_value"], row["format"]) for row in metric_rows
+        )
+        extra_right = extra_right + tuple(
+            _plain_metric_text(row["right_value"], row["format"]) for row in metric_rows
+        )
+        widths = compare_column_widths(
+            identity_rows,
+            runtime_rows,
+            extra_labels=extra_labels,
+            extra_left=extra_left,
+            extra_right=extra_right,
+        )
+        config_title.update(
+            Text(
+                f"{self.left.title}  vs  {self.right.title}",
+                style="bold cyan",
+            )
+        )
+        config_grid.update(
+            build_preset_column(
+                left_pair,
+                right_pair,
+                self.models_dir,
+                widths=widths,
+            )
+        )
         metrics.update(
             format_metrics_table(
-                compare_presets_metrics(left_run, right_run),
+                metric_rows,
                 left_label=self.left.title,
                 right_label=self.right.title,
+                widths=widths,
             )
         )
 

@@ -295,11 +295,12 @@ def format_metrics_table(
     *,
     left_label: str = "left",
     right_label: str = "right",
+    widths: tuple[int, int, int] | None = None,
 ) -> str:
     """Rich markup for the measured-metrics comparison table.
 
     Pad plain text to column width, then wrap markup so color tags cannot
-    shift the columns.
+    shift the columns. Optional ``widths`` shares columns with the config grid.
     """
     name_w = max((len(str(row["name"])) for row in rows), default=8)
     name_w = max(name_w, len("Metric"))
@@ -319,6 +320,10 @@ def format_metrics_table(
         ],
         default=1,
     )
+    if widths is not None:
+        name_w = max(name_w, widths[0])
+        left_w = max(left_w, widths[1])
+        right_w = max(right_w, widths[2])
     left_header = f"{left_label:<{left_w}}"
     name_header = f"{'Metric':<{name_w}}"
     header = (
