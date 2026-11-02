@@ -191,8 +191,8 @@ class HelpScreen(ModalScreen[None]):
                     "  from Hugging Face. Caps chips show vision/audio\n"
                     "  (mmproj projector), MTP (mtp- draft), and tools.\n"
                     "  File rows label those add-ons. Downloading a quant\n"
-                    "  also pulls missing projector and MTP files. Toggles\n"
-                    "  pass or skip --mmproj / -md on launch.",
+                    "  also pulls missing projector and MTP files. Enable\n"
+                    "  vision/MTP on the main list or the edit page.",
                     classes="help-tip",
                 )
                 yield Static(

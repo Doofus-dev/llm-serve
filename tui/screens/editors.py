@@ -7,7 +7,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Focus
+from textual.events import Focus, Resize
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widget import Widget
@@ -27,7 +27,13 @@ from tui.data.param_widgets import (
     select_initial_value,
     select_options,
 )
-from tui.data.preset_template import PRESET_PARAM_GROUPS, default_preset_params
+from tui.data.capabilities import projector_control_label, resolve_capabilities
+from tui.data.preset_template import (
+    ADVANCED_PRESET_PARAM_GROUPS,
+    IDENTITY_EDITOR_KEYS,
+    PRESET_PARAM_GROUPS,
+    default_preset_params,
+)
 from tui.data.presets import Preset
 from tui.paths import LOCKED_PARAMS
 from tui.widgets.action_bar import ActionBar
@@ -225,6 +231,54 @@ class ParamEditorMixin:
             return self.name_input
         return next(iter(self.fields.values()), None)
 
+    def _identity_field_specs(self, params: dict) -> list[tuple[str, object, str]]:
+        caps = resolve_capabilities(params=params)
+        kind = projector_control_label(caps)
+        return [
+            ("vision_enabled", params.get("vision_enabled", True), kind),
+            ("mtp_enabled", params.get("mtp_enabled", False), "MTP"),
+            ("mmproj", params.get("mmproj", ""), "mmproj"),
+            ("mtp_file", params.get("mtp_file", ""), "MTP draft"),
+        ]
+
+    def _compose_identity_group(self, params: dict):
+        with Collapsible(title="Identity", collapsed=False):
+            with Vertical(classes="param-group"):
+                for param, value, label in self._identity_field_specs(params):
+                    yield from self._yield_param_field(param, value, label=label)
+
+    def _compose_param_group(
+        self,
+        group_name: str,
+        param_names: list[str],
+        *,
+        collapsed: bool,
+        identity: dict | None = None,
+        max_ctx: int | None = None,
+        preset_params: dict | None = None,
+    ):
+        runtime = preset_params or {}
+        ident = identity or {}
+        with Collapsible(title=group_name, collapsed=collapsed):
+            with Vertical(classes="param-group"):
+                for param in param_names:
+                    if param in LOCKED_PARAMS:
+                        if param == "context_length":
+                            value = max_ctx if max_ctx is not None else ident.get(param, "")
+                        else:
+                            value = ident.get(param, "")
+                        yield from self._yield_param_field(param, value, locked=True)
+                        continue
+                    value = runtime.get(param, "")
+                    if param == "ctx" and max_ctx is not None:
+                        yield from self._yield_param_field(
+                            param,
+                            value,
+                            label=f"ctx  [dim]max {fmt_ctx(max_ctx)}[/]",
+                        )
+                        continue
+                    yield from self._yield_param_field(param, value)
+
 
 class ConfirmDialog(ModalScreen[bool]):
     """Yes/No confirmation dialog."""
@@ -334,8 +388,8 @@ class ParamHelpPanel(Static):
                 panel.remove_class("visible")
 
 
-class ProfileEditor(VerticalScroll):
-    """Edit model profile identity (display name, port, host)."""
+class ProfileEditor(ParamEditorMixin, Vertical):
+    """Edit model profile identity (display name, port, host, vision/MTP)."""
 
     BINDINGS = EDITOR_BINDINGS
 
@@ -346,6 +400,7 @@ class ProfileEditor(VerticalScroll):
         self.registry = registry
         self.on_save_callback = on_save
         self.on_cancel_callback = on_cancel
+        self.fields: dict[str, ParamInput | ParamSelect] = {}
         self.display_input: EditorInput | None = None
         self.port_input: EditorInput | None = None
         self.host_input: EditorInput | None = None
@@ -354,8 +409,10 @@ class ProfileEditor(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Label(
             f"[bold]Edit Profile: {self.params.get('display', self.model_name)}[/bold]  "
-            "[dim]Ctrl+S save · Esc cancel · display name is the llm-serve id[/]"
+            "[dim]Ctrl+S save · Esc cancel · display name is the llm-serve id[/]",
+            classes="editor-title",
         )
+        yield ParamHelpPanel(id="param-help")
         self.display_input = EditorInput(
             value=str(self.params.get("display", "")),
             placeholder="Qwen 3.8",
@@ -364,19 +421,20 @@ class ProfileEditor(VerticalScroll):
         self.port_input = EditorInput(value=str(self.params.get("port", 8081)), id="profile_port")
         self.host_input = EditorInput(value=str(self.params.get("host", "127.0.0.1")), id="profile_host")
         self.notes_input = EditorInput(value=str(self.params.get("notes", "")), id="profile_notes")
-        with Horizontal(classes="profile-row"):
-            yield Label("Display", classes="field-label")
-            yield self.display_input
-        with Horizontal(classes="profile-row"):
-            yield Label("Port", classes="field-label")
-            yield self.port_input
-        with Horizontal(classes="profile-row"):
-            yield Label("Host", classes="field-label")
-            yield self.host_input
-        with Horizontal(classes="profile-row"):
-            yield Label("Notes", classes="field-label")
-            yield self.notes_input
-        yield ParamHelpPanel(id="param-help")
+        with VerticalScroll(id="editor-scroll", classes="editor-body"):
+            with Horizontal(classes="profile-row"):
+                yield Label("Display", classes="field-label")
+                yield self.display_input
+            with Horizontal(classes="profile-row"):
+                yield Label("Port", classes="field-label")
+                yield self.port_input
+            with Horizontal(classes="profile-row"):
+                yield Label("Host", classes="field-label")
+                yield self.host_input
+            with Horizontal(classes="profile-row"):
+                yield Label("Notes", classes="field-label")
+                yield self.notes_input
+            yield from self._compose_identity_group(self.params)
         with ActionBar(classes="editor-actions"):
             yield Button("Save", variant="success", id="save")
             yield Button("Cancel", id="cancel")
@@ -398,6 +456,7 @@ class ProfileEditor(VerticalScroll):
             updated["port"] = port
         updated["host"] = self.host_input.value.strip() if self.host_input else updated.get("host", "127.0.0.1")
         updated["notes"] = self.notes_input.value.strip() if self.notes_input else ""
+        updated.update(self._read_fields())
         self.on_save_callback(updated)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -406,7 +465,11 @@ class ProfileEditor(VerticalScroll):
         elif event.button.id == "save":
             self.save()
 
+    def on_resize(self, event: Resize) -> None:
+        self.set_class(event.size.width < 80, "narrow")
+
     def on_mount(self) -> None:
+        self.set_class(self.size.width < 80, "narrow")
         if self.display_input:
             self.display_input.focus()
 
@@ -428,7 +491,7 @@ class ProfileEditor(VerticalScroll):
             self.on_cancel_callback()
 
 
-class PresetEditor(ParamEditorMixin, VerticalScroll):
+class PresetEditor(ParamEditorMixin, Vertical):
     """Editor panel for a preset (full llama-server params)."""
 
     BINDINGS = EDITOR_BINDINGS
@@ -480,44 +543,42 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
             yield Label(
                 f"[bold][{self.slot}] {self.preset.name}[/bold]  [dim]Ctrl+S this side · F2 help[/]",
                 id=title_id,
+                classes="editor-title",
             )
         else:
             verb = "New" if self.is_new else "Edit"
             yield Label(
                 f"[bold]{verb} Preset: {self.model_name} [{self.slot}][/bold]  "
-                "[dim]Ctrl+S save · Esc cancel · F2 help beside the field[/]"
+                "[dim]Ctrl+S save · Esc cancel · F2 help beside the field[/]",
+                classes="editor-title",
             )
+        yield ParamHelpPanel(
+            id=f"{self.id_prefix}param-help" if self.id_prefix else "param-help"
+        )
         name_id = f"{self.id_prefix}preset_name" if self.id_prefix else "preset_name"
         self.name_input = EditorInput(
             value=self.preset.name, placeholder="preset-name", id=name_id
         )
-        with Horizontal(classes="profile-row"):
-            yield Label("Name", classes="field-label")
-            yield self.name_input
-        yield ParamHelpPanel(id=f"{self.id_prefix}param-help" if self.id_prefix else "param-help")
-
-        for group_name, param_names in PRESET_PARAM_GROUPS.items():
-            with Collapsible(title=group_name, collapsed=False):
-                for i in range(0, len(param_names), 3):
-                    row_params = param_names[i : i + 3]
-                    with Horizontal(classes="param-group-row"):
-                        for param in row_params:
-                            if param in LOCKED_PARAMS:
-                                if param == "context_length":
-                                    value = self.max_ctx if self.max_ctx is not None else self.identity.get(param, "")
-                                else:
-                                    value = self.identity.get(param, "")
-                                yield from self._yield_param_field(param, value, locked=True)
-                                continue
-                            value = self.preset.params.get(param, "")
-                            if param == "ctx" and self.max_ctx is not None:
-                                yield from self._yield_param_field(
-                                    param,
-                                    value,
-                                    label=f"ctx  [dim]max {fmt_ctx(self.max_ctx)}[/]",
-                                )
-                                continue
-                            yield from self._yield_param_field(param, value)
+        scroll_id = None if self.id_prefix else "editor-scroll"
+        with VerticalScroll(id=scroll_id, classes="editor-body"):
+            with Horizontal(classes="profile-row"):
+                yield Label("Name", classes="field-label")
+                yield self.name_input
+            if not self.compare_mode:
+                yield from self._compose_identity_group(self.identity)
+            group_kw = dict(
+                identity=self.identity,
+                max_ctx=self.max_ctx,
+                preset_params=self.preset.params,
+            )
+            for group_name, param_names in PRESET_PARAM_GROUPS.items():
+                yield from self._compose_param_group(
+                    group_name, param_names, collapsed=False, **group_kw
+                )
+            for group_name, param_names in ADVANCED_PRESET_PARAM_GROUPS.items():
+                yield from self._compose_param_group(
+                    group_name, param_names, collapsed=True, **group_kw
+                )
 
         save_id = f"{self.id_prefix}save" if self.id_prefix else "save"
         cancel_id = f"{self.id_prefix}cancel" if self.id_prefix else "cancel"
@@ -543,6 +604,9 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
         for param, val in self._read_fields().items():
             if param in LOCKED_PARAMS:
                 continue
+            if param in IDENTITY_EDITOR_KEYS:
+                self.identity[param] = val
+                continue
             params[param] = val
 
         if self.max_ctx is not None and "ctx" in params:
@@ -565,7 +629,11 @@ class PresetEditor(ParamEditorMixin, VerticalScroll):
 
         self.on_save_callback(name, params)
 
+    def on_resize(self, event: Resize) -> None:
+        self.set_class(event.size.width < 80, "narrow")
+
     def on_mount(self) -> None:
+        self.set_class(self.size.width < 80, "narrow")
         if self.compare_mode:
             return
         first = self._first_focusable_field()

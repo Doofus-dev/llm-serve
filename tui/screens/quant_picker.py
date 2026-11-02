@@ -9,7 +9,7 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Label, ProgressBar, Select, Static, Switch
+from textual.widgets import Button, DataTable, Label, ProgressBar, Select, Static
 
 from tui.data.downloads import DownloadManager, DownloadState
 from tui.data.context_length import (
@@ -27,14 +27,9 @@ from tui.data.capabilities import (
     capabilities_from_payload,
     is_mtp_enabled,
     is_vision_enabled,
-    mmproj_filename_for,
-    mtp_draft_ready,
-    mtp_filename_for,
     pick_mmproj_filename,
     pick_mtp_filename,
-    projector_control_label,
     resolve_capabilities,
-    vision_projector_ready,
 )
 from tui.data.hf import HubFile, fetch_repo_info, list_repo_ggufs, repo_author
 from tui.data.models_json import ModelConfig, Registry, merge_repo_catalog, save_registry
@@ -138,42 +133,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
         align: left middle;
     }
 
-    #vision-label {
-        width: auto;
-        height: 3;
-        content-align: left middle;
-        margin: 0 1 0 0;
-    }
-
-    #vision-toggle {
-        width: auto;
-        height: 3;
-        margin: 0 1 0 0;
-    }
-
-    #download-vision {
-        min-width: 18;
-        margin: 0 1 0 0;
-    }
-
-    #mtp-label {
-        width: auto;
-        height: 3;
-        content-align: left middle;
-        margin: 0 1 0 0;
-    }
-
-    #mtp-toggle {
-        width: auto;
-        height: 3;
-        margin: 0 1 0 0;
-    }
-
-    #download-mtp {
-        min-width: 16;
-        margin: 0 1 0 0;
-    }
-
     #quant-picker-help {
         height: 3;
         color: $text-muted;
@@ -246,12 +205,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 id="quant-picker-help",
             )
             with ActionBar(id="quant-picker-actions"):
-                yield Label("Vision", id="vision-label")
-                yield Switch(value=True, id="vision-toggle")
-                yield Button("Download vision", id="download-vision")
-                yield Label("MTP", id="mtp-label")
-                yield Switch(value=False, id="mtp-toggle")
-                yield Button("Download MTP", id="download-mtp")
                 yield Button("Select / Download", variant="primary", id="select")
                 yield Button("Cancel", id="cancel")
 
@@ -268,8 +221,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
         )
         self._render_estimate_controls()
         self._update_title()
-        self._refresh_vision_controls()
-        self._refresh_mtp_controls()
         self._load_id += 1
         self._fetch_files(self._load_id)
         if self.download_manager is not None:
@@ -384,123 +335,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
             title += "  [dim]mtp on[/]"
         self.query_one("#quant-picker-title", Label).update(title)
 
-    def _refresh_vision_controls(self) -> None:
-        caps = resolve_capabilities(
-            params=self.cfg.params,
-            files=self._files,
-            repo_id=self._repo_id(),
-        )
-        name, on_disk = vision_projector_ready(
-            self.cfg.params, self.models_dir, self._files
-        )
-        show = bool(caps.vision or caps.audio or name)
-        try:
-            label = self.query_one("#vision-label", Label)
-            toggle = self.query_one("#vision-toggle", Switch)
-            button = self.query_one("#download-vision", Button)
-        except Exception:
-            return
-        kind = projector_control_label(caps)
-        label.update(kind)
-        button.label = f"Download {kind.lower()}"
-        label.display = show
-        toggle.display = show
-        button.display = show and bool(name) and not on_disk
-        self._syncing_controls = True
-        try:
-            toggle.value = is_vision_enabled(self.cfg.params)
-        finally:
-            self._syncing_controls = False
-
-    def _refresh_mtp_controls(self) -> None:
-        caps = resolve_capabilities(
-            params=self.cfg.params,
-            files=self._files,
-            repo_id=self._repo_id(),
-        )
-        name, on_disk = mtp_draft_ready(
-            self.cfg.params, self.models_dir, self._files
-        )
-        show = bool(caps.mtp or name)
-        try:
-            label = self.query_one("#mtp-label", Label)
-            toggle = self.query_one("#mtp-toggle", Switch)
-            button = self.query_one("#download-mtp", Button)
-        except Exception:
-            return
-        label.display = show
-        toggle.display = show
-        button.display = show and bool(name) and not on_disk
-        self._syncing_controls = True
-        try:
-            toggle.value = is_mtp_enabled(self.cfg.params)
-        finally:
-            self._syncing_controls = False
-
-    def _persist_mtp_enabled(self, enabled: bool) -> None:
-        self.cfg.params["mtp_enabled"] = bool(enabled)
-        save_registry(self.registry_path, self.registry)
-        self._update_title()
-        self._refresh_mtp_controls()
-
-    def _download_mtp(self) -> None:
-        name = mtp_filename_for(self.cfg.params, self._files)
-        if not name:
-            self.notify("No MTP draft found for this model", severity="warning")
-            return
-        _, on_disk = mtp_draft_ready(self.cfg.params, self.models_dir, self._files)
-        if on_disk:
-            self.notify("MTP draft is already on disk")
-            self._refresh_mtp_controls()
-            return
-        if self.download_manager is not None and self.download_manager.has_job(
-            self._download_key(name)
-        ):
-            self.notify(f"{name} is already downloading", severity="information")
-            return
-        size = next(
-            (item.size for item in self._files if item.path == name or Path(item.path).name == Path(name).name),
-            0,
-        )
-        if self.on_download:
-            self.on_download(self.model_name, name, size)
-            if self.download_manager is not None:
-                self._apply_download_state(self.download_manager.state)
-            return
-        self.notify("Download handler unavailable", severity="error")
-
-    def _persist_vision_enabled(self, enabled: bool) -> None:
-        self.cfg.params["vision_enabled"] = bool(enabled)
-        save_registry(self.registry_path, self.registry)
-        self._update_title()
-        self._refresh_vision_controls()
-
-    def _download_vision(self) -> None:
-        name = mmproj_filename_for(self.cfg.params, self._files)
-        if not name:
-            self.notify("No vision projector found for this model", severity="warning")
-            return
-        _, on_disk = vision_projector_ready(self.cfg.params, self.models_dir, self._files)
-        if on_disk:
-            self.notify("Vision projector is already on disk")
-            self._refresh_vision_controls()
-            return
-        if self.download_manager is not None and self.download_manager.has_job(
-            self._download_key(name)
-        ):
-            self.notify(f"{name} is already downloading", severity="information")
-            return
-        size = next(
-            (item.size for item in self._files if Path(item.path).name == Path(name).name),
-            0,
-        )
-        if self.on_download:
-            self.on_download(self.model_name, name, size)
-            if self.download_manager is not None:
-                self._apply_download_state(self.download_manager.state)
-            return
-        self.notify("Download handler unavailable", severity="error")
-
     def _refresh_table(self) -> None:
         self._rows = self._build_rows()
 
@@ -605,8 +439,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
             return
         self._files = files
         self._update_title()
-        self._refresh_vision_controls()
-        self._refresh_mtp_controls()
         if error and not files:
             self.query_one("#quant-picker-status", Static).update(
                 f"[bold $error]{error}[/]"
@@ -652,14 +484,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
             self.offload_ratio = float(event.value)
             self._refresh_table()
 
-    def on_switch_changed(self, event: Switch.Changed) -> None:
-        if self._syncing_controls:
-            return
-        if event.switch.id == "vision-toggle":
-            self._persist_vision_enabled(bool(event.value))
-        elif event.switch.id == "mtp-toggle":
-            self._persist_mtp_enabled(bool(event.value))
-
     def _selected_row(self) -> QuantFileRow | None:
         table = self.query_one("#quant-table", DataTable)
         if table.cursor_row is None:
@@ -677,12 +501,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
-            return
-        if event.button.id == "download-vision":
-            self._download_vision()
-            return
-        if event.button.id == "download-mtp":
-            self._download_mtp()
             return
         self._confirm()
 
@@ -725,8 +543,6 @@ class QuantPickerScreen(ModalScreen[str | None]):
             status.update("")
             bar.remove_class("visible")
             bar.update(total=None)
-            self._refresh_vision_controls()
-            self._refresh_mtp_controls()
         self._refresh_disk_cells(state)
 
     def _refresh_disk_cells(self, state: DownloadState) -> None:

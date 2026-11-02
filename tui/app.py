@@ -1052,7 +1052,7 @@ class LLMServeApp(App):
         self.query_one("#config").display = False
         self.query_one("#logs").display = False
 
-        editor.id = "editor-scroll"
+        editor.id = "param-editor"
 
         right = self.query_one("#right")
         right.mount(editor)
@@ -1160,6 +1160,7 @@ class LLMServeApp(App):
             if is_new or get_active_slot(self.preset_store, model_name, quant) is None:
                 set_active_preset(self.preset_store, model_name, quant, slot)
             save_presets(self.paths.presets_json, self.preset_store)
+            update_model(self.paths.models_json, model_name, editor.identity)
             self._reload_registry()
             self._exit_editor()
             self.notify(f"Saved preset {model_name}/{quant} [{slot}] {name}")

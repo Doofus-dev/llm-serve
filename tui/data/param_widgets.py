@@ -27,6 +27,7 @@ PARAM_SELECT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
     "cache_prompt": (("on", "on"), ("off", "off")),
     "cont_batching": (("on", "on"), ("off", "off")),
     "metrics": (("on", "on"), ("off", "off")),
+    "kv_offload": (("on", "on"), ("off", "off")),
     "flash_attn": (("on", "on"), ("off", "off"), ("auto", "auto")),
     "thinking": (("on", "on"), ("off", "off")),
     "reasoning_format": (
@@ -36,10 +37,34 @@ PARAM_SELECT_OPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("deepseek-legacy", "deepseek-legacy"),
     ),
     "mtp": (("Off", "0"), ("On", "1")),
+    "vision_enabled": (("on", "on"), ("off", "off")),
+    "mtp_enabled": (("on", "on"), ("off", "off")),
+    "load_mode": (
+        ("auto", "auto"),
+        ("none", "none"),
+        ("mmap", "mmap"),
+        ("mlock", "mlock"),
+        ("mmap+mlock", "mmap+mlock"),
+        ("dio", "dio"),
+    ),
+    "lazy_mode": (("auto", "auto"), ("on", "on"), ("off", "off")),
+    "rope_scaling": (("none", "none"), ("linear", "linear"), ("yarn", "yarn")),
+    "numa": (("distribute", "distribute"), ("isolate", "isolate"), ("numactl", "numactl")),
+    "mirostat": (("Mirostat", "1"), ("Mirostat 2.0", "2")),
 }
 
 # Empty stored value maps to Select.NULL (server default — flag omitted).
-PARAM_ALLOW_BLANK = frozenset({"thinking", "reasoning_format"})
+PARAM_ALLOW_BLANK = frozenset({
+    "thinking",
+    "reasoning_format",
+    "load_mode",
+    "lazy_mode",
+    "rope_scaling",
+    "numa",
+    "mirostat",
+})
+
+IDENTITY_BOOL_PARAMS = frozenset({"vision_enabled", "mtp_enabled"})
 
 PRESERVED_EDITOR_PARAMS = frozenset({"total_layers", "file", "files"})
 
@@ -72,8 +97,21 @@ def _is_blank_select_value(selected: object) -> bool:
     return selected is NULL or isinstance(selected, NoSelection)
 
 
+def _bool_select_value(stored: Any) -> str:
+    if isinstance(stored, bool):
+        return "on" if stored else "off"
+    text = _normalize_stored(stored).lower()
+    if text in {"1", "true", "yes", "on"}:
+        return "on"
+    if text in {"0", "false", "no", "off"}:
+        return "off"
+    return "on"
+
+
 def select_initial_value(param: str, stored: Any) -> str | None:
     """Map stored config to a Select value, or None for blank/default."""
+    if param in IDENTITY_BOOL_PARAMS:
+        return _bool_select_value(stored)
     text = _normalize_stored(stored)
     if param in PARAM_ALLOW_BLANK and not text:
         return None
@@ -114,5 +152,8 @@ def read_field_value(param: str, widget: Any) -> Any:
     from textual.widgets import Select
 
     if isinstance(widget, Select):
-        return select_to_stored(param, widget.value)
+        stored = select_to_stored(param, widget.value)
+        if param in IDENTITY_BOOL_PARAMS:
+            return _bool_select_value(stored) == "on"
+        return stored
     return coerce_text_param_value(widget.value)

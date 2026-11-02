@@ -82,7 +82,7 @@ MODEL_DIR=/mnt/models MODEL_PATH=/mnt/models/foo.gguf llm-serve my-model
 LLAMA_DIR=/opt/llama.cpp llm-serve my-model
 ```
 
-`PORT`, `HOST`, `CONTEXT_SIZE`, `GPU_LAYERS`, `THREADS`, `UBATCH`, `PARALLEL`, `N_PREDICT`, `CACHE_TYPE_K`, `CACHE_TYPE_V`, `BATCH_SIZE`, `DEFRAG_THOLD`, `TEMP`, `TOP_P`, `SEED`, `ENABLE_MTP`, `N_CPU_MOE`, `MODEL_PATH`, `MODEL_DIR`
+`PORT`, `HOST`, `CONTEXT_SIZE`, `GPU_LAYERS`, `THREADS`, `UBATCH`, `PARALLEL`, `N_PREDICT`, `CACHE_TYPE_K`, `CACHE_TYPE_V`, `BATCH_SIZE`, `TEMP`, `TOP_P`, `SEED`, `ENABLE_MTP`, `N_CPU_MOE`, `LOAD_MODE`, `DEVICE`, `MODEL_PATH`, `MODEL_DIR`
 
 Path defaults:
 
@@ -127,9 +127,31 @@ The top bar is live server status: `port 8081  •  PID 12345  •  up 0:01:05` 
 | **Tab** | Models ↔ Aliases |
 | **←/→** | On an alias: change target model |
 
-In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles compact field help from `param-help.conf` next to the focused input.
+In the **preset editor**, **Ctrl+S** saves, **Esc** cancels, **F2** toggles compact field help from `param-help.conf` next to the focused input. Save/Cancel stay in a docked footer so they are not scrolled away. Common groups start open; Advanced starts collapsed. Vision/Audio and MTP on/off (plus mmproj / MTP draft paths) are on this page and on the main-list marks, not on Hub or the quant picker.
 
 **C** on a model or preset opens compare for that quant (needs two slots). **Ctrl+S** saves the focused side, **Esc** closes, **F2** still toggles field help.
+
+### Preset editor → llama-server flags
+
+| Editor group | llama-server flags |
+|--------------|-------------------|
+| Architecture | `-ngl`, `--n-cpu-moe`, `--device` |
+| Context | `-c`, `per_slot_min` (llm-serve check), `--cache-type-k/v`, `--kv-offload` |
+| Batching | `-b`, `--ubatch-size`, `-t`, `-tb`, `--parallel` |
+| Generation | `--n-predict`, `--reasoning`, `--reasoning-format`, `--reasoning-budget`, `--jinja` |
+| Server | `-fa`, `--timeout`, `--cache-prompt`, `--cache-reuse`, `--cont-batching`, `--metrics` |
+| Sampling | `--temp`, `--top-p`, `--top-k`, `--min-p`, `--seed`, `--repeat-*`, `--presence-penalty`, `--frequency-penalty` |
+| Identity | `--host`, `--port`, `--mmproj`, `-md` / `--spec-type draft-mtp` |
+| Speculative | `--spec-draft-n-max/min` (and `-md` when MTP is on) |
+| Advanced | `--load-mode`, `--lazy-mode`, `--rope-*`, `--yarn-*`, `--numa`, `--typical-p`, `--dynatemp-*`, `--mirostat*`, `--spec-draft-p-min`, `--gpu-layers-draft`, `--checkpoint-min-step`, `--ctx-checkpoints` |
+
+Intentionally omitted, with why:
+
+- `--defrag-thold` — llama-server marks it deprecated and unused
+- `--mlock` / `--mmap` / `--direct-io` — replaced by `--load-mode`
+- `--cpu-mask` / `--cpu-range` (and batch variants) — host-specific affinity; set outside the TUI
+- ngram-* speculative types — llm-serve MTP is `--spec-type draft-mtp` only
+- split GGUF shards — file identity, not preset params
 
 ### Hub and quant picker
 

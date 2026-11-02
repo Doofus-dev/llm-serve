@@ -27,6 +27,10 @@ class ParamWidgetsTests(unittest.TestCase):
             "thinking",
             "reasoning_format",
             "mtp",
+            "kv_offload",
+            "load_mode",
+            "vision_enabled",
+            "mtp_enabled",
         ):
             self.assertTrue(is_select_param(param))
 
@@ -47,6 +51,12 @@ class ParamWidgetsTests(unittest.TestCase):
         self.assertEqual(select_initial_value("mtp", 0), "0")
         self.assertEqual(select_initial_value("mtp", "1"), "1")
         self.assertEqual(select_to_stored("mtp", "1"), "1")
+
+    def test_identity_bool_selects(self) -> None:
+        self.assertEqual(select_initial_value("vision_enabled", True), "on")
+        self.assertEqual(select_initial_value("vision_enabled", False), "off")
+        self.assertEqual(select_initial_value("mtp_enabled", 1), "on")
+        self.assertEqual(select_to_stored("vision_enabled", "off"), "off")
 
     def test_coerce_numeric_text_fields(self) -> None:
         self.assertEqual(coerce_text_param_value("32768"), 32768)

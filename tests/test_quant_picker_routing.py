@@ -7,11 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tui.data.hf import HubFile
-from tui.data.models_json import save_registry
 from tui.data.presets import get_active_slot, set_preset
 from tui.screens.editors import EditAliasDialog, ParamHelpPanel
 from tui.screens.quant_picker import QuantPickerScreen
-from textual.widgets import Button, Input, Switch
+from textual.widgets import Button, Input
 from tui.widgets.nav import AliasNav, ModelNav
 from tests.support import Harness
 
@@ -74,50 +73,38 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(screen.query_one("#quant-table").row_count, 2)
 
-    async def test_vision_download_button_shows_when_projector_missing(self) -> None:
+    async def test_quant_picker_has_no_vision_mtp_switches(self) -> None:
         app = self.harness.app()
-        model_name = next(iter(app.registry.models))
-        cfg = app.registry.models[model_name]
-        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
-        cfg.params["capabilities"] = {"vision": True, "tools": False}
-        save_registry(app.paths.models_json, app.registry)
         with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
             async with app.run_test(size=(120, 45)) as pilot:
                 nav = app.query_one(ModelNav)
-                self._select_model(nav, model_name)
+                self._select_model(nav, next(iter(app.registry.models)))
                 await pilot.press("p")
                 await pilot.pause()
                 screen = app.screen
                 self.assertIsInstance(screen, QuantPickerScreen)
-                screen._files = [HubFile(path="mmproj-Demo-f16.gguf", size=12)]
-                screen._refresh_vision_controls()
-                button = screen.query_one("#download-vision", Button)
-                toggle = screen.query_one("#vision-toggle", Switch)
-                self.assertTrue(button.display)
-                self.assertTrue(toggle.display)
-                screen._persist_vision_enabled(False)
-                self.assertFalse(screen.cfg.params["vision_enabled"])
+                self.assertEqual(len(list(screen.query("#vision-toggle"))), 0)
+                self.assertEqual(len(list(screen.query("#mtp-toggle"))), 0)
+                self.assertEqual(len(list(screen.query("#download-vision"))), 0)
+                self.assertEqual(len(list(screen.query("#download-mtp"))), 0)
 
-    async def test_vision_download_button_hides_when_projector_on_disk(self) -> None:
+    async def test_addon_file_row_is_still_listed(self) -> None:
         app = self.harness.app()
-        model_name = next(iter(app.registry.models))
-        cfg = app.registry.models[model_name]
-        mmproj = app.paths.models_dir / "demo" / "mmproj-Demo-f16.gguf"
-        mmproj.write_bytes(b"gguf")
-        cfg.params["mmproj"] = "demo/mmproj-Demo-f16.gguf"
-        cfg.params["capabilities"] = {"vision": True, "tools": False}
-        save_registry(app.paths.models_json, app.registry)
         with patch.object(QuantPickerScreen, "_fetch_files", lambda self, load_id: None):
             async with app.run_test(size=(120, 45)) as pilot:
                 nav = app.query_one(ModelNav)
-                self._select_model(nav, model_name)
+                self._select_model(nav, next(iter(app.registry.models)))
                 await pilot.press("p")
                 await pilot.pause()
                 screen = app.screen
                 self.assertIsInstance(screen, QuantPickerScreen)
-                screen._refresh_vision_controls()
-                self.assertFalse(screen.query_one("#download-vision", Button).display)
-                self.assertTrue(screen.query_one("#vision-toggle", Switch).display)
+                screen._files = [
+                    HubFile(path="Model-Q8_0.gguf", size=100),
+                    HubFile(path="mmproj-Demo-f16.gguf", size=12),
+                    HubFile(path="mtp-Model-Q8_0.gguf", size=50),
+                ]
+                screen._refresh_table()
+                self.assertEqual(screen.query_one("#quant-table").row_count, 3)
 
     async def test_number_key_activates_matching_preset_on_model_card(self) -> None:
         app = self.harness.app()
@@ -300,6 +287,10 @@ class QuantPickerRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("visible", help_panel.classes)
             self.assertIn("ctx", str(help_panel.content))
             self.assertNotIn("visible", app.query_one("#param-help", ParamHelpPanel).classes)
+            save = app.query_one("#save", Button)
+            cancel = app.query_one("#cancel", Button)
+            self.assertGreater(save.region.height, 0)
+            self.assertGreater(cancel.region.height, 0)
 
     async def test_launch_from_pinned_alias_preserves_alias_name(self) -> None:
         app = self.harness.app()

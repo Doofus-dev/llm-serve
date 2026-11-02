@@ -123,6 +123,45 @@ class ArgvTests(unittest.TestCase):
         self.assertNotIn("-md", args)
         self.assertNotIn("--checkpoint-min-step", args)
         self.assertNotIn("--reasoning-format", args)
+        self.assertNotIn("--defrag-thold", args)
+        self.assertNotIn("--load-mode", args)
+        self.assertNotIn("--typical-p", args)
+        self.assertNotIn("--device", args)
+        self.assertIn("--kv-offload", args)
+
+    def test_deprecated_defrag_is_not_passed(self) -> None:
+        args = build_server_args(
+            model_path=Path("/tmp/m.gguf"),
+            host="127.0.0.1",
+            port=8081,
+            params={**DEFAULT_PRESET_PARAMS, "defrag": 0.1},
+            log_verbosity=4,
+        )
+        self.assertNotIn("--defrag-thold", args)
+
+    def test_advanced_optional_flags(self) -> None:
+        args = build_server_args(
+            model_path=Path("/tmp/m.gguf"),
+            host="127.0.0.1",
+            port=8081,
+            params={
+                **DEFAULT_PRESET_PARAMS,
+                "device": "CUDA0",
+                "load_mode": "mmap",
+                "lazy_mode": "auto",
+                "typical_p": 0.9,
+                "kv_offload": "off",
+                "numa": "isolate",
+            },
+            log_verbosity=4,
+        )
+        self.assertEqual(args[args.index("--device") + 1], "CUDA0")
+        self.assertEqual(args[args.index("--load-mode") + 1], "mmap")
+        self.assertEqual(args[args.index("--lazy-mode") + 1], "auto")
+        self.assertEqual(args[args.index("--typical-p") + 1], "0.9")
+        self.assertEqual(args[args.index("--numa") + 1], "isolate")
+        self.assertIn("--no-kv-offload", args)
+        self.assertNotIn("--defrag-thold", args)
 
     def test_mtp_and_thinking_flags(self) -> None:
         from pathlib import Path
@@ -148,6 +187,24 @@ class ArgvTests(unittest.TestCase):
         i = args.index("--reasoning")
         self.assertEqual(args[i + 1], "off")
         self.assertIn("--checkpoint-min-step", args)
+
+    def test_mtp_extra_knobs(self) -> None:
+        draft = Path("/tmp/mtp-m-Q8_0.gguf")
+        args = build_server_args(
+            model_path=Path("/tmp/m.gguf"),
+            host="127.0.0.1",
+            port=8081,
+            params={
+                **DEFAULT_PRESET_PARAMS,
+                "mtp": 1,
+                "spec_draft_p_min": 0.5,
+                "gpu_layers_draft": 20,
+            },
+            log_verbosity=4,
+            draft_path=draft,
+        )
+        self.assertEqual(args[args.index("--spec-draft-p-min") + 1], "0.5")
+        self.assertEqual(args[args.index("--gpu-layers-draft") + 1], "20")
 
     def test_mtp_on_without_draft_raises(self) -> None:
         with self.assertRaises(LaunchError) as ctx:

@@ -65,9 +65,9 @@ ALWAYS_FLAGS: tuple[tuple[str, str], ...] = (
 
 OPTIONAL_FLAGS: tuple[tuple[str, str], ...] = (
     ("n_cpu_moe", "--n-cpu-moe"),
+    ("device", "--device"),
     ("batch", "-b"),
     ("ubatch", "--ubatch-size"),
-    ("defrag", "--defrag-thold"),
     ("n_predict", "--n-predict"),
     ("threads_batch", "-tb"),
     ("timeout", "--timeout"),
@@ -84,6 +84,24 @@ OPTIONAL_FLAGS: tuple[tuple[str, str], ...] = (
     ("frequency_penalty", "--frequency-penalty"),
     ("reasoning_format", "--reasoning-format"),
     ("reasoning_budget", "--reasoning-budget"),
+    ("load_mode", "--load-mode"),
+    ("lazy_mode", "--lazy-mode"),
+    ("rope_scaling", "--rope-scaling"),
+    ("rope_scale", "--rope-scale"),
+    ("rope_freq_base", "--rope-freq-base"),
+    ("rope_freq_scale", "--rope-freq-scale"),
+    ("yarn_orig_ctx", "--yarn-orig-ctx"),
+    ("yarn_ext_factor", "--yarn-ext-factor"),
+    ("yarn_attn_factor", "--yarn-attn-factor"),
+    ("yarn_beta_slow", "--yarn-beta-slow"),
+    ("yarn_beta_fast", "--yarn-beta-fast"),
+    ("numa", "--numa"),
+    ("typical_p", "--typical-p"),
+    ("dynatemp_range", "--dynatemp-range"),
+    ("dynatemp_exp", "--dynatemp-exp"),
+    ("mirostat", "--mirostat"),
+    ("mirostat_lr", "--mirostat-lr"),
+    ("mirostat_ent", "--mirostat-ent"),
 )
 
 BOOL_FLAGS: tuple[tuple[str, str, str], ...] = (
@@ -91,6 +109,7 @@ BOOL_FLAGS: tuple[tuple[str, str, str], ...] = (
     ("cache_prompt", "--cache-prompt", "--no-cache-prompt"),
     ("cont_batching", "--cont-batching", "--no-cont-batching"),
     ("metrics", "--metrics", "--no-metrics"),
+    ("kv_offload", "--kv-offload", "--no-kv-offload"),
 )
 
 GPU_BIN_DIRS = (
@@ -335,10 +354,16 @@ def build_server_args(
         args.extend(("--spec-type", "draft-mtp"))
         n_max = params.get("spec_draft_n_max", "")
         n_min = params.get("spec_draft_n_min", "")
+        p_min = params.get("spec_draft_p_min", "")
+        ngl_draft = params.get("gpu_layers_draft", "")
         if _present(n_max):
             args.extend(("--spec-draft-n-max", str(n_max)))
         if _present(n_min):
             args.extend(("--spec-draft-n-min", str(n_min)))
+        if _present(p_min):
+            args.extend(("--spec-draft-p-min", str(p_min)))
+        if _present(ngl_draft):
+            args.extend(("--gpu-layers-draft", str(ngl_draft)))
     return args
 
 
@@ -829,9 +854,9 @@ def list_text(paths: AppPaths | None = None) -> str:
             "Env overrides:",
             "  PORT=           HOST=           CONTEXT_SIZE=   GPU_LAYERS=",
             "  THREADS=        UBATCH=         PARALLEL=       N_PREDICT=",
-            "  CACHE_TYPE_K=   CACHE_TYPE_V=   BATCH_SIZE=     DEFRAG_THOLD=",
-            "  TEMP=           TOP_P=          SEED=           ENABLE_MTP=0",
-            "  N_CPU_MOE=      MODEL_PATH=     MODEL_DIR=",
+            "  CACHE_TYPE_K=   CACHE_TYPE_V=   BATCH_SIZE=     TEMP=",
+            "  TOP_P=          SEED=           ENABLE_MTP=0    N_CPU_MOE=",
+            "  MODEL_PATH=     MODEL_DIR=      LOAD_MODE=      DEVICE=",
             "",
             "Flags:",
             "  --live                Start in foreground with live logs",

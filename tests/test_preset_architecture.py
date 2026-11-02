@@ -74,6 +74,8 @@ class PresetArchitectureTests(unittest.TestCase):
         self.assertEqual(preset.params.get("gpu_layers"), DEFAULT_PRESET_PARAMS["gpu_layers"])
         for key in PRESET_PARAM_KEYS:
             self.assertIn(key, preset.params)
+        self.assertEqual(PRESET_PARAM_KEYS, frozenset(DEFAULT_PRESET_PARAMS))
+        self.assertNotIn("defrag", PRESET_PARAM_KEYS)
 
     def test_validate_display_name_unique(self) -> None:
         from tests.support import DISPLAY, write_harness

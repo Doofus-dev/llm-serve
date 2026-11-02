@@ -149,7 +149,7 @@ class PresetCompareScreen(ModalScreen[None]):
         padding: 0 1;
         border: round $border;
         background: $panel;
-        overflow-y: auto;
+        overflow-y: hidden;
     }
     .param-field.diff-changed {
         border-left: solid $warning;

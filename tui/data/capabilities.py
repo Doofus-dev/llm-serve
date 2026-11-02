@@ -259,7 +259,7 @@ def addon_row_label(role: str, caps: ModelCapabilities | None = None) -> str:
 
 
 def projector_control_label(caps: ModelCapabilities) -> str:
-    """Hub/picker toggle name for the single --mmproj slot."""
+    """Editor label for the single --mmproj slot."""
     if caps.audio and not caps.vision:
         return "Audio"
     return "Vision"

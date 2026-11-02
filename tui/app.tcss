@@ -293,11 +293,38 @@ Button.-style-flat:disabled {
         text-style: none;
         align: right middle;
     }
-    #editor-scroll { height: 1fr; padding: 0 1; }
-    #editor-scroll > Label {
-        height: 1;
+    #param-editor,
+    .compare-editor {
+        height: 1fr;
+        width: 1fr;
+        layout: vertical;
+    }
+
+    #param-editor > .editor-title,
+    .compare-editor > .editor-title {
+        height: auto;
         margin: 0;
-        padding: 0;
+        padding: 0 1;
+    }
+
+    #editor-scroll,
+    .editor-body {
+        height: 1fr;
+        padding: 0 1;
+    }
+
+    .param-group {
+        layout: grid;
+        grid-size: 2;
+        grid-gutter: 0 1;
+        height: auto;
+        width: 1fr;
+        margin: 0;
+    }
+
+    #param-editor.narrow .param-group,
+    .compare-editor.narrow .param-group {
+        grid-size: 1;
     }
 
     .param-group-row {
@@ -323,19 +350,19 @@ Button.-style-flat:disabled {
     }
 
     ActionBar.editor-actions {
-        min-height: 1;
-        height: 1;
-        padding: 0;
-        margin: 0 0 1 0;
+        dock: bottom;
+        height: auto;
+        min-height: 3;
+        padding: 0 1;
+        margin: 0;
+        width: 1fr;
     }
 
     ActionBar.editor-actions Button {
-        height: 1;
-        min-height: 1;
+        height: 3;
+        min-height: 3;
         padding: 0 1;
         margin: 0 1 0 0;
-        border: none;
-        background: $surface;
     }
     
     .param-field {

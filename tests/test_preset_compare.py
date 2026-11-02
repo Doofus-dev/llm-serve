@@ -294,8 +294,10 @@ class PresetCompareScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.5)
             screen = app.screen
             self.assertIsInstance(screen, PresetCompareScreen)
+            await app.workers.wait_for_complete()
+            await pilot.pause(0.3)
             screen.query_one("#cmp-left-input_ctx").focus()
-            await pilot.pause(0.2)
+            await pilot.pause(0.3)
             screen.action_toggle_param_help()
             ctx_help = screen.query_one("#cmp-left-help_ctx", ParamHelpPanel)
             self.assertIn("visible", ctx_help.classes)
