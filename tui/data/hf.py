@@ -122,6 +122,53 @@ class DownloadPlan:
     revision: str = "main"
 
 
+def local_file_bytes(path: Path) -> int:
+    """On-disk size, or 0 if missing/unreadable."""
+    try:
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def hub_blob_on_disk(path: Path, expected_size: int = 0) -> bool:
+    """True when ``path`` exists and matches the Hub listing size (if known).
+
+    Same-named GGUFs from different repos of one author share a directory
+    (``models/<author>/mmproj-BF16.gguf``). Filename presence is not identity.
+    """
+    size = local_file_bytes(path)
+    if size <= 0:
+        return False
+    if expected_size > 0 and size != expected_size:
+        return False
+    return True
+
+
+def discard_mismatched_local_file(local_dir: Path, filename: str, expected_size: int) -> bool:
+    """Remove a same-named local file that is not the Hub blob (size mismatch).
+
+    Also drops the huggingface_hub metadata/lock for that name so the CLI
+    does not treat the old blob as already complete.
+    """
+    if expected_size <= 0:
+        return False
+    path = local_dir / filename
+    size = local_file_bytes(path)
+    if size <= 0 or size == expected_size:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    cache = local_dir / ".cache" / "huggingface" / "download"
+    for extra in (cache / f"{filename}.metadata", cache / f"{filename}.lock"):
+        try:
+            extra.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
 def hf_available() -> bool:
     return shutil.which("hf") is not None
 

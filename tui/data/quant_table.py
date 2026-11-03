@@ -9,7 +9,7 @@ from rich.text import Text
 
 from tui.data.baselines import load_baselines, lookup_baseline
 from tui.data.gpu import GPUStats
-from tui.data.hf import HubFile, fmt_size
+from tui.data.hf import HubFile, fmt_size, hub_blob_on_disk
 from tui.data.capabilities import ModelCapabilities, addon_row_label
 from tui.data.quant import (
     ROLE_MODEL,
@@ -79,7 +79,7 @@ def build_quant_file_rows(
         size = item.size
         if models_dir and author:
             local_size = local_file_size(models_dir, author, item.path)
-            downloaded = local_size > 0
+            downloaded = hub_blob_on_disk(models_dir / author / item.path, item.size)
             if downloaded and size <= 0:
                 size = local_size
 

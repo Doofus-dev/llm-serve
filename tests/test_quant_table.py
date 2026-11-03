@@ -31,7 +31,7 @@ class QuantTableDownloadTests(unittest.TestCase):
             root = Path(tmp)
             author = "bartowski"
             (root / author).mkdir()
-            (root / author / "Model-Q4_K_M.gguf").write_bytes(b"gguf")
+            (root / author / "Model-Q4_K_M.gguf").write_bytes(b"x" * 1000)
 
             rows = build_quant_file_rows(
                 [
@@ -54,6 +54,31 @@ class QuantTableDownloadTests(unittest.TestCase):
                 "[green]●[/]",
             )
             self.assertEqual(quant_file_row_cells(by_path["Model-Q8_0.gguf"])[0], "—")
+
+    def test_same_filename_wrong_size_is_not_downloaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            author = "unsloth"
+            (root / author).mkdir()
+            (root / author / "mmproj-BF16.gguf").write_bytes(b"x" * 50)
+            (root / author / "Qwen3.5-9B-Q8_0.gguf").write_bytes(b"y" * 80)
+
+            rows = build_quant_file_rows(
+                [
+                    HubFile(path="Qwen3.5-9B-Q8_0.gguf", size=80),
+                    HubFile(path="mmproj-BF16.gguf", size=100),
+                ],
+                gpu=GPUStats(),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=None,
+                models_dir=root,
+                author=author,
+            )
+            by_path = {row.path: row for row in rows}
+
+            self.assertTrue(by_path["Qwen3.5-9B-Q8_0.gguf"].downloaded)
+            self.assertFalse(by_path["mmproj-BF16.gguf"].downloaded)
 
     def test_actual_columns_show_128k_run_at_64k(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

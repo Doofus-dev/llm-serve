@@ -45,6 +45,7 @@ from tui.data.hf import (
     auth_whoami,
     build_download_plan,
     build_source_metadata,
+    discard_mismatched_local_file,
     download_files,
     fetch_repo_info,
     fmt_size,
@@ -949,6 +950,9 @@ class HubScreen(Screen):
             all_ggufs=all_names,
             extra_files=extra_files,
         )
+        sizes = {item.path: item.size for item in self.files if item.size > 0}
+        for name in plan.filenames:
+            discard_mismatched_local_file(plan.local_dir, name, sizes.get(name, 0))
         expected = sum(item.size for item in self.files if item.path in plan.filenames)
 
         from tui.app import LLMServeApp

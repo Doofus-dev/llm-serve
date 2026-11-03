@@ -234,7 +234,7 @@ class HubFileTableTests(unittest.IsolatedAsyncioTestCase):
             models_dir = root / "models"
             author_dir = models_dir / "bartowski"
             author_dir.mkdir(parents=True)
-            (author_dir / "Model-Q4_K_M.gguf").write_bytes(b"gguf")
+            (author_dir / "Model-Q4_K_M.gguf").write_bytes(b"x" * 1000)
 
             app = self.harness.app()
             screen = HubScreen(

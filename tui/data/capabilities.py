@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from tui.data.hf import HubFile
+from tui.data.hf import HubFile, hub_blob_on_disk
 from tui.data.models_json import coerce_rel_paths, quant_entry_rel_paths
 from tui.data.quant import (
     ROLE_IMATRIX,
@@ -850,10 +850,16 @@ def extra_download_files(
 ) -> list[str]:
     """Companions to fetch with a main quant (projector and/or MTP draft).
 
-    Skip when the selected row is itself an add-on. Skip files already on disk.
+    Skip when the selected row is itself an add-on. Skip files already on disk
+    only when the local size matches the Hub listing (same filename under one
+    author is not enough — unsloth ships ``mmproj-BF16.gguf`` in many repos).
     """
     if is_runtime_addon(quant_filename) or is_sidecar_gguf(quant_filename):
         return []
+    expected: dict[str, int] = {}
+    for item in files:
+        if isinstance(item, HubFile) and item.size > 0:
+            expected[item.path] = item.size
     extras: list[str] = []
     for kind in RUNTIME_ADDONS:
         name = pick_addon_filename(kind.id, files, quant_filename=quant_filename)
@@ -864,7 +870,7 @@ def extra_download_files(
         if author and name.startswith(f"{author}/"):
             name = name[len(author) + 1 :]
         local = models_dir / author / name if author else models_dir / name
-        if local.is_file():
+        if hub_blob_on_disk(local, expected.get(name, 0)):
             continue
         if name not in extras:
             extras.append(name)

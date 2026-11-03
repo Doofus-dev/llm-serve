@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -120,6 +121,33 @@ class DownloadAddonPlanTests(unittest.TestCase):
             plan.filenames,
             ["Model-Q8_0.gguf", "mmproj-F16.gguf", "mtp-Model-Q8_0.gguf"],
         )
+
+    def test_extras_skipped_only_when_local_size_matches_hub(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            author = "unsloth"
+            (root / author).mkdir()
+            (root / author / "mmproj-F16.gguf").write_bytes(b"x" * 9)
+            files = [
+                HubFile(path="Model-Q8_0.gguf", size=10),
+                HubFile(path="mmproj-F16.gguf", size=2),
+            ]
+            extras = extra_download_files(
+                files,
+                quant_filename="Model-Q8_0.gguf",
+                models_dir=root,
+                author=author,
+            )
+            self.assertEqual(extras, ["mmproj-F16.gguf"])
+
+            (root / author / "mmproj-F16.gguf").write_bytes(b"x" * 2)
+            extras = extra_download_files(
+                files,
+                quant_filename="Model-Q8_0.gguf",
+                models_dir=root,
+                author=author,
+            )
+            self.assertEqual(extras, [])
 
 
 if __name__ == "__main__":

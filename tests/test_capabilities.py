@@ -273,7 +273,7 @@ class DownloadPlanExtraTests(unittest.TestCase):
             models_dir = Path(tmp)
             folder = models_dir / "unsloth"
             folder.mkdir()
-            (folder / "mmproj-F16.gguf").write_bytes(b"gguf")
+            (folder / "mmproj-F16.gguf").write_bytes(b"x" * 2)
             files = [
                 HubFile(path="Qwen3.8-Flash-Next-Q8_0.gguf", size=10),
                 HubFile(path="mmproj-F16.gguf", size=2),

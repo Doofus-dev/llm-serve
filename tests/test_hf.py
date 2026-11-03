@@ -20,6 +20,8 @@ from tui.data.hf import (
     HubRepo,
     take_hf_progress_lines,
     local_download_bytes,
+    discard_mismatched_local_file,
+    hub_blob_on_disk,
     build_download_plan,
     build_source_metadata,
     download_files,
@@ -155,6 +157,32 @@ class HFPathTests(unittest.TestCase):
             (cache / "expected-etag.incomplete").write_bytes(b"x" * 80)
 
             self.assertEqual(local_download_bytes(plan), 80)
+
+    def test_hub_blob_on_disk_requires_matching_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mmproj-BF16.gguf"
+            path.write_bytes(b"x" * 50)
+            self.assertTrue(hub_blob_on_disk(path, 0))
+            self.assertTrue(hub_blob_on_disk(path, 50))
+            self.assertFalse(hub_blob_on_disk(path, 100))
+            self.assertFalse(hub_blob_on_disk(Path(tmp) / "missing.gguf", 50))
+
+    def test_discard_mismatched_local_file_removes_stale_blob_and_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            local_dir = Path(tmp)
+            name = "mmproj-BF16.gguf"
+            (local_dir / name).write_bytes(b"x" * 50)
+            cache = local_dir / ".cache" / "huggingface" / "download"
+            cache.mkdir(parents=True)
+            (cache / f"{name}.metadata").write_text("old-xet\nold-sha\n0\n")
+            (cache / f"{name}.lock").write_bytes(b"")
+
+            self.assertFalse(discard_mismatched_local_file(local_dir, name, 50))
+            self.assertTrue((local_dir / name).is_file())
+            self.assertTrue(discard_mismatched_local_file(local_dir, name, 100))
+            self.assertFalse((local_dir / name).is_file())
+            self.assertFalse((cache / f"{name}.metadata").is_file())
+            self.assertFalse((cache / f"{name}.lock").is_file())
 
 
 class SettingsTests(unittest.TestCase):
