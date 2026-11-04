@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.text import Text
 
 from tui.data.baselines import load_baselines, lookup_baseline
 from tui.data.gpu import GPUStats
-from tui.data.hf import HubFile, fmt_size, hub_blob_on_disk
+from tui.data.hf import SHARD_RE, HubFile, fmt_size, hub_blob_on_disk
 from tui.data.capabilities import ModelCapabilities, addon_row_label
 from tui.data.quant import (
     ROLE_MODEL,
@@ -43,6 +43,55 @@ class QuantFileRow:
     is_draft: bool = False
     addon_kind: str | None = None
     addon_label: str = ""
+    shard_paths: tuple[str, ...] = ()
+
+
+@dataclass
+class _ShardGroup:
+    """One catalog row: a single file or a set of shards sharing a prefix."""
+
+    representative: HubFile
+    paths: tuple[str, ...]
+    size: int
+
+
+def _group_shard_files(files: list[HubFile]) -> list[_ShardGroup]:
+    """Collapse sharded GGUFs into single entries with summed sizes.
+
+    Shards are grouped by (parent directory, prefix) so that same-numbered
+    shards in different quant folders are not merged.  Non-sharded files
+    become one-entry groups.
+    """
+    groups: dict[tuple[str, str] | str, _ShardGroup] = {}
+    order: list[tuple[str, str] | str] = []
+    paths_acc: dict[tuple[str, str] | str, list[str]] = {}
+    size_acc: dict[tuple[str, str] | str, int] = {}
+    for item in files:
+        m = SHARD_RE.match(Path(item.path).name)
+        if m:
+            key: tuple[str, str] | str = (str(Path(item.path).parent), m.group("prefix"))
+        else:
+            key = item.path
+        if key not in groups:
+            groups[key] = _ShardGroup(
+                representative=item,
+                paths=(item.path,),
+                size=item.size,
+            )
+            order.append(key)
+            paths_acc[key] = [item.path]
+            size_acc[key] = item.size
+        else:
+            paths_acc[key].append(item.path)
+            size_acc[key] += item.size
+    return [
+        _ShardGroup(
+            representative=groups[k].representative,
+            paths=tuple(paths_acc[k]),
+            size=size_acc[k],
+        )
+        for k in order
+    ]
 
 
 def local_file_size(models_dir: Path, author: str, filename: str) -> int:
@@ -71,17 +120,24 @@ def build_quant_file_rows(
     """
     runs = load_baselines(baselines_path) if baselines_path else []
     rows: list[QuantFileRow] = []
+    size_by_path = {f.path: f.size for f in files}
 
-    for item in files:
+    for group in _group_shard_files(files):
+        item = group.representative
         if is_hidden_sidecar(item.path):
             continue
+        size = group.size
+        paths = group.paths
         downloaded = False
-        size = item.size
         if models_dir and author:
-            local_size = local_file_size(models_dir, author, item.path)
-            downloaded = hub_blob_on_disk(models_dir / author / item.path, item.size)
+            downloaded = all(
+                hub_blob_on_disk(models_dir / author / p, size_by_path.get(p, 0))
+                for p in paths
+            )
             if downloaded and size <= 0:
-                size = local_size
+                size = sum(
+                    local_file_size(models_dir, author, p) for p in paths
+                )
 
         role = gguf_role(item.path)
         addon_kind = role if role != ROLE_MODEL else None
@@ -102,6 +158,7 @@ def build_quant_file_rows(
                     is_draft=role == "mtp",
                     addon_kind=addon_kind,
                     addon_label=addon_label,
+                    shard_paths=paths,
                 )
             )
             continue
@@ -166,6 +223,7 @@ def build_quant_file_rows(
                 is_draft=False,
                 addon_kind=None,
                 addon_label="",
+                shard_paths=paths,
             )
         )
 

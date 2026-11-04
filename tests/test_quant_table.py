@@ -208,5 +208,116 @@ class QuantTableDownloadTests(unittest.TestCase):
             self.assertEqual(rows[0].act_vram_on, "—")
 
 
+class ShardGroupingTests(unittest.TestCase):
+    def test_sharded_quant_produces_single_row_with_summed_size(self) -> None:
+        rows = build_quant_file_rows(
+            [
+                HubFile(path="Q4_K_S/Model-Q4_K_S-00001-of-00002.gguf", size=50_000),
+                HubFile(path="Q4_K_S/Model-Q4_K_S-00002-of-00002.gguf", size=10_000),
+            ],
+            gpu=GPUStats(),
+            context_tokens=65_536,
+            offload_ratio=1.0,
+            baselines_path=None,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].size, 60_000)
+        self.assertEqual(rows[0].quant_id, "Q4_K_S")
+        self.assertEqual(
+            rows[0].shard_paths,
+            (
+                "Q4_K_S/Model-Q4_K_S-00001-of-00002.gguf",
+                "Q4_K_S/Model-Q4_K_S-00002-of-00002.gguf",
+            ),
+        )
+
+    def test_single_file_produces_single_row(self) -> None:
+        rows = build_quant_file_rows(
+            [HubFile(path="Model-Q4_K_M.gguf", size=50_000)],
+            gpu=GPUStats(),
+            context_tokens=65_536,
+            offload_ratio=1.0,
+            baselines_path=None,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].size, 50_000)
+        self.assertEqual(rows[0].shard_paths, ("Model-Q4_K_M.gguf",))
+
+    def test_mixed_sharded_and_single_files(self) -> None:
+        rows = build_quant_file_rows(
+            [
+                HubFile(path="Model-Q2_K.gguf", size=40_000),
+                HubFile(path="Q8_0/Model-Q8_0-00001-of-00003.gguf", size=50_000),
+                HubFile(path="Q8_0/Model-Q8_0-00002-of-00003.gguf", size=50_000),
+                HubFile(path="Q8_0/Model-Q8_0-00003-of-00003.gguf", size=15_000),
+            ],
+            gpu=GPUStats(),
+            context_tokens=65_536,
+            offload_ratio=1.0,
+            baselines_path=None,
+        )
+        self.assertEqual(len(rows), 2)
+        by_quant = {row.quant_id: row for row in rows}
+        self.assertEqual(by_quant["Q2_K"].size, 40_000)
+        self.assertEqual(by_quant["Q8_0"].size, 115_000)
+        self.assertEqual(len(by_quant["Q8_0"].shard_paths), 3)
+
+    def test_same_shard_number_different_dirs_not_merged(self) -> None:
+        rows = build_quant_file_rows(
+            [
+                HubFile(path="Q4_K_S/Model-Q4_K_S-00001-of-00002.gguf", size=50_000),
+                HubFile(path="Q4_K_S/Model-Q4_K_S-00002-of-00002.gguf", size=10_000),
+                HubFile(path="Q4_K_M/Model-Q4_K_M-00001-of-00002.gguf", size=48_000),
+                HubFile(path="Q4_K_M/Model-Q4_K_M-00002-of-00002.gguf", size=12_000),
+            ],
+            gpu=GPUStats(),
+            context_tokens=65_536,
+            offload_ratio=1.0,
+            baselines_path=None,
+        )
+        self.assertEqual(len(rows), 2)
+        by_quant = {row.quant_id: row for row in rows}
+        self.assertEqual(by_quant["Q4_K_S"].size, 60_000)
+        self.assertEqual(by_quant["Q4_K_M"].size, 60_000)
+
+    def test_downloaded_requires_all_shards_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            author = "unsloth"
+            qdir = root / author / "Q4_K_S"
+            qdir.mkdir(parents=True)
+            (qdir / "Model-Q4_K_S-00001-of-00002.gguf").write_bytes(b"x" * 50_000)
+
+            rows = build_quant_file_rows(
+                [
+                    HubFile(path="Q4_K_S/Model-Q4_K_S-00001-of-00002.gguf", size=50_000),
+                    HubFile(path="Q4_K_S/Model-Q4_K_S-00002-of-00002.gguf", size=10_000),
+                ],
+                gpu=GPUStats(),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=None,
+                models_dir=root,
+                author=author,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertFalse(rows[0].downloaded)
+
+            (qdir / "Model-Q4_K_S-00002-of-00002.gguf").write_bytes(b"x" * 10_000)
+            rows = build_quant_file_rows(
+                [
+                    HubFile(path="Q4_K_S/Model-Q4_K_S-00001-of-00002.gguf", size=50_000),
+                    HubFile(path="Q4_K_S/Model-Q4_K_S-00002-of-00002.gguf", size=10_000),
+                ],
+                gpu=GPUStats(),
+                context_tokens=65_536,
+                offload_ratio=1.0,
+                baselines_path=None,
+                models_dir=root,
+                author=author,
+            )
+            self.assertTrue(rows[0].downloaded)
+
+
 if __name__ == "__main__":
     unittest.main()

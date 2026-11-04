@@ -553,7 +553,10 @@ class QuantPickerScreen(ModalScreen[str | None]):
         except Exception:
             return
         for row in self._rows:
-            transferring = state.is_transferring(self._download_key(row.path))
+            paths = row.shard_paths or (row.path,)
+            transferring = any(
+                state.is_transferring(self._download_key(p)) for p in paths
+            )
             try:
                 table.update_cell(
                     row.path,
