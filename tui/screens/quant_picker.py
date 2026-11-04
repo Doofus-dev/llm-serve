@@ -27,7 +27,7 @@ from tui.data.capabilities import (
     capabilities_from_payload,
     is_mtp_enabled,
     is_vision_enabled,
-    pick_mmproj_filename,
+    mmproj_filename_for,
     pick_mtp_filename,
     resolve_capabilities,
 )
@@ -387,7 +387,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 repo_id=str(repo),
                 params=params,
             )
-            mmproj = pick_mmproj_filename(remote_files)
+            mmproj = mmproj_filename_for(params, remote_files)
             apply_mmproj_identity(
                 params,
                 author=author,
