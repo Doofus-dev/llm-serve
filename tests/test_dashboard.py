@@ -348,23 +348,31 @@ class DashboardTests(unittest.TestCase):
 
 class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
     async def test_app_top_bar_is_live_status_not_title(self) -> None:
+        import socket
+
         from textual.widgets import Header
 
         from tests.support import Harness
 
+        host = socket.gethostname()
         harness = Harness()
         try:
             app = harness.app()
             async with app.run_test(size=(120, 40)):
                 self.assertEqual(len(list(app.query(Header))), 0)
                 header = app.query_one(StatusHeader)
-                self.assertIn("not running", render_text(header.render()))
+                rendered = render_text(header.render())
+                self.assertIn("not running", rendered)
+                self.assertIn(host, rendered)
         finally:
             harness.cleanup()
 
     async def test_header_stays_live_in_editor_mode(self) -> None:
+        import socket
+
         from tests.support import MODEL_SLUG, QUANT, Harness
 
+        host = socket.gethostname()
         harness = Harness()
         try:
             app = harness.app()
@@ -381,10 +389,9 @@ class StatusHeaderComposeTests(unittest.IsolatedAsyncioTestCase):
                 app._editor_mode = True
                 app._refresh_pid()
                 header = app.query_one(StatusHeader)
-                self.assertIn(
-                    f"port 8080  •  PID {os.getpid()}",
-                    render_text(header.render()),
-                )
+                rendered = render_text(header.render())
+                self.assertIn(f"port 8080  •  PID {os.getpid()}", rendered)
+                self.assertIn(host, rendered)
 
                 harness.paths.pid_file.unlink()
                 app._refresh_pid()

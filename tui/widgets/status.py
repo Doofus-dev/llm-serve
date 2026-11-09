@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 from rich import box
 from rich.console import Group
 from rich.table import Table
@@ -197,9 +199,17 @@ class StatusHeader(Static):
     def render(self) -> Text:
         info = self.pid_info
         line = fmt_server_status_line(info, self.uptime, self.instances)
-        if line == "not running":
-            return Text("not running", style=TEXT_MUTED)
-        return Text(line, style=ACCENT)
+        style = TEXT_MUTED if line == "not running" else ACCENT
+        host = socket.gethostname()
+        width = self.size.width
+        # Account for bar padding (0 1) and a one-cell gap; truncate, never wrap.
+        usable = max(0, width - 2)
+        max_host = max(0, usable - len(line) - 1)
+        if len(host) > max_host:
+            host = host[:max_host]
+        if host:
+            line = line + " " * (usable - len(line) - len(host)) + host
+        return Text(line, style=style)
 
 
 class StatusPanel(Vertical):
