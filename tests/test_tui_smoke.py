@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from tests.support import DISPLAY, MODEL_SLUG, Harness
+from tests.support import DISPLAY, MODEL_SLUG, QUANT, Harness
 from tui.widgets.config import ConfigPanel
 from tui.widgets.nav import ModelNav
 from tui.widgets.status import StatusPanel
@@ -47,7 +47,7 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
                 if data and data[0] == "model"
             ]
             self.assertTrue(any(DISPLAY.lower() in label.lower() for label in labels), labels)
-            self.assertTrue(any("Quant" in label and "ctx:" in label for label in labels), labels)
+            self.assertTrue(any(QUANT in label for label in labels), labels)
 
             status = app.query_one(StatusPanel)
             rendered = render_text(status.render())
@@ -59,9 +59,9 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
             cfg.preset_store = app.preset_store
             cfg.models_dir = app.paths.models_dir
             text = render_text(cfg.render())
-            self.assertIn("Model", text)
-            self.assertIn(DISPLAY, text)
-            self.assertIn("Preset", text)
+            self.assertIn("default", text)
+            self.assertIn("ctx", text)
+            self.assertIn("sampling", text)
 
             app._refresh_pid()
             app._poll_gpu()

@@ -60,6 +60,7 @@ class FooterBindingTests(unittest.TestCase):
                 "delete",
                 "cycle_log_verbosity",
                 "toggle_log_source",
+                "toggle_log_panel",
                 "open_hub",
                 "open_benchmark",
                 "change_theme",
@@ -94,12 +95,20 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.1)
             on_model = shown_actions(app)
             self.assertTrue(
-                {"launch", "edit", "pick_quant", "compare_presets", "compare_selected"}
+                {
+                    "launch",
+                    "edit",
+                    "pick_quant",
+                    "pick_preset",
+                    "compare_presets",
+                    "compare_selected",
+                }
                 <= on_model
             )
             self.assertTrue(
-                {"stop", "new", "delete", "open_hub", "open_benchmark", "quit"} <= on_model
+                {"stop", "delete", "open_hub", "open_benchmark", "quit"} <= on_model
             )
+            self.assertNotIn("new", on_model)
 
             aliases = app.query_one(AliasNav)
             aliases.focus()
@@ -107,6 +116,7 @@ class FooterVisibilityTests(unittest.IsolatedAsyncioTestCase):
             on_alias = shown_actions(app)
             self.assertIn("launch", on_alias)
             self.assertNotIn("pick_quant", on_alias)
+            self.assertNotIn("pick_preset", on_alias)
             self.assertNotIn("compare_presets", on_alias)
             self.assertNotIn("compare_selected", on_alias)
             self.assertIn("edit", on_alias)

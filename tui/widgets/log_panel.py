@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from rich.text import Text
 from textual.geometry import Size
+from textual.reactive import reactive
 from textual.widgets import RichLog
 from textual.app import ComposeResult
 from textual.widgets import Static
@@ -14,7 +16,14 @@ from tui.paths import MAX_LOG_EVENTS
 
 
 class LogPanel(RichLog):
-    """Translated llama.cpp events plus consecutive-run counters for leftover lines."""
+    """Translated llama.cpp events plus consecutive-run counters for leftover lines.
+
+    Collapsible drawer: ``g`` toggles a one-line summary strip (last event,
+    +N unseen, red dot on error). The feed stays mounted, so the tailer and
+    event buffer survive while collapsed.
+    """
+
+    collapsed: reactive[bool] = reactive(False)
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -32,9 +41,65 @@ class LogPanel(RichLog):
         self._empty_shown = False
         self._last_strip_count = 0
         self._line_count_label: str | None = None
+        self._unseen = 0
+        self._has_error = False
 
     def compose(self) -> ComposeResult:
         yield Static("LOGS", classes="card-title", id="logs-title")
+        yield Static("", classes="log-summary", id="logs-summary")
+
+    def watch_collapsed(self, value: bool) -> None:
+        self.set_class(value, "collapsed")
+        if not value:
+            self._unseen = 0
+        self._render_summary()
+        self.refresh()
+
+    def toggle_collapsed(self) -> bool:
+        self.collapsed = not self.collapsed
+        return self.collapsed
+
+    def _summary_event(self) -> LogEvent | None:
+        if self._events:
+            return self._events[-1]
+        return None
+
+    def _render_summary(self) -> None:
+        try:
+            summary = self.query_one("#logs-summary", Static)
+        except Exception:
+            return
+        if not self.collapsed:
+            summary.remove_class("log-summary")
+            summary.add_class("log-hidden")
+            summary.renderable = ""
+            return
+        summary.remove_class("log-hidden")
+        summary.add_class("log-summary")
+        text = Text()
+        event = self._summary_event()
+        if event is None:
+            text.append("logs collapsed", style="dim")
+        else:
+            if self._has_error:
+                text.append("● ", style="red")
+            last = render_event(event)
+            plain = str(last)
+            if len(plain) > 44:
+                plain = "…" + plain[-43:]
+            text.append(plain, style="dim")
+            if self._unseen:
+                text.append(f"  +{self._unseen}", style="yellow")
+        summary.renderable = text
+
+    def on_click(self, event) -> None:
+        if self.collapsed:
+            self.toggle_collapsed()
+
+    def on_mount(self) -> None:
+        if self.collapsed:
+            self.set_class(True, "collapsed")
+            self._render_summary()
 
     def _render_line_count(self) -> None:
         """Show a faint line counter when the log is scrolled."""
@@ -121,6 +186,16 @@ class LogPanel(RichLog):
             written = self._write_event(event, follow=follow)
             if written:
                 self._last_strip_count = written
+        self._note_new_events(appended)
+
+    def _note_new_events(self, appended: list[LogEvent]) -> None:
+        if not appended:
+            return
+        if any(event.kind in ("error", "warn") for event in appended):
+            self._has_error = True
+        if self.collapsed:
+            self._unseen += len(appended)
+            self._render_summary()
 
     def _show_empty(self) -> None:
         self.clear()

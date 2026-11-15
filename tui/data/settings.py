@@ -19,6 +19,7 @@ class TUISettings:
     hf_authors: list[str] = field(default_factory=lambda: list(DEFAULT_HF_AUTHORS))
     log_verbosity: int = DEFAULT_LOG_VERBOSITY
     remote_launch: bool = False
+    logs_collapsed: bool = False
 
 
 def clamp_log_verbosity(value: object, default: int = DEFAULT_LOG_VERBOSITY) -> int:
@@ -74,6 +75,7 @@ def load_settings(path: Path) -> TUISettings:
         hf_authors=hf_authors,
         log_verbosity=clamp_log_verbosity(data.get("log_verbosity", DEFAULT_LOG_VERBOSITY)),
         remote_launch=coerce_bool(data.get("remote_launch", False)),
+        logs_collapsed=coerce_bool(data.get("logs_collapsed", False)),
     )
 
 
@@ -85,6 +87,7 @@ def save_settings(path: Path, settings: TUISettings) -> None:
         data["hf_authors"] = list(settings.hf_authors)
     data["log_verbosity"] = clamp_log_verbosity(settings.log_verbosity)
     data["remote_launch"] = bool(settings.remote_launch)
+    data["logs_collapsed"] = bool(settings.logs_collapsed)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 

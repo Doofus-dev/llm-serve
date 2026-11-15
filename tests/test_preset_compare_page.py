@@ -156,15 +156,23 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
         self.harness.cleanup()
 
     def _select_preset(self, app: LLMServeApp, model: str, slot: int) -> None:
+        """Select the model card and activate the preset slot.
+
+        Preset sub-rows were removed from the sidebar; presets are now
+        activated via the 1-5 hotkeys (or the ``n`` picker overlay), so the
+        old "highlight a preset row" helper becomes select-model + activate.
+        """
         nav = app.query_one(ModelNav)
         nav.focus()
         for index in range(nav.option_count):
             option = nav.get_option_at_index(index)
             data = nav._option_data.get(option.id or "")
-            if data and data[0] == "preset" and data[1] == model and data[3] == slot:
+            if data and data[0] == "model" and data[1] == model:
                 nav.highlighted = index
-                return
-        self.fail(f"preset {model}[{slot}] not in nav")
+                break
+        else:
+            self.fail(f"model {model} not in nav")
+        app.action_activate_preset(slot)
 
     def _metrics(self, screen) -> str:
         return str(screen.query_one("#pcp-metrics").content)

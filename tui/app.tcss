@@ -229,7 +229,7 @@ Button.-style-flat:disabled {
     }
     #right { layout: vertical; height: 1fr; width: 1fr; }
     #status {
-        height: 20;
+        height: 1fr;
         min-height: 15;
         overflow-y: auto;
         border: round $border;
@@ -252,7 +252,8 @@ Button.-style-flat:disabled {
         background: $panel;
     }
     #config {
-        height: 1fr;
+        height: auto;
+        min-height: 4;
         padding: 0 1;
         overflow-y: auto;
         border: round $border;
@@ -274,6 +275,22 @@ Button.-style-flat:disabled {
         border: round $border;
         padding: 0 1;
         background: $panel;
+    }
+    #logs.collapsed {
+        height: 1;
+        min-height: 1;
+        overflow: hidden;
+    }
+    #logs.collapsed .card-title {
+        border-bottom: none;
+    }
+    #logs .log-summary {
+        height: 1;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    #logs .log-hidden {
+        display: none;
     }
     #logs .card-title {
         height: 1;

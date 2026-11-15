@@ -11,7 +11,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches, QueryError
-from textual.events import Focus
+from textual.events import Blur, Focus
 from textual.widgets import Footer, Label, Switch
 from textual.theme import Theme
 
@@ -106,6 +106,7 @@ from tui.screens.preset_compare_page import (
     PresetCompareSide,
     identity_for_quant,
 )
+from tui.screens.preset_picker import PresetPickerScreen
 from tui.screens.quant_picker import QuantPickerScreen
 from tui.widgets.config import ConfigPanel
 from tui.widgets.download_bar import DownloadBar
@@ -131,7 +132,6 @@ class LLMServeApp(App):
         color: $text-muted;
     }
     """
-    BINDINGS = build_app_bindings()
     def __init__(self, paths: AppPaths | None = None):
         super().__init__()
         self.paths = paths or default_paths()
@@ -180,7 +180,7 @@ class LLMServeApp(App):
                 with Vertical(id="left"):
                     yield Label("MODELS", classes="nav-heading")
                     yield ModelNav(self.registry, self.preset_store, self.paths.models_dir)
-                    yield Label("ALIASES  Tab · 1-5 pin", classes="nav-heading")
+                    yield Label("ALIASES  Tab · 1-5 preset · n pick", classes="nav-heading")
                     yield AliasNav(self.registry)
                 with Vertical(id="right"):
                     yield StatusPanel(id="status")
@@ -218,8 +218,10 @@ class LLMServeApp(App):
         return True
 
     def on_focus(self, event: Focus) -> None:
-        if isinstance(event.widget, (ModelNav, AliasNav, LogPanel)):
-            self.refresh_bindings()
+        self._update_footer()
+
+    def on_blur(self, event: events.Blur) -> None:
+        self._update_footer()
 
     def _update_footer(self) -> None:
         """Refresh footer bindings for editor mode, labels, and selection."""
@@ -237,11 +239,19 @@ class LLMServeApp(App):
                     info_label = self._info_log_label()
                 except (QueryError, NoMatches):
                     pass
+            logs_collapsed = False
+            if self.is_mounted:
+                try:
+                    logs_collapsed = self.query_one(LogPanel).collapsed
+                except (QueryError, NoMatches):
+                    pass
             self._bindings = BindingsMap(
                 build_app_bindings(
                     remote_on=self.remote_launch,
                     log_label=log_verbosity_label(self.log_verbosity),
                     info_label=info_label,
+                    logs_collapsed=logs_collapsed,
+                    in_models_section=self._models_section_focused(),
                 )
             )
         if self.is_mounted:
@@ -253,6 +263,7 @@ class LLMServeApp(App):
             self.theme = saved_theme
         nav = self.query_one(ModelNav)
         nav.focus()
+        self.query_one(LogPanel).collapsed = self.settings.logs_collapsed
         cfg = self.query_one(ConfigPanel)
         cfg.models_dir = self.paths.models_dir
         cfg.registry = self.registry
@@ -980,6 +991,16 @@ class LLMServeApp(App):
         self.query_one(LogPanel).toggle_info()
         self._update_footer()
 
+    def action_toggle_log_panel(self) -> None:
+        """Collapse / expand the log drawer (sticky across restarts)."""
+        if self._editor_mode:
+            return
+        panel = self.query_one(LogPanel)
+        panel.collapsed = not panel.collapsed
+        self.settings.logs_collapsed = panel.collapsed
+        save_settings(self.paths.settings_json, self.settings)
+        self._update_footer()
+
     def action_toggle_remote(self) -> None:
         """Toggle Meshnet/LAN binding for the next launch."""
         self._set_remote_launch(not self.remote_launch)
@@ -1235,23 +1256,19 @@ class LLMServeApp(App):
             self.notify("Close the editor first", severity="warning")
             return
         data = self._selected_data()
-        if data and data[0] == "alias":
-            def handle_alias_result(result: tuple[str, str] | None) -> None:
-                if result is not None:
-                    name, target = result
-                    self.registry.aliases[name] = AliasTarget(model=target)
-                    save_registry(self.paths.models_json, self.registry)
-                    self._reload_registry()
-                    self.notify(f"Created alias {name} → {target}")
-
-            self.push_screen(CreateAliasDialog(self.registry), handle_alias_result)
+        if not data or data[0] != "alias":
+            self.notify("Select an alias to create a new one", severity="warning")
             return
 
-        model = self._selected_model()
-        if not model:
-            self.notify("Select a model first to create a preset", severity="warning")
-            return
-        self._new_preset_for_model(model)
+        def handle_alias_result(result: tuple[str, str] | None) -> None:
+            if result is not None:
+                name, target = result
+                self.registry.aliases[name] = AliasTarget(model=target)
+                save_registry(self.paths.models_json, self.registry)
+                self._reload_registry()
+                self.notify(f"Created alias {name} → {target}")
+
+        self.push_screen(CreateAliasDialog(self.registry), handle_alias_result)
 
     def _apply_slot_remaps(
         self,
@@ -1431,6 +1448,40 @@ class LLMServeApp(App):
         set_active_preset(self.preset_store, model_name, quant, slot)
         save_presets(self.paths.presets_json, self.preset_store)
         self._reload_registry()
+
+    def action_pick_preset(self) -> None:
+        """Open the preset picker overlay for the selected model's quant."""
+        if self._editor_mode:
+            return
+        model_name = self._selected_model()
+        if not model_name or model_name not in self.registry.models:
+            self.notify("Select a model first", severity="warning")
+            return
+        quant = self._model_active_quant(model_name)
+        presets = list_presets_for_quant(self.preset_store, model_name, quant)
+        active = get_active_slot(self.preset_store, model_name, quant)
+        if not presets:
+            self.notify(
+                f"No presets for {self.registry.models[model_name].display} / {quant}",
+                severity="warning",
+            )
+            return
+
+        def on_pick(slot: int | None) -> None:
+            if slot is None:
+                return
+            set_active_preset(self.preset_store, model_name, quant, slot)
+            save_presets(self.paths.presets_json, self.preset_store)
+            self._reload_registry()
+
+        self.push_screen(
+            PresetPickerScreen(
+                f"{self.registry.models[model_name].display} · {quant}",
+                presets,
+                active,
+            ),
+            on_pick,
+        )
 
     def action_compare_presets(self) -> None:
         if self._editor_mode:

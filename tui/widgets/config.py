@@ -6,7 +6,6 @@ from pathlib import Path
 
 from rich.console import Group
 from rich.markup import escape
-from rich.table import Table
 from rich.text import Text
 from textual.reactive import reactive
 from textual.widgets import Static
@@ -23,7 +22,13 @@ from tui.data.presets import (
 )
 from tui.paths import PROFILE_KEYS
 from tui.theme import ACCENT, ERR, OK, WARN, WARN_STYLE
-from tui.widgets.health import fmt_ctx, model_author, model_file_exists
+from tui.widgets.health import (
+    fmt_ctx,
+    fmt_model_runtime_line,
+    fmt_sampling_line,
+    model_author,
+    model_file_exists,
+)
 
 
 def _grid_label(label: str) -> Text:
@@ -314,7 +319,12 @@ def build_preset_grid(
 
 
 class ConfigPanel(Static):
-    """Active preset config for the selected model."""
+    """Active preset chip for the selected model.
+
+    Two lines: a runtime summary (preset, ctx, ngl, KV, flash_attn) and a
+    sampling recap. Full detail is one key away — ``E`` opens the editor,
+    ``X`` the compare screen.
+    """
 
     selected: reactive[str | None] = reactive(None)
     registry: Registry | None = None
@@ -332,79 +342,71 @@ class ConfigPanel(Static):
     def _value(value: object) -> Text:
         return _grid_value(value)
 
-    def render(self) -> Group:
-        title = Text("ACTIVE PRESET", style="bold")
-        if self.selected and self.registry and self.selected in self.registry.models:
-            model = self.registry.models[self.selected]
-            identity = model.params
-            active_q = model.active_quant
-            preset = None
-            if self.preset_store and active_q:
-                slot = get_active_slot(self.preset_store, self.selected, active_q)
-                if slot is not None:
-                    preset = get_preset(self.preset_store, self.selected, active_q, slot)
+    def _resolve_selection(self) -> tuple[object, dict, str, object, int | None] | None:
+        """(model, identity, active_quant, preset, slot) for the selected model."""
+        if not self.selected or not self.registry:
+            return None
+        model = self.registry.models.get(self.selected)
+        if model is None:
+            return None
+        identity = model.params
+        active_q = model.active_quant
+        preset = None
+        slot = None
+        if self.preset_store and active_q:
+            slot = get_active_slot(self.preset_store, self.selected, active_q)
+            if slot is not None:
+                preset = get_preset(self.preset_store, self.selected, active_q, slot)
+        return model, identity, active_q, preset, slot
 
-            renderables: list = [title]
-            source = identity.get("source")
-            if isinstance(source, dict) and source.get("repo"):
-                renderables.append(
-                    Text(
-                        f"{source['repo']}  •  {source.get('filename', Path(model.file).name)}",
-                        style="dim",
-                    )
-                )
-            if not preset:
-                author = model_author(identity, model.file)
-                max_ctx = resolve_context_length(identity, self.models_dir)
-                file_status = (
-                    "present"
-                    if self.models_dir and model_file_exists(
-                        quant_rel_paths(model, active_q) or [model.file],
-                        self.models_dir,
-                    )
-                    else "missing"
-                )
-                summary = Table.grid(expand=True, padding=(0, 1))
-                summary.add_column(width=12, no_wrap=True)
-                summary.add_column(ratio=1)
-                summary.add_column(width=12, no_wrap=True)
-                summary.add_column(ratio=1)
-                summary.add_row(
-                    self._label("Model"),
-                    self._value(model.display),
-                    self._label("Quant"),
-                    self._value(active_q or "—"),
-                )
-                summary.add_row(
-                    self._label("Preset"),
-                    self._value("none"),
-                    self._label("Author"),
-                    self._value(author or "local"),
-                )
-                summary.add_row(
-                    self._label("Max context"),
-                    self._value(
-                        f"{fmt_ctx(max_ctx)} tokens" if max_ctx is not None else "unknown"
-                    ),
-                    self._label("File"),
-                    self._value(file_status),
-                )
-                renderables.insert(1, summary)
-                renderables.append(
-                    Text("Select a preset, or press 1-5 to activate one", style="dim")
-                )
-                return Group(*renderables)
+    def _chip_lines(self, identity: dict, preset, slot: int | None) -> list[Text]:
+        params = (
+            merge_identity_and_preset(identity, preset)
+            if preset is not None
+            else dict(identity)
+        )
+        models_dir = self.models_dir or Path()
 
-            renderables.insert(
-                1,
-                Text.from_markup(
-                    build_preset_grid(identity, preset, self.models_dir)
-                ),
+        line1 = Text()
+        if preset is not None and slot is not None:
+            line1.append(f"[{slot}] {preset.name}", style=WARN_STYLE)
+        else:
+            line1.append("no preset", style="dim")
+        line1.append(f"  •  {fmt_model_runtime_line(params, models_dir)}", style="dim")
+        cache_k = params.get("cache_k")
+        cache_v = params.get("cache_v")
+        if cache_k or cache_v:
+            line1.append(f"  •  KV {cache_k or '?'} / {cache_v or '?'}", style="dim")
+        flash = params.get("flash_attn")
+        if flash != "":
+            on = str(flash).strip().lower() not in ("0", "off", "false", "no")
+            line1.append(f"  •  flash_attn {'on' if on else 'off'}", style="dim")
+        if not model_file_exists(
+            quant_entry_rel_paths(
+                identity.get("quants", {}).get(identity.get("active_quant"))
             )
-            return Group(*renderables)
-        empty = Text(justify="center")
-        empty.append("○ ", style="dim")
-        empty.append("No model selected", style="dim")
-        empty.append("\n")
-        empty.append("Pick a model in the tree on the left", style="bold dim")
-        return Group(title, empty)
+            or coerce_rel_paths(identity.get("file")),
+            self.models_dir or Path(),
+        ):
+            line1.append("  ⚠ file", style=ERR_STYLE)
+
+        sampling = fmt_sampling_line(params)
+        line2 = Text()
+        if sampling:
+            line2.append("sampling ", style=ACCENT)
+            line2.append(sampling, style="dim")
+        else:
+            line2.append("E edit  •  X compare", style="dim")
+        return [line1, line2]
+
+    def render(self) -> Group:
+        resolved = self._resolve_selection()
+        if resolved is None:
+            empty = Text(justify="center")
+            empty.append("○ ", style="dim")
+            empty.append("No model selected", style="dim")
+            empty.append("\n")
+            empty.append("Pick a model in the tree on the left", style="bold dim")
+            return Group(empty)
+        _model, identity, _active_q, preset, slot = resolved
+        return Group(*self._chip_lines(identity, preset, slot))

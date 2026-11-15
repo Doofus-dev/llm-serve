@@ -487,7 +487,6 @@ class RegistryShardTests(unittest.TestCase):
             if option_data.get(option.id or "", ("",))[0] == "model"
         ]
         self.assertTrue(any("Flash Next" in label for label in labels), labels)
-        self.assertTrue(any(FLASH_QUANT in label for label in labels), labels)
 
 
 class ProcessTests(unittest.TestCase):

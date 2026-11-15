@@ -533,11 +533,11 @@ class ModelNavCapabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(hammers), 1)
             self.assertEqual(eyeballs[0].model_name, MODEL_SLUG)
             self.assertEqual(eyeballs[0].state, "missing")
-            preset_items = list(nav.query("ListItem.nav-preset"))
-            self.assertTrue(preset_items)
-            for item in preset_items:
-                self.assertEqual(len(list(item.query(VisionEyeball))), 0)
-                self.assertEqual(len(list(item.query(ToolsBadge))), 0)
+            model_items = list(nav.query("ListItem.nav-model"))
+            self.assertTrue(model_items)
+            for item in model_items:
+                self.assertLessEqual(len(list(item.query(VisionEyeball))), 1)
+                self.assertLessEqual(len(list(item.query(ToolsBadge))), 1)
 
     async def test_eyeball_toggle_persists_and_keeps_missing_state(self) -> None:
         from tests.support import MODEL_SLUG

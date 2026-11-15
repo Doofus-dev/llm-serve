@@ -38,11 +38,22 @@ def model_file_exists(file: str | Sequence[str], models_dir: Path) -> bool:
 
 
 def fmt_model_runtime_line(params: dict, models_dir: Path) -> str:
-    """Line 2: preset context vs model max, and GPU layers."""
+    """Runtime summary: preset context vs model max, and GPU layers."""
     max_ctx = resolve_context_length(params, models_dir)
     ctx = fmt_ctx_range(params.get("ctx", "?"), max_ctx)
     ngl = params.get("gpu_layers", "?")
-    return f"ctx: {ctx}  ngl: {ngl}"
+    return f"ctx {ctx}  ngl {ngl}"
+
+
+def fmt_sampling_line(params: dict) -> str:
+    """Sampling recap for the preset chip: temp, top_p, top_k, seed."""
+    bits = []
+    for key in ("temp", "top_p", "top_k", "seed"):
+        value = params.get(key, "")
+        if value == "" or value is None:
+            continue
+        bits.append(f"{key}={value}")
+    return " ".join(bits)
 
 # Health ramp: one green/amber/red scale shared by VRAM, temperature,
 # and generation speed so "is it healthy at a glance" works across all three.

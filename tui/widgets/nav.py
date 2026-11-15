@@ -5,23 +5,22 @@ from __future__ import annotations
 from rich.text import Text
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.events import Click
+from textual.events import Blur, Click, Focus, Key
 from textual.message import Message
 from textual.widgets import ListItem, ListView, OptionList, Static
 from textual.widgets.option_list import Option
 
 from tui.data.capabilities import is_mtp_enabled, is_vision_enabled, nav_capability_icons
-from tui.data.models_json import Registry, model_author_size_line, save_registry
-from tui.data.presets import (
-    PresetStore,
-    get_active_slot,
-    get_preset,
-    list_presets_for_quant,
-    merge_identity_and_preset,
+from tui.data.hf import fmt_size
+from tui.data.models_json import (
+    Registry,
+    coerce_rel_paths,
+    quant_rel_paths,
+    save_registry,
 )
-from tui.data.quant import quant_from_filename
-from tui.theme import ACCENT, ACCENT_STYLE, OK, OK_STYLE, WARN_STYLE
-from tui.widgets.health import fmt_ctx, fmt_model_runtime_line
+from tui.data.presets import PresetStore, list_presets_for_quant
+from tui.data.quant import author_size_label, quant_from_filename
+from tui.theme import ACCENT_STYLE, DIM_STYLE, OK, OK_STYLE, WARN_STYLE
 
 EYEBALL = "👁"
 HAMMER = "🔨"
@@ -156,8 +155,29 @@ class ToolsBadge(Static):
         self.tooltip = "Tool calls"
 
 
+def _on_disk_size_bytes(models_dir, rels: list[str]) -> int:
+    total = 0
+    for rel in rels:
+        try:
+            total += (models_dir / rel).stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _first_rel(model) -> str:
+    rels = coerce_rel_paths(model.params.get("files")) or coerce_rel_paths(
+        model.params.get("file")
+    )
+    return rels[0] if rels else ""
+
+
 class ModelNav(ListView):
-    """Card-based model navigation with directly selectable presets."""
+    """Compact model rows grouped by author, with type-to-filter search.
+
+    Presets are no longer rows; the 1-5 keys select them and ``n`` opens the
+    preset picker overlay.
+    """
 
     DEFAULT_CSS = """
     ModelNav {
@@ -207,6 +227,21 @@ class ModelNav(ListView):
         dock: right;
         align: right top;
     }
+    .nav-group {
+        height: auto;
+        margin: 1 0 0 0;
+        padding: 0 1;
+        color: $text-muted;
+        text-style: bold;
+    }
+    .nav-group:first-child {
+        margin-top: 0;
+    }
+    .nav-filter {
+        height: 1;
+        padding: 0 1;
+        color: $accent;
+    }
     """
 
     def __init__(self, registry: Registry, preset_store: PresetStore, models_dir):
@@ -217,6 +252,19 @@ class ModelNav(ListView):
         self._option_data: dict[str, tuple] = {}
         self._option_order: list[Option] = []
         self.running_models: set[str] = set()
+        self.filter_text: str = ""
+
+    def _on_focus(self, event: Focus) -> None:
+        super()._on_focus(event)
+        self.app._update_footer()
+
+    def _on_blur(self, event: Blur) -> None:
+        super()._on_blur(event)
+        self.app._update_footer()
+
+    @property
+    def _filter_marker(self) -> str:
+        return "nav-filter-row"
 
     async def on_mount(self) -> None:
         await self._refresh_cards()
@@ -328,73 +376,109 @@ class ModelNav(ListView):
         self._persist_mtp_enabled(event.model_name, not is_mtp_enabled(cfg.params))
         await self._refresh_cards()
 
+    def _author_for(self, model) -> str:
+        return author_size_label(model.params, _first_rel(model)).split(" ", 1)[0] or "local"
+
+    def _row_matches_filter(self, name: str, model) -> bool:
+        needle = self.filter_text.lower()
+        if not needle:
+            return True
+        haystacks = [model.display, name]
+        quants = model.params.get("quants")
+        if isinstance(quants, dict):
+            haystacks.extend(quants.keys())
+        haystacks.append(self._author_for(model))
+        return any(needle in haystack.lower() for haystack in haystacks)
+
     def _build_entries(self) -> tuple[list[ListItem], dict[str, tuple], list[Option]]:
         items: list[ListItem] = []
         option_data: dict[str, tuple] = {}
         option_order: list[Option] = []
-        aliases = self.registry.aliases
-        for model_index, (name, model) in enumerate(self.registry.models.items()):
-            active_q = model.active_quant or quant_from_filename(model.file)
-            runtime_params = dict(model.params)
-            slot = get_active_slot(self.preset_store, name, active_q)
-            preset = None
-            if slot is not None:
-                preset = get_preset(self.preset_store, name, active_q, slot)
-                if preset:
-                    runtime_params = merge_identity_and_preset(model.params, preset)
-            is_running = name in self.running_models
-            card = Text()
-            card.append("● " if is_running else "○ ", style=OK if is_running else "dim")
-            card.append(model.display, style=ACCENT_STYLE)
-            model_aliases = [
-                alias for alias, target in aliases.items() if target.model == name
-            ]
-            if model_aliases:
-                card.append(f"  {', '.join(model_aliases)}", style="dim")
-            card.append("  ", style="dim")
-            card.append(f"[{active_q}]", style=WARN_STYLE)
-            card.append("\n")
-            card.append(model_author_size_line(model), style="dim")
-            card.append("\n")
-            card.append("\n")
-            card.append("Quant ", style=ACCENT)
-            card.append(active_q, style=WARN_STYLE)
-            if preset is not None and slot is not None:
-                card.append("  •  Preset ", style="dim")
-                card.append(f"[{slot}] {preset.name}", style=WARN_STYLE)
-            card.append("\n")
-            card.append(fmt_model_runtime_line(runtime_params, self.models_dir), style="dim")
-            option_id = f"model-{model_index}"
-            data = ("model", name)
-            option_data[option_id] = data
-            option_order.append(Option(card, id=option_id))
-            vision_state, show_tools, mtp_state = nav_capability_icons(model.params, self.models_dir)
+        if self.filter_text:
+            filter_line = Text()
+            filter_line.append("filter: ", style=DIM_STYLE)
+            filter_line.append(self.filter_text, style=ACCENT_STYLE)
             items.append(
-                self._model_item(option_id, card, name, vision_state, show_tools, mtp_state)
+                ListItem(
+                    Static(filter_line, markup=False, classes="nav-filter"),
+                    id=self._filter_marker,
+                    classes="nav-filter",
+                )
             )
 
-            for slot, preset in sorted(
-                list_presets_for_quant(self.preset_store, name, active_q).items()
-            ):
-                active = get_active_slot(self.preset_store, name, active_q) == slot
-                preset_line = Text("  ")
-                preset_line.append("● " if active else "○ ", style=OK if active else "dim")
-                preset_line.append(f"[{slot}] {preset.name}", style="bold" if active else "")
-                preset_line.append(
-                    f"  ctx {fmt_ctx(preset.params.get('ctx', '?'))}",
-                    style="dim",
+        groups: dict[str, list[str]] = {}
+        for name, model in self.registry.models.items():
+            if not self._row_matches_filter(name, model):
+                continue
+            groups.setdefault(self._author_for(model), []).append(name)
+
+        model_index = 0
+        for author in sorted(groups):
+            group_line = Text(f"{author.title()}  ", style="dim")
+            group_line.append(f"({len(groups[author])})", style=DIM_STYLE)
+            items.append(
+                ListItem(
+                    Static(group_line, markup=False, classes="nav-group"),
+                    id=f"nav-group-{author}",
+                    classes="nav-group",
                 )
-                preset_id = f"preset-{model_index}-{slot}"
-                option_data[preset_id] = ("preset", name, active_q, slot)
-                option_order.append(Option(preset_line, id=preset_id))
+            )
+            for name in groups[author]:
+                model = self.registry.models[name]
+                active_q = model.active_quant or quant_from_filename(model.file)
+                is_running = name in self.running_models
+                card = Text()
+                card.append("● " if is_running else "○ ", style=OK if is_running else "dim")
+                card.append(model.display, style=ACCENT_STYLE)
+                card.append(f"  [{active_q}]", style=WARN_STYLE)
+                size = _on_disk_size_bytes(
+                    self.models_dir, quant_rel_paths(model, active_q)
+                )
+                if size:
+                    card.append(f"  {fmt_size(size)}", style=DIM_STYLE)
+                preset_count = len(
+                    list_presets_for_quant(self.preset_store, name, active_q)
+                )
+                if preset_count:
+                    card.append(f"  [{preset_count}]", style=DIM_STYLE)
+                option_id = f"model-{model_index}"
+                option_data[option_id] = ("model", name)
+                option_order.append(Option(card, id=option_id))
+                vision_state, show_tools, mtp_state = nav_capability_icons(
+                    model.params, self.models_dir
+                )
                 items.append(
-                    ListItem(
-                        Static(preset_line, markup=False, classes="nav-card-body"),
-                        id=preset_id,
-                        classes="nav-preset",
+                    self._model_item(
+                        option_id, card, name, vision_state, show_tools, mtp_state
                     )
                 )
+                model_index += 1
         return items, option_data, option_order
+
+    def on_key(self, event: Key) -> None:
+        """Type-to-filter: printable chars search, Esc clears.
+
+        App-level binding keys (launch/stop/pick/edit/…) are not consumed so
+        footer hotkeys keep working while the model list is focused.
+        """
+        if not self.has_focus:
+            return
+        key = event.key
+        if key == "escape":
+            if self.filter_text:
+                self.filter_text = ""
+                self.refresh_cards()
+                event.stop()
+            return
+        if len(key) == 1 and key.isprintable():
+            try:
+                if self.app.check_action(key, ()):
+                    return
+            except Exception:
+                pass
+            self.filter_text += key
+            self.refresh_cards()
+            event.stop()
 
     @staticmethod
     def _model_item(
@@ -436,6 +520,14 @@ class AliasNav(OptionList):
         super().__init__(id="alias-nav")
         self.registry = registry
         self._option_data: dict[str, tuple] = {}
+
+    def _on_focus(self, event: Focus) -> None:
+        super()._on_focus(event)
+        self.app._update_footer()
+
+    def _on_blur(self, event: Blur) -> None:
+        super()._on_blur(event)
+        self.app._update_footer()
 
     def on_mount(self) -> None:
         self.refresh_aliases()

@@ -19,6 +19,8 @@ def build_app_bindings(
     remote_on: bool = False,
     log_label: str = "TRACE",
     info_label: str = "Info",
+    logs_collapsed: bool = False,
+    in_models_section: bool = False,
 ) -> list[Binding]:
     """Dashboard footer bindings grouped by function."""
     return [
@@ -29,13 +31,14 @@ def build_app_bindings(
         # Selected model / preset / alias
         Binding("e", "edit", "Edit"),
         Binding("p", "pick_quant", "Quant"),
-        Binding("n", "new", "New"),
+        Binding("n", "pick_preset" if in_models_section else "new", "Preset" if in_models_section else "New"),
         Binding("c", "compare_presets", "Compare"),
         Binding("x", "compare_selected", "Compare Presets"),
         Binding("d", "delete", "Delete"),
         # Next launch + log panel
         Binding("v", "cycle_log_verbosity", f"Log {log_label}"),
         Binding("o", "toggle_log_source", info_label),
+        Binding("g", "toggle_log_panel", "Logs" if logs_collapsed else "Logs ON"),
         # App
         Binding("h", "open_hub", "Hub"),
         Binding("b", "open_benchmark", "Benchmark"),
@@ -47,7 +50,16 @@ def build_app_bindings(
 
 
 SELECTION_ACTIONS = frozenset(
-    {"launch", "edit", "pick_quant", "new", "delete", "compare_presets", "compare_selected"}
+    {
+        "launch",
+        "edit",
+        "pick_quant",
+        "new",
+        "pick_preset",
+        "delete",
+        "compare_presets",
+        "compare_selected",
+    }
 )
 
 
@@ -67,6 +79,10 @@ def selection_supports_action(
         return models_section and kind in {"model", "preset"}
     if action in {"compare_presets", "compare_selected"}:
         return models_section and kind in {"model", "preset"}
+    if action == "pick_preset":
+        return models_section and kind in {"model", "preset"}
+    if action == "new":
+        return kind == "alias"
     if action == "launch":
         return kind in {"model", "preset", "alias"}
     return True
@@ -77,6 +93,7 @@ Navigation
   Tab       Models ↔ Aliases
   ↑↓        move selection
   1-5       activate preset (or pin it on an alias)
+  type      filter models (Esc clears)
 
 Run (models or aliases pane)
   L         launch
@@ -85,7 +102,7 @@ Run (models or aliases pane)
 Models pane (model or preset selected)
   E         edit profile / preset
   P         pick quant
-  N         new preset
+  N         pick preset (overlay)
   C         compare two presets
   X         compare selected vs default/running
   D         delete
@@ -101,6 +118,8 @@ Next launch / logs
   R         remote on/off (next launch)
   V         log verbosity (next launch)
   O         extra info lines on/off
+  G         collapse / expand log drawer
+  type      filter models (Esc clears)
 
 App
   H         Hub
