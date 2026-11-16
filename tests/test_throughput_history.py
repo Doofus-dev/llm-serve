@@ -311,7 +311,7 @@ class ThroughputHistoryTests(unittest.TestCase):
             LastRequest(prompt_tokens=4096, cache_tokens=1200, gen_tokens=142, gen_tps=41.2)
         )
         assert line is not None
-        self.assertIn("last: 4,096 prompt (1,200 cache) · 142 gen @ 41 t/s", line.plain)
+        self.assertIn("last: 4,096 prompt cache 29% · 142 gen @ 41 t/s", line.plain)
 
     def test_throughput_reader_freezes_last_request(self) -> None:
         reader = ThroughputReader()

@@ -18,7 +18,8 @@ from tui.data.models_json import (
     quant_rel_paths,
     save_registry,
 )
-from tui.data.presets import PresetStore, list_presets_for_quant
+from tui.data.context_length import fmt_ctx_compact
+from tui.data.presets import PresetStore, get_active_slot, list_presets_for_quant
 from tui.data.quant import author_size_label, quant_from_filename
 from tui.theme import ACCENT_STYLE, DIM_STYLE, OK, OK_STYLE, WARN_STYLE
 
@@ -175,8 +176,9 @@ def _first_rel(model) -> str:
 class ModelNav(ListView):
     """Compact model rows grouped by author, with type-to-filter search.
 
-    Presets are no longer rows; the 1-5 keys select them and ``n`` opens the
-    preset picker overlay.
+    Models are grouped under author headers; each model's presets are
+    selectable sub-rows indented under it. ``1-5`` activate a preset directly
+    and ``n`` opens the preset picker overlay.
     """
 
     DEFAULT_CSS = """
@@ -233,9 +235,19 @@ class ModelNav(ListView):
         padding: 0 1;
         color: $text-muted;
         text-style: bold;
+        border-bottom: solid $border;
     }
     .nav-group:first-child {
         margin-top: 0;
+    }
+    .nav-model {
+        padding-left: 2;
+    }
+    .nav-preset {
+        padding-left: 4;
+    }
+    .nav-preset.-highlight {
+        background: $surface-darken-1;
     }
     .nav-filter {
         height: 1;
@@ -427,6 +439,8 @@ class ModelNav(ListView):
                 model = self.registry.models[name]
                 active_q = model.active_quant or quant_from_filename(model.file)
                 is_running = name in self.running_models
+                presets = list_presets_for_quant(self.preset_store, name, active_q)
+                active_slot = get_active_slot(self.preset_store, name, active_q)
                 card = Text()
                 card.append("● " if is_running else "○ ", style=OK if is_running else "dim")
                 card.append(model.display, style=ACCENT_STYLE)
@@ -436,11 +450,6 @@ class ModelNav(ListView):
                 )
                 if size:
                     card.append(f"  {fmt_size(size)}", style=DIM_STYLE)
-                preset_count = len(
-                    list_presets_for_quant(self.preset_store, name, active_q)
-                )
-                if preset_count:
-                    card.append(f"  [{preset_count}]", style=DIM_STYLE)
                 option_id = f"model-{model_index}"
                 option_data[option_id] = ("model", name)
                 option_order.append(Option(card, id=option_id))
@@ -453,6 +462,28 @@ class ModelNav(ListView):
                     )
                 )
                 model_index += 1
+                # Preset sub-rows: indented under the model, selectable.
+                for slot in sorted(presets):
+                    preset = presets[slot]
+                    row = Text()
+                    row.append("    ", style="dim")
+                    row.append(
+                        "● " if slot == active_slot else "○ ",
+                        style=OK_STYLE if slot == active_slot else "dim",
+                    )
+                    row.append(f"[{slot}] ", style=ACCENT_STYLE)
+                    row.append(preset.name, style="dim")
+                    row.append("  " + fmt_ctx_compact(preset.params.get("ctx", 0)), style="dim")
+                    preset_id = f"preset-{model_index}-{slot}"
+                    option_data[preset_id] = ("preset", name, active_q, slot)
+                    option_order.append(Option(row, id=preset_id))
+                    items.append(
+                        ListItem(
+                            Static(row, markup=False, classes="nav-preset"),
+                            id=preset_id,
+                            classes="nav-preset",
+                        )
+                    )
         return items, option_data, option_order
 
     def on_key(self, event: Key) -> None:

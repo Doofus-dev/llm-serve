@@ -352,3 +352,60 @@ def format_metrics_table(
             f"[{ACCENT}]{_escape_markup(name)}[/]  {left_cell}  {right_cell}"
         )
     return "\n".join(lines)
+
+
+def format_metrics_table_three_column(
+    rows: list[dict],
+    *,
+    left_label: str,
+    right_label: str,
+) -> str:
+    """3-column compare: one shared label column, one column per side.
+
+    Same coloring as ``format_metrics_table`` (green = better, red = worse,
+    across different models too); values without data render dim.
+    """
+    name_w = max((len(str(row["name"])) for row in rows), default=8)
+    name_w = max(name_w, len("Metric"))
+    left_w = max(
+        [len(left_label)]
+        + [
+            len(_plain_metric_text(row["left_value"], row["format"]))
+            for row in rows
+        ],
+        default=1,
+    )
+    right_w = max(
+        [len(right_label)]
+        + [
+            len(_plain_metric_text(row["right_value"], row["format"]))
+            for row in rows
+        ],
+        default=1,
+    )
+    header = (
+        f"[bold dim]{'Metric':<{name_w}}[/]  "
+        f"[bold {ACCENT}]{_escape_markup(f'{left_label:<{left_w}}')}[/]  "
+        f"[bold {ACCENT}]{_escape_markup(right_label)}[/]"
+    )
+    lines = [header]
+    for row in rows:
+        name = f"{row['name']:<{name_w}}"
+        left_cell = format_metric_cell(
+            row["left_value"],
+            winner=row["winner"],
+            side="left",
+            fmt=row["format"],
+            width=left_w,
+        )
+        right_cell = format_metric_cell(
+            row["right_value"],
+            winner=row["winner"],
+            side="right",
+            fmt=row["format"],
+            width=right_w,
+        )
+        lines.append(
+            f"[{ACCENT}]{_escape_markup(name)}[/]  {left_cell}  {right_cell}"
+        )
+    return "\n".join(lines)

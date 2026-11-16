@@ -116,7 +116,7 @@ class DashboardTests(unittest.TestCase):
         collapsed = " ".join(rendered.split())
 
         self.assertIn("IDLE queue cache prefill generate", collapsed)
-        self.assertIn("last: 4,096 prompt (1,200 cache) · 142 gen @ 41 t/s", collapsed)
+        self.assertIn("last: 4,096 prompt cache 29% · 142 gen @ 41 t/s", collapsed)
 
     def test_status_panel_prefers_friendly_model_name(self) -> None:
         panel = StatusPanel()

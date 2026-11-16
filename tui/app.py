@@ -16,7 +16,12 @@ from textual.widgets import Footer, Label, Switch
 from textual.theme import Theme
 
 from tui.bindings import HELP_TEXT, SELECTION_ACTIONS, build_app_bindings, selection_supports_action
-from tui.data.baselines import RunBaseline, record_baseline
+from tui.data.baselines import (
+    RunBaseline,
+    load_baselines,
+    lookup_baseline,
+    record_baseline,
+)
 from tui.data.downloads import DownloadJob, DownloadManager
 from tui.data.gpu import query_gpu
 from tui.data.capabilities import (
@@ -61,6 +66,7 @@ from tui.data.presets import (
     save_presets,
     set_active_preset,
     set_preset,
+    Preset,
 )
 from tui.data.quant import quant_from_filename
 from tui.data.settings import (
@@ -99,7 +105,12 @@ from tui.screens.editors import (
 from tui.screens.hub import HubScreen
 from tui.screens.help import HelpScreen
 from tui.screens.benchmark import BenchmarkScreen
-from tui.data.compare_metrics import resolve_default_preset
+from tui.data.compare_metrics import (
+    compare_presets_metrics,
+    format_metrics_table_three_column,
+    resolve_baseline,
+    resolve_default_preset,
+)
 from tui.screens.compare import PresetCompareScreen
 from tui.screens.preset_compare_page import (
     PresetComparePage,
@@ -647,6 +658,7 @@ class LLMServeApp(App):
                 if nav is not None and nav.running_models != running_keys:
                     nav.running_models = set(running_keys)
                     nav.refresh_cards()
+                self._refresh_selected_compare()
                 panel.quant_display = None
                 panel.preset_display = None
                 if alive and info:
@@ -706,6 +718,7 @@ class LLMServeApp(App):
             if panel.props is None:
                 panel.props = await self.client.props()
             self._record_baseline(panel)
+            self._refresh_selected_compare()
 
     def _poll_gpu(self) -> None:
         try:
@@ -880,6 +893,248 @@ class LLMServeApp(App):
         cfg.registry = self.registry
         cfg.preset_store = self.preset_store
         self._update_footer()
+        self._refresh_selected_compare()
+
+    def _selected_identity(self) -> tuple[str | None, str | None, int | None, Preset | None]:
+        """(model, quant, slot, preset) for the current selection.
+
+        Matches the launch path: ``("preset", model)`` rows pin the model's
+        active slot; only explicit nav preset sub-rows pin their own slot.
+        """
+        data = self._selected_data()
+        if data is None:
+            return None, None, None, None
+        if data[0] == "model":
+            model_name = data[1]
+            quant = self._model_active_quant(model_name)
+            slot = get_active_slot(self.preset_store, model_name, quant)
+        elif data[0] == "preset":
+            if len(data) == 4:
+                _, model_name, quant, slot = data
+            else:
+                model_name = data[1]
+                quant = self._model_active_quant(model_name)
+                slot = get_active_slot(self.preset_store, model_name, quant)
+        elif data[0] == "alias":
+            target = self.registry.aliases.get(data[1])
+            if target is None:
+                return None, None, None, None
+            model_name = target.model
+            quant = (
+                target.quant
+                if target.quant is not None
+                else self._model_active_quant(model_name)
+            )
+            slot = (
+                target.preset_slot
+                if target.preset_slot is not None
+                else get_active_slot(self.preset_store, model_name, quant)
+            )
+        else:
+            return None, None, None, None
+        preset = get_preset(self.preset_store, model_name, quant, slot)
+        return model_name, quant, slot, preset
+
+    def _refresh_selected_compare(self) -> None:
+        """Front-page 3-column compare (running vs selected) + SELECTED strip."""
+        try:
+            panel = self.query_one(StatusPanel)
+        except (QueryError, NoMatches):
+            return
+        model_name, quant, slot, preset = self._selected_identity()
+        if model_name is None or model_name not in self.registry.models:
+            panel.selected_baseline = None
+            panel.selected_baseline_estimated = False
+            panel.selected_kv = None
+            panel.selected_delta = None
+            panel.compare_markup = ""
+            return
+
+        cfg = self.registry.models[model_name]
+        identity = identity_for_quant(cfg, quant or "")
+        baselines = load_baselines(self.paths.baselines_json)
+        gpu_name = panel.gpu.name if panel.gpu else ""
+
+        sel_run = resolve_baseline(
+            model_name,
+            quant or "",
+            slot,
+            self.paths.models_dir,
+            baselines,
+            identity=identity,
+            preset=preset,
+            gpu_name=gpu_name,
+        )
+        estimated = False
+        if sel_run is None:
+            from tui.data.vram import estimate_gen_tps_calibrated
+
+            rels = quant_rel_paths(cfg, quant or "")
+            file_size = 0
+            for rel in rels:
+                try:
+                    file_size += (self.paths.models_dir / rel).stat().st_size
+                except OSError:
+                    continue
+            ctx = 0
+            if preset is not None:
+                try:
+                    ctx = int(float(str(preset.params.get("ctx") or 0)))
+                except (TypeError, ValueError):
+                    ctx = 0
+            total_layers = int(cfg.params.get("total_layers") or 0)
+            ngl = 0
+            if preset is not None:
+                ngl = int(float(str(preset.params.get("gpu_layers") or 0)))
+            ratio = 1.0
+            if total_layers > 0 and 0 < ngl < 99:
+                ratio = max(0.0, min(1.0, ngl / total_layers))
+            elif ngl == 0:
+                ratio = 0.0
+            if panel.gpu and file_size > 0 and ctx > 0:
+                gen = estimate_gen_tps_calibrated(
+                    file_size, ctx, panel.gpu, ratio,
+                    runs=baselines,
+                    filename=Path(rels[0]).name if rels else "",
+                    gpu_name=gpu_name,
+                )
+                if gen:
+                    sel_run = RunBaseline(
+                        model=model_name,
+                        file=rels[0] if rels else "",
+                        file_size=file_size,
+                        ctx=ctx,
+                        gen_tps=gen,
+                    )
+                    estimated = True
+
+        # KV headroom from the active preset's ctx/parallel/cache_k/cache_v.
+        kv = None
+        if preset is not None and panel.gpu:
+            try:
+                ctx = int(float(str(preset.params.get("ctx") or 0)))
+            except (TypeError, ValueError):
+                ctx = 0
+            try:
+                parallel = int(float(str(preset.params.get("parallel") or 1)))
+            except (TypeError, ValueError):
+                parallel = 1
+            if ctx > 0:
+                total_layers = int(cfg.params.get("total_layers") or 0)
+                ngl = int(float(str(preset.params.get("gpu_layers") or 99)))
+                ratio = 1.0
+                if total_layers > 0 and 0 < ngl < 99:
+                    ratio = max(0.0, min(1.0, ngl / total_layers))
+                from tui.data.context_length import fmt_ctx_compact
+                from tui.data.vram import estimate_vram_calibrated, fmt_memory_mb
+
+                rels = quant_rel_paths(cfg, quant or "")
+                file_size = 0
+                for rel in rels:
+                    try:
+                        file_size += (self.paths.models_dir / rel).stat().st_size
+                    except OSError:
+                        continue
+                total_mb = estimate_vram_calibrated(
+                    file_size,
+                    ctx * max(parallel, 1),
+                    ratio,
+                    runs=baselines,
+                    gpu_name=gpu_name,
+                    filename=Path(rels[0]).name if rels else "",
+                )
+                weights_mb = (file_size / 1_000_000) * ratio
+                kv_mb = max(0.0, total_mb - weights_mb - 640.0 * ratio)
+                headroom = panel.gpu.vram_total_mb - total_mb
+                kv = (
+                    fmt_ctx_compact(ctx * max(parallel, 1)),
+                    fmt_memory_mb(kv_mb),
+                    fmt_memory_mb(max(0.0, headroom)) if headroom > 0 else "over budget",
+                )
+
+        delta = None
+        if sel_run is not None and sel_run.gen_tps and not estimated:
+            rels = quant_rel_paths(cfg, quant or "")
+            file_size = 0
+            for rel in rels:
+                try:
+                    file_size += (self.paths.models_dir / rel).stat().st_size
+                except OSError:
+                    continue
+            total_layers = int(cfg.params.get("total_layers") or 0)
+            ngl = int(float(str(preset.params.get("gpu_layers") or 99))) if preset else 99
+            ratio = 1.0
+            if total_layers > 0 and 0 < ngl < 99:
+                ratio = max(0.0, min(1.0, ngl / total_layers))
+            best = lookup_baseline(
+                baselines,
+                filename=Path(sel_run.file).name if sel_run.file else "",
+                file_size=file_size,
+                ctx=sel_run.ctx,
+                offload_ratio=ratio,
+                gpu_name=gpu_name,
+            )
+            if best is not None and best.gen_tps:
+                d = sel_run.gen_tps - best.gen_tps
+                if abs(d) > 0.05:
+                    delta = f"{d:+.1f} t/s vs measured best"
+
+        # Running side.
+        info = panel.pid_info
+        running_run = None
+        running_label = "idle"
+        if info is not None and info.alive:
+            running_key = self._model_key_for_instance(info)
+            if running_key and running_key in self.registry.models:
+                running_quant = info.quant or self._model_active_quant(running_key)
+                running_slot = info.preset_slot
+                if running_slot is None:
+                    running_slot = get_active_slot(self.preset_store, running_key, running_quant)
+                running_preset = get_preset(
+                    self.preset_store, running_key, running_quant, running_slot
+                )
+                running_identity = identity_for_quant(
+                    self.registry.models[running_key], running_quant
+                )
+                running_run = resolve_baseline(
+                    running_key,
+                    running_quant,
+                    running_slot,
+                    self.paths.models_dir,
+                    baselines,
+                    identity=running_identity,
+                    preset=running_preset,
+                    gpu_name=gpu_name,
+                    live=panel.live_throughput,
+                    history=list(panel.gen_tps_history or []),
+                )
+                running_label = self.registry.models[running_key].display
+        elif sel_run is None:
+            default = resolve_default_preset(self.preset_store, model_name, quant or "")
+            if default is not None:
+                running_run = resolve_baseline(
+                    model_name,
+                    quant or "",
+                    default.slot,
+                    self.paths.models_dir,
+                    baselines,
+                    identity=identity_for_quant(cfg, quant or ""),
+                    preset=default,
+                    gpu_name=gpu_name,
+                )
+                running_label = "default preset"
+
+        sel_label = f"[{slot}] {preset.name}" if preset is not None else "no preset"
+        rows = compare_presets_metrics(running_run, sel_run)
+        panel.compare_markup = format_metrics_table_three_column(
+            rows,
+            left_label=running_label,
+            right_label=f"selected {sel_label}",
+        )
+        panel.selected_baseline = sel_run
+        panel.selected_baseline_estimated = estimated
+        panel.selected_kv = kv
+        panel.selected_delta = delta
 
     def on_screen_resume(self) -> None:
         """Pick up Hub/quant-picker vision_enabled and download changes."""

@@ -110,13 +110,16 @@ def cap_context_value(ctx: int, max_ctx: int | None) -> int:
 
 
 def fmt_ctx_compact(value: object) -> str:
-    """Compact context size: 32768 → 32k."""
+    """Compact context size: 32768 → 32k, 120000 → 117k."""
     try:
         n = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return str(value)
-    if n >= 1024 and n % 1024 == 0:
-        return f"{n // 1024}k"
+    if n >= 1024:
+        k = n / 1024
+        if k == int(k):
+            return f"{int(k)}k"
+        return f"{k:.0f}k"
     return str(n)
 
 

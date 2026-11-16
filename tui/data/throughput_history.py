@@ -564,8 +564,9 @@ def format_last_request(last: LastRequest | None) -> Text | None:
     line = Text()
     line.append("last: ", style="dim")
     line.append(f"{last.prompt_tokens:,} prompt", style="dim")
-    if last.cache_tokens > 0:
-        line.append(f" ({last.cache_tokens:,} cache)", style="dim")
+    if last.prompt_tokens > 0:
+        pct = last.cache_tokens / last.prompt_tokens * 100
+        line.append(f" cache {pct:.0f}%", style="dim")
     line.append(" · ", style="dim")
     line.append(f"{last.gen_tokens:,} gen", style="dim")
     if last.gen_tps > 0:
