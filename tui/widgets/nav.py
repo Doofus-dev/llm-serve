@@ -21,7 +21,8 @@ from tui.data.models_json import (
 from tui.data.context_length import fmt_ctx_compact
 from tui.data.presets import PresetStore, get_active_slot, list_presets_for_quant
 from tui.data.quant import author_size_label, quant_from_filename
-from tui.theme import ACCENT_STYLE, DIM_STYLE, OK, OK_STYLE, WARN_STYLE
+from tui.data.settings import save_settings
+from tui.theme import ACCENT_STYLE, BOLD_STYLE, DIM_STYLE, OK, OK_STYLE, WARN_STYLE
 
 EYEBALL = "👁"
 HAMMER = "🔨"
@@ -52,6 +53,14 @@ class ToggleMtp(Message):
     def __init__(self, model_name: str) -> None:
         super().__init__()
         self.model_name = model_name
+
+
+class ToggleAuthor(Message):
+    """User clicked an author header to expand/collapse its models."""
+
+    def __init__(self, author: str) -> None:
+        super().__init__()
+        self.author = author
 
 
 class VisionEyeball(Static):
@@ -156,6 +165,32 @@ class ToolsBadge(Static):
         self.tooltip = "Tool calls"
 
 
+class AuthorHeader(Static):
+    """Clickable author section title; not focusable so keyboard stays on ModelNav."""
+
+    can_focus = False
+    DEFAULT_CSS = """
+    AuthorHeader {
+        width: 1fr;
+        height: 1;
+        color: $text;
+        text-style: bold;
+    }
+    AuthorHeader:hover {
+        color: $accent;
+        text-style: bold;
+    }
+    """
+
+    def __init__(self, author: str, label: Text) -> None:
+        super().__init__(label, markup=False)
+        self.author = author
+
+    def on_click(self, event: Click) -> None:
+        event.stop()
+        self.post_message(ToggleAuthor(self.author))
+
+
 def _on_disk_size_bytes(models_dir, rels: list[str]) -> int:
     total = 0
     for rel in rels:
@@ -176,9 +211,9 @@ def _first_rel(model) -> str:
 class ModelNav(ListView):
     """Compact model rows grouped by author, with type-to-filter search.
 
-    Models are grouped under author headers; each model's presets are
-    selectable sub-rows indented under it. ``1-5`` activate a preset directly
-    and ``n`` opens the preset picker overlay.
+    Author headers are expandable/collapsible sections; each model's presets
+    are selectable sub-rows indented under it. ``1-5`` activate a preset
+    directly and ``n`` opens the preset picker overlay.
     """
 
     DEFAULT_CSS = """
@@ -233,12 +268,17 @@ class ModelNav(ListView):
         height: auto;
         margin: 1 0 0 0;
         padding: 0 1;
-        color: $text-muted;
+        color: $text;
         text-style: bold;
         border-bottom: solid $border;
+        background: $panel;
     }
     .nav-group:first-child {
         margin-top: 0;
+    }
+    .nav-group.-highlight {
+        background: $surface-darken-1;
+        color: $text;
     }
     .nav-model {
         padding-left: 2;
@@ -265,6 +305,7 @@ class ModelNav(ListView):
         self._option_order: list[Option] = []
         self.running_models: set[str] = set()
         self.filter_text: str = ""
+        self.collapsed_authors: set[str] = set()
 
     def _on_focus(self, event: Focus) -> None:
         super()._on_focus(event)
@@ -279,6 +320,9 @@ class ModelNav(ListView):
         return "nav-filter-row"
 
     async def on_mount(self) -> None:
+        settings = getattr(self.app, "settings", None)
+        if settings is not None and hasattr(settings, "collapsed_authors"):
+            self.collapsed_authors = set(settings.collapsed_authors)
         await self._refresh_cards()
 
     @property
@@ -388,6 +432,27 @@ class ModelNav(ListView):
         self._persist_mtp_enabled(event.model_name, not is_mtp_enabled(cfg.params))
         await self._refresh_cards()
 
+    async def on_toggle_author(self, event: ToggleAuthor) -> None:
+        event.stop()
+        self.toggle_author(event.author)
+        await self._refresh_cards()
+
+    def toggle_author(self, author: str) -> None:
+        if author in self.collapsed_authors:
+            self.collapsed_authors.discard(author)
+        else:
+            self.collapsed_authors.add(author)
+        self._persist_collapsed_authors()
+
+    def _persist_collapsed_authors(self) -> None:
+        settings = getattr(self.app, "settings", None)
+        if settings is None:
+            return
+        settings.collapsed_authors = sorted(self.collapsed_authors)
+        paths = getattr(self.app, "paths", None)
+        if paths is not None:
+            save_settings(paths.settings_json, settings)
+
     def _author_for(self, model) -> str:
         return author_size_label(model.params, _first_rel(model)).split(" ", 1)[0] or "local"
 
@@ -426,15 +491,24 @@ class ModelNav(ListView):
 
         model_index = 0
         for author in sorted(groups):
-            group_line = Text(f"{author.title()}  ", style="dim")
-            group_line.append(f"({len(groups[author])})", style=DIM_STYLE)
+            collapsed = author in self.collapsed_authors and not self.filter_text
+            marker = "▸ " if collapsed else "▾ "
+            group_line = Text(marker, style=ACCENT_STYLE)
+            group_line.append(f"{author.title()}", style=BOLD_STYLE)
+            group_line.append(f"  ({len(groups[author])})", style=ACCENT_STYLE)
+            group_classes = "nav-group nav-group-collapsed" if collapsed else "nav-group"
+            group_id = f"nav-group-{author}"
+            option_data[group_id] = ("author", author)
+            option_order.append(Option(group_line, id=group_id))
             items.append(
                 ListItem(
-                    Static(group_line, markup=False, classes="nav-group"),
-                    id=f"nav-group-{author}",
-                    classes="nav-group",
+                    AuthorHeader(author, group_line),
+                    id=group_id,
+                    classes=group_classes,
                 )
             )
+            if collapsed:
+                continue
             for name in groups[author]:
                 model = self.registry.models[name]
                 active_q = model.active_quant or quant_from_filename(model.file)

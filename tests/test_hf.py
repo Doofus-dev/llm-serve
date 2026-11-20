@@ -229,6 +229,18 @@ class SettingsTests(unittest.TestCase):
             save_settings(path, loaded)
             self.assertFalse(load_settings(path).remote_launch)
 
+    def test_collapsed_authors_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tui-settings.json"
+            settings = TUISettings(collapsed_authors=["unsloth", "bartowski"])
+            save_settings(path, settings)
+            loaded = load_settings(path)
+            self.assertEqual(loaded.collapsed_authors, ["unsloth", "bartowski"])
+
+            empty = TUISettings()
+            save_settings(path, empty)
+            self.assertEqual(load_settings(path).collapsed_authors, [])
+
 
 class ModelJsonTests(unittest.TestCase):
     def test_merge_editor_params_preserves_source(self) -> None:

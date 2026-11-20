@@ -20,6 +20,7 @@ class TUISettings:
     log_verbosity: int = DEFAULT_LOG_VERBOSITY
     remote_launch: bool = False
     logs_collapsed: bool = True
+    collapsed_authors: list[str] = field(default_factory=list)
 
 
 def clamp_log_verbosity(value: object, default: int = DEFAULT_LOG_VERBOSITY) -> int:
@@ -70,12 +71,17 @@ def load_settings(path: Path) -> TUISettings:
     hf_authors: list[str] = []
     if isinstance(hf_authors_raw, list):
         hf_authors = sorted({str(a).strip() for a in hf_authors_raw if str(a).strip()})
+    collapsed_authors_raw = data.get("collapsed_authors", [])
+    collapsed_authors: list[str] = []
+    if isinstance(collapsed_authors_raw, list):
+        collapsed_authors = [str(a) for a in collapsed_authors_raw if isinstance(a, str)]
     return TUISettings(
         theme=theme if isinstance(theme, str) and theme else None,
         hf_authors=hf_authors,
         log_verbosity=clamp_log_verbosity(data.get("log_verbosity", DEFAULT_LOG_VERBOSITY)),
         remote_launch=coerce_bool(data.get("remote_launch", False)),
         logs_collapsed=coerce_bool(data.get("logs_collapsed", True)),
+        collapsed_authors=collapsed_authors,
     )
 
 
@@ -88,6 +94,8 @@ def save_settings(path: Path, settings: TUISettings) -> None:
     data["log_verbosity"] = clamp_log_verbosity(settings.log_verbosity)
     data["remote_launch"] = bool(settings.remote_launch)
     data["logs_collapsed"] = bool(settings.logs_collapsed)
+    if settings.collapsed_authors:
+        data["collapsed_authors"] = list(settings.collapsed_authors)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 

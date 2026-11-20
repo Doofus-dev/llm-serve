@@ -82,7 +82,7 @@ class RemoteToggleAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause(0.2)
             nav = app.query_one(ModelNav)
-            nav.highlighted = 0
+            self.assertEqual(nav.selected_data[0], "model")
             nav.focus()
             app.remote_launch = False
             with patch("tui.app.save_settings"):

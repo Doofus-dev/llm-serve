@@ -602,6 +602,31 @@ class ModelNavCapabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(nav.selected_data)
             self.assertNotEqual(nav.selected_data, first)
 
+    async def test_author_headers_are_themed_expandable_sections(self) -> None:
+        from tui.widgets.nav import AuthorHeader, ModelNav
+
+        app = self.harness.app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            nav = app.query_one(ModelNav)
+            await pilot.pause()
+            headers = list(nav.query(AuthorHeader))
+            self.assertTrue(headers)
+            group_css = ModelNav.DEFAULT_CSS.split(".nav-group")[1].split(".nav-model")[0]
+            self.assertIn("color: $text", group_css)
+            self.assertNotIn("$text-muted", group_css)
+            models_before = list(nav.query("ListItem.nav-model"))
+            self.assertTrue(models_before)
+            author = headers[0].author
+            nav.toggle_author(author)
+            await nav._refresh_cards()
+            self.assertEqual(list(nav.query("ListItem.nav-model")), [])
+            self.assertTrue(list(nav.query("ListItem.nav-group-collapsed")))
+            loaded = app.settings.collapsed_authors
+            self.assertIn(author, loaded)
+            nav.toggle_author(author)
+            await nav._refresh_cards()
+            self.assertTrue(list(nav.query("ListItem.nav-model")))
+
 
 if __name__ == "__main__":
     unittest.main()

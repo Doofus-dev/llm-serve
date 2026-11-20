@@ -541,6 +541,11 @@ class LLMServeApp(App):
         self._activate_nav_selection(event.list_view.selected_data)
 
     def _activate_nav_selection(self, data: tuple | None) -> None:
+        if data and data[0] == "author":
+            nav = self.query_one(ModelNav)
+            nav.toggle_author(data[1])
+            nav.refresh_cards()
+            return
         if data and data[0] == "preset":
             _, model_name, quant, slot = data
             set_active_preset(self.preset_store, model_name, quant, slot)
