@@ -10,11 +10,15 @@ from tests.support import DISPLAY, MODEL_SLUG, OTHER_DISPLAY, OTHER_SLUG, QUANT,
 from tui.app import LLMServeApp
 from tui.data.baselines import RunBaseline, save_baselines
 from tui.data.compare_metrics import (
+    compare_column_label,
+    compare_preset_knobs,
     compare_presets_metrics,
     format_metric_cell,
     format_metrics_table,
+    format_metrics_table_three_column,
     resolve_baseline,
     resolve_default_preset,
+    selected_delta_vs_own_best,
 )
 from tui.data.pidfile import write_pid_file
 from tui.data.preset_template import DEFAULT_PRESET_PARAMS
@@ -122,7 +126,52 @@ class CompareMetricsUnitTests(unittest.TestCase):
         after_left = vram.index(left_cell) + len(left_cell)
         self.assertGreater(vram.index(right_cell), after_left)
         self.assertTrue(vram[after_left:vram.index(right_cell)].isspace())
-        self.assertIn("selected  \\[2\\] max-ctx", markup)
+        self.assertIn("selected  [[2] max-ctx", markup)
+        self.assertNotIn("\\]", markup)
+
+    def test_three_column_headers_are_role_and_slot_only(self) -> None:
+        left = _run(vram_used_mb=8000, gen_tps=25)
+        right = _run(vram_used_mb=4000, gen_tps=40)
+        markup = format_metrics_table_three_column(
+            compare_presets_metrics(left, right),
+            left_label=compare_column_label("running", 1),
+            right_label=compare_column_label("selected", 2),
+        )
+        header = markup.splitlines()[0]
+        self.assertIn("running [[1]", header)
+        self.assertIn("selected [[2]", header)
+        self.assertNotIn("max-ctx", header)
+        self.assertNotIn("Demo", header)
+        self.assertNotIn("\\]", header)
+
+    def test_preset_knobs_come_from_params(self) -> None:
+        left = Preset(
+            slot=1,
+            name="default",
+            params={"gpu_layers": 99, "batch": 2048, "flash_attn": "on", "cache_k": "q4_0"},
+        )
+        right = Preset(
+            slot=2,
+            name="max-ctx",
+            params={"gpu_layers": 40, "batch": 512, "flash_attn": "off", "cache_k": "q8_0"},
+        )
+        rows = {row["name"]: row for row in compare_preset_knobs(left, right)}
+        self.assertEqual(rows["gpu layers"]["left_value"], 99)
+        self.assertEqual(rows["gpu layers"]["right_value"], 40)
+        self.assertEqual(rows["gpu layers"]["winner"], "left")
+        self.assertEqual(rows["batch"]["winner"], "left")
+        self.assertEqual(rows["flash attn"]["left_value"], True)
+        self.assertEqual(rows["flash attn"]["right_value"], False)
+        self.assertEqual(rows["cache k"]["right_value"], "q8_0")
+        self.assertIsNone(rows["cache k"]["winner"])
+
+    def test_headroom_over_budget_and_own_peak_delta(self) -> None:
+        self.assertEqual(
+            format_metric_cell(-120, winner="right", side="left", fmt="headroom"),
+            f"[{ERR}]over budget[/]",
+        )
+        self.assertAlmostEqual(selected_delta_vs_own_best(42.0, 40.0), 2.0)
+        self.assertIsNone(selected_delta_vs_own_best(40.0, 40.0))
 
 
 class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
@@ -192,8 +241,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
             self.assertIn("VRAM used", metrics)
-            self.assertIn(r"selected  \[2\] max-ctx", metrics)
-            self.assertIn(r"default  \[1\] default", metrics)
+            self.assertIn("selected  [[2] max-ctx", metrics)
+            self.assertIn("default  [[1] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
             self.assertIn(f"[{ERR}]25 t/s[/]", metrics)
@@ -234,8 +283,8 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.role, "running")
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
-            self.assertIn(r"selected  \[2\] max-ctx", metrics)
-            self.assertIn(r"running  \[1\] default", metrics)
+            self.assertIn("selected  [[2] max-ctx", metrics)
+            self.assertIn("running  [[1] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)
             self.assertIn(f"[{OK}]4000 MB[/]", metrics)
 

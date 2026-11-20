@@ -14,7 +14,6 @@ from textual.css.query import NoMatches, QueryError
 from textual.reactive import reactive
 from textual.widgets import Label, Static, Switch
 
-from tui.data.baselines import RunBaseline
 from tui.data.gpu import GPUStats, ProcessMem
 from tui.data.pidfile import PidInfo
 from tui.data.settings import log_verbosity_label
@@ -190,44 +189,6 @@ def render_queue_line(metrics: Metrics | None, live: LiveThroughput | None) -> T
     return line
 
 
-def render_selected_strip(
-    baseline: RunBaseline | None,
-    *,
-    estimated: bool = False,
-    kv: tuple[str, str, str] | None = None,
-    delta: str | None = None,
-) -> Group:
-    """Compact SELECTED strip: baseline, KV headroom, preset-vs-measured delta."""
-    lines: list[Text] = []
-    title = Text()
-    title.append("SELECTED", style="bold " + ACCENT)
-    if baseline is not None:
-        bits: list[str] = []
-        if baseline.gen_tps:
-            bits.append(f"gen {baseline.gen_tps:.1f} t/s")
-        if baseline.prompt_tps:
-            bits.append(f"prompt {fmt_compact_tps(baseline.prompt_tps)}")
-        if baseline.vram_used_mb:
-            bits.append(f"{baseline.vram_used_mb / 1024:.1f} GB")
-        if bits:
-            prefix = "est. " if estimated else "measured "
-            line = Text()
-            line.append(prefix, style="dim")
-            line.append("  ·  ".join(bits), style=WARN_STYLE)
-            lines.append(line)
-    else:
-        lines.append(Text("no baseline for this preset yet", style="dim"))
-    if kv is not None:
-        ctx_text, kv_text, headroom = kv
-        line = Text()
-        line.append(f"ctx {ctx_text} · KV ≈ {kv_text}", style=DIM_STYLE)
-        line.append(f" · headroom {headroom}", style="dim")
-        lines.append(line)
-    if delta:
-        lines.append(Text(f"Δ {delta}", style=DIM_STYLE))
-    return Group(title, *lines)
-
-
 def fmt_server_status_line(
     info: PidInfo | None,
     uptime: float,
@@ -329,10 +290,6 @@ class StatusPanel(Vertical):
     gpu: reactive[GPUStats | None] = reactive(None)
     props: reactive[dict | None] = reactive(None)
     uptime: reactive[float] = reactive(0.0)
-    selected_baseline: reactive[RunBaseline | None] = reactive(None)
-    selected_baseline_estimated: reactive[bool] = reactive(False)
-    selected_kv: reactive[tuple[str, str, str] | None] = reactive(None)
-    selected_delta: reactive[str | None] = reactive(None)
     compare_markup: reactive[str] = reactive("")
 
     def compose(self) -> ComposeResult:
@@ -344,9 +301,7 @@ class StatusPanel(Vertical):
                 id="remote-switch-label",
             )
         yield Static(id="status-body")
-        with Horizontal(id="status-extras", classes="status-section"):
-            yield Static(id="selected-strip")
-            yield Static(id="compare-strip")
+        yield Static(id="compare-strip")
 
     def on_mount(self) -> None:
         self._sync_remote_switch()
@@ -419,18 +374,6 @@ class StatusPanel(Vertical):
     def watch_uptime(self) -> None:
         self._refresh_body()
 
-    def watch_selected_baseline(self) -> None:
-        self._refresh_extras()
-
-    def watch_selected_baseline_estimated(self) -> None:
-        self._refresh_extras()
-
-    def watch_selected_kv(self) -> None:
-        self._refresh_extras()
-
-    def watch_selected_delta(self) -> None:
-        self._refresh_extras()
-
     def watch_compare_markup(self) -> None:
         self._refresh_extras()
 
@@ -438,21 +381,9 @@ class StatusPanel(Vertical):
         if not self.is_mounted:
             return
         try:
-            selected = self.query_one("#selected-strip", Static)
             compare = self.query_one("#compare-strip", Static)
         except (NoMatches, QueryError):
             return
-        if self.selected_baseline is None and self.selected_kv is None:
-            selected.update(Text("SELECTED  —", style="dim"))
-        else:
-            selected.update(
-                render_selected_strip(
-                    self.selected_baseline,
-                    estimated=self.selected_baseline_estimated,
-                    kv=self.selected_kv,
-                    delta=self.selected_delta,
-                )
-            )
         if self.compare_markup:
             compare.update(self.compare_markup)
         else:

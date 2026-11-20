@@ -242,24 +242,12 @@ Button.-style-flat:disabled {
         padding: 0 1;
         align: left middle;
     }
-    #status-extras {
-        height: auto;
-        min-height: 2;
-        margin-top: 1;
-        padding: 0 1 1 1;
-        border-top: solid $border;
-    }
-    #selected-strip {
-        width: 30;
-        min-width: 20;
-        height: auto;
-        padding: 0 1 0 0;
-        overflow: hidden hidden;
-    }
     #compare-strip {
         width: 1fr;
         height: auto;
-        padding: 0 0 0 1;
+        margin-top: 1;
+        padding: 0 1 1 1;
+        border-top: solid $border;
         overflow: hidden hidden;
     }
     #status .card-title {

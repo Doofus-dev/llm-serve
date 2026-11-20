@@ -23,7 +23,7 @@ _METRICS: tuple[tuple[str, str, bool, str], ...] = (
     ("prompt t/s avg", "prompt_tps_avg", True, "tps"),
     ("VRAM used", "vram_used_mb", False, "mb"),
     ("KV cache", "kv_mb", False, "mb"),
-    ("headroom", "headroom_mb", True, "mb"),
+    ("headroom", "headroom_mb", True, "headroom"),
     ("file size", "file_size", False, "bytes"),
     ("context", "ctx", True, "ctx"),
     ("offload", "offload_ratio", True, "pct"),
@@ -220,7 +220,9 @@ def _metric_value(run: RunBaseline | None, key: str) -> float | int | None:
     value = getattr(run, key, None)
     if value is None:
         return None
-    if key in {"vram_used_mb", "file_size", "ctx", "kv_mb", "headroom_mb", "tokens_predicted"} and not value:
+    if key in {"vram_used_mb", "file_size", "ctx", "kv_mb", "tokens_predicted"} and not value:
+        return None
+    if key == "headroom_mb" and value is None:
         return None
     if key in {"gen_tps", "prompt_tps", "gen_tps_avg", "prompt_tps_avg"} and float(value) <= 0:
         return None
@@ -264,11 +266,109 @@ def compare_presets_metrics(
     return rows
 
 
-def format_metric_value(value: float | int | None, fmt: str) -> str:
-    if value is None:
+def compare_column_label(kind: str, slot: int | None) -> str:
+    """Front-page compare header: ``running [2]`` / ``selected [3]``, no names."""
+    if slot is None:
+        return kind
+    return f"{kind} [{slot}]"
+
+
+_KNOBS: tuple[tuple[str, str, bool | None, str], ...] = (
+    ("gpu layers", "gpu_layers", True, "count"),
+    ("batch", "batch", True, "count"),
+    ("ubatch", "ubatch", True, "count"),
+    ("cache k", "cache_k", None, "text"),
+    ("cache v", "cache_v", None, "text"),
+    ("parallel", "parallel", True, "count"),
+    ("flash attn", "flash_attn", True, "bool"),
+    ("threads", "threads", True, "count"),
+    ("n predict", "n_predict", None, "count"),
+)
+
+
+def _as_bool(value: object) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "on", "yes"}:
+        return True
+    if text in {"0", "false", "off", "no"}:
+        return False
+    return None
+
+
+def _knob_value(preset: Preset | None, key: str, fmt: str) -> float | int | str | bool | None:
+    if preset is None:
+        return None
+    raw = preset.params.get(key)
+    if raw is None or raw == "":
+        return None
+    if fmt == "text":
+        return str(raw)
+    if fmt == "bool":
+        return _as_bool(raw)
+    try:
+        number = float(str(raw))
+    except (TypeError, ValueError):
+        return str(raw)
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def compare_preset_knobs(
+    left: Preset | None,
+    right: Preset | None,
+) -> list[dict]:
+    """Preset performance knobs as compare rows (same shape as measured metrics)."""
+    rows: list[dict] = []
+    for name, key, higher_is_better, fmt in _KNOBS:
+        left_value = _knob_value(left, key, fmt)
+        right_value = _knob_value(right, key, fmt)
+        winner = None
+        if higher_is_better is not None:
+            left_num = left_value
+            right_num = right_value
+            if fmt == "bool":
+                left_num = 1 if left_value is True else (0 if left_value is False else None)
+                right_num = 1 if right_value is True else (0 if right_value is False else None)
+            if isinstance(left_num, (int, float)) and isinstance(right_num, (int, float)):
+                winner = _winner(
+                    left_num, right_num, higher_is_better=higher_is_better
+                )
+        rows.append(
+            {
+                "name": name,
+                "left_value": left_value,
+                "right_value": right_value,
+                "winner": winner,
+                "format": fmt,
+            }
+        )
+    return rows
+
+
+def format_metric_value(value: float | int | str | bool | None, fmt: str) -> str:
+    if value is None or value == "":
         return _NO_DATA
+    if fmt == "text":
+        return str(value)
+    if fmt == "bool":
+        if isinstance(value, bool):
+            return "on" if value else "off"
+        parsed = _as_bool(value)
+        if parsed is None:
+            return str(value)
+        return "on" if parsed else "off"
     if fmt == "mb":
         return f"{float(value):.0f} MB"
+    if fmt == "headroom":
+        mb = float(value)
+        if mb <= 0:
+            return "over budget"
+        return f"{mb:.0f} MB"
     if fmt == "tps":
         number = float(value)
         if number >= 10:
@@ -286,22 +386,31 @@ def format_metric_value(value: float | int | None, fmt: str) -> str:
         return f"{float(value):.0f}%"
     if fmt == "count":
         return f"{float(value):.0f}"
+    if fmt == "delta":
+        return f"{float(value):+.1f} t/s"
     return str(value)
 
 
-def _plain_metric_text(value: float | int | None, fmt: str) -> str:
-    if value is None:
+def _plain_metric_text(value: float | int | str | bool | None, fmt: str) -> str:
+    if value is None or value == "":
         return "no data"
-    return format_metric_value(value, fmt)
+    text = format_metric_value(value, fmt)
+    if text == _NO_DATA:
+        return "no data"
+    return text
 
 
 def _escape_markup(text: str) -> str:
-    """Escape brackets so labels like ``[2] max-ctx`` are not Rich tags."""
-    return text.replace("[", r"\[").replace("]", r"\]")
+    """Escape ``[`` so labels like ``[2]`` print as text, not Rich tags.
+
+    Doubling is the Rich-documented escape. Backslash-escaping ``]`` leaked a
+    slash into the header (``[2]`` was parsed as a style tag, leftover ``/``).
+    """
+    return text.replace("[", "[[")
 
 
 def format_metric_cell(
-    value: float | int | None,
+    value: float | int | str | bool | None,
     *,
     winner: str | None,
     side: str,
@@ -440,3 +549,60 @@ def format_metrics_table_three_column(
             f"[{ACCENT}]{_escape_markup(name)}[/]  {left_cell}  {right_cell}"
         )
     return "\n".join(lines)
+
+
+def estimate_preset_kv(
+    identity: dict[str, Any],
+    preset: Preset | None,
+    *,
+    models_dir: Path | None,
+    gpu_total_mb: float | None = None,
+    gpu_name: str = "",
+    baselines: list[RunBaseline] | None = None,
+    quant: str = "",
+) -> tuple[float | None, float | None]:
+    """KV cache MB and GPU headroom from ctx × parallel minus weights/overhead."""
+    if preset is None:
+        return None, None
+    ctx = _as_int(preset.params.get("ctx"), 0)
+    parallel = max(_as_int(preset.params.get("parallel"), 1), 1)
+    if ctx <= 0:
+        return None, None
+    gpu_layers = _as_int(preset.params.get("gpu_layers"), 0)
+    total_layers = _as_int(identity.get("total_layers"), 0)
+    offload = 1.0
+    if total_layers > 0 and 0 < gpu_layers < 99:
+        offload = max(0.0, min(1.0, gpu_layers / total_layers))
+    elif gpu_layers == 0:
+        offload = 0.0
+    file_rels = _file_rels_for_quant(identity, quant)
+    file_size = _disk_size(models_dir, file_rels)
+    if file_size <= 0:
+        return None, None
+    from tui.data.vram import estimate_vram_calibrated
+
+    total_mb = estimate_vram_calibrated(
+        file_size,
+        ctx * parallel,
+        offload,
+        runs=baselines or [],
+        gpu_name=gpu_name,
+        filename=Path(file_rels[0]).name if file_rels else "",
+    )
+    weights_mb = (file_size / 1_000_000) * offload
+    kv_mb = max(0.0, total_mb - weights_mb - 640.0 * offload)
+    headroom = None if gpu_total_mb is None else gpu_total_mb - total_mb
+    return kv_mb, headroom
+
+
+def selected_delta_vs_own_best(
+    current_gen: float | None,
+    stored_peak: float | None,
+) -> float | None:
+    """Selected gen t/s minus that preset's own stored peak. None if tied/missing."""
+    if current_gen is None or stored_peak is None:
+        return None
+    delta = float(current_gen) - float(stored_peak)
+    if abs(delta) <= 0.05:
+        return None
+    return delta
