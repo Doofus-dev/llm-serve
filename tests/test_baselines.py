@@ -205,6 +205,40 @@ class BaselineStoreTests(unittest.TestCase):
             record_baseline(path, _run(gen_tps=61.0, tokens_predicted=400))
             stored = load_baselines(path)[0]
             self.assertAlmostEqual(stored.gen_tps, 92.0)
+            self.assertAlmostEqual(
+                stored.gen_tps_avg,
+                (92.0 * 80 + 61.0 * 400) / 480,
+            )
+
+    def test_two_presets_keep_independent_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "baselines.json"
+            record_baseline(path, _run(preset_slot=1, preset_name="default", gen_tps=30.0))
+            record_baseline(path, _run(preset_slot=2, preset_name="max-ctx", gen_tps=80.0))
+            runs = load_baselines(path)
+            self.assertEqual(len(runs), 2)
+            first = lookup_baseline(
+                runs,
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                preset_slot=1,
+            )
+            second = lookup_baseline(
+                runs,
+                filename="Qwen3.6-27B-Q3_K_S.gguf",
+                file_size=12_000_000_000,
+                ctx=65_536,
+                offload_ratio=1.0,
+                gpu_name="Radeon RX 7900 XTX",
+                preset_slot=2,
+            )
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertAlmostEqual(first.gen_tps, 30.0)
+            self.assertAlmostEqual(second.gen_tps, 80.0)
 
     def test_record_does_not_replace_vram_with_idle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

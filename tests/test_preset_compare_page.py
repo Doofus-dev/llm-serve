@@ -50,9 +50,9 @@ class CompareMetricsUnitTests(unittest.TestCase):
         left = _run(vram_used_mb=8000, gen_tps=25, prompt_tps=100, ctx=16384, file_size=5_000_000)
         right = _run(vram_used_mb=4000, gen_tps=40, prompt_tps=200, ctx=32768, file_size=5_000_000)
         rows = {row["name"]: row for row in compare_presets_metrics(left, right)}
-        self.assertEqual(rows["VRAM used (MB)"]["winner"], "right")
-        self.assertEqual(rows["gen t/s"]["winner"], "right")
-        self.assertEqual(rows["prompt t/s"]["winner"], "right")
+        self.assertEqual(rows["VRAM used"]["winner"], "right")
+        self.assertEqual(rows["gen t/s peak"]["winner"], "right")
+        self.assertEqual(rows["prompt t/s peak"]["winner"], "right")
         self.assertEqual(rows["file size"]["winner"], "equal")
         self.assertEqual(rows["context"]["winner"], "right")
         vram_left = format_metric_cell(
@@ -66,7 +66,7 @@ class CompareMetricsUnitTests(unittest.TestCase):
 
     def test_missing_values_render_no_data(self) -> None:
         rows = compare_presets_metrics(None, _run())
-        vram = next(row for row in rows if row["name"] == "VRAM used (MB)")
+        vram = next(row for row in rows if row["name"] == "VRAM used")
         self.assertIsNone(vram["left_value"])
         self.assertEqual(vram["winner"], None)
         self.assertEqual(
@@ -114,7 +114,7 @@ class CompareMetricsUnitTests(unittest.TestCase):
             left_label="selected  [2] max-ctx",
             right_label="default  [1] default",
         )
-        vram = next(line for line in markup.splitlines() if "VRAM used (MB)" in line)
+        vram = next(line for line in markup.splitlines() if "VRAM used" in line)
         left_cell = f"[{ERR}]8000 MB[/]"
         right_cell = f"[{OK}]4000 MB[/]"
         self.assertIn(left_cell, vram)
@@ -191,7 +191,7 @@ class PresetComparePageTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.right.role, "default")
             self.assertEqual(screen.right.slot, 1)
             metrics = self._metrics(screen)
-            self.assertIn("VRAM used (MB)", metrics)
+            self.assertIn("VRAM used", metrics)
             self.assertIn(r"selected  \[2\] max-ctx", metrics)
             self.assertIn(r"default  \[1\] default", metrics)
             self.assertIn(f"[{ERR}]8000 MB[/]", metrics)

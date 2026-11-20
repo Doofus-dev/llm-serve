@@ -35,7 +35,7 @@ from tui.data.capabilities import (
     pick_mtp_filename,
 )
 from tui.data.quant import is_draft_gguf, is_mmproj_gguf
-from tui.data.hf import build_download_plan, build_source_metadata, fmt_size
+from tui.data.hf import HubFile, build_source_metadata, fmt_size, prepare_hub_download
 from tui.data.models_json import (
     AliasTarget,
     add_or_update_quant,
@@ -469,30 +469,38 @@ class LLMServeApp(App):
             return
         cfg = self.registry.models[model_name]
 
-        def on_download(model: str, filename: str, expected_bytes: int = 0) -> None:
+        def on_download(
+            model: str,
+            filename: str,
+            expected_bytes: int = 0,
+            files: list[HubFile] | None = None,
+        ) -> None:
             source = cfg.params.get("source")
             if not isinstance(source, dict) or not source.get("repo"):
                 self.notify("No Hub repo for this model", severity="error")
                 return
             clone_from = model_name if model_name in self.registry.models else next(iter(self.registry.models))
-            known_files, _ = identity_capability_inputs(cfg.params)
+            listing = list(files or [])
             extra_files = extra_download_files(
-                known_files,
+                listing or identity_capability_inputs(cfg.params)[0],
                 quant_filename=filename,
                 models_dir=self.paths.models_dir,
                 author=str(source.get("author") or ""),
                 params=cfg.params,
             )
-            plan = build_download_plan(
+            if not listing:
+                listing = [HubFile(path=filename, size=expected_bytes)]
+            plan, expected = prepare_hub_download(
                 source["repo"],
                 filename,
                 self.paths.models_dir,
+                listing,
                 extra_files=extra_files,
             )
             self.start_model_download(
                 plan=plan,
                 filename=filename,
-                expected_bytes=expected_bytes,
+                expected_bytes=expected or expected_bytes,
                 clone_from=clone_from,
                 display=cfg.display,
             )
@@ -769,12 +777,19 @@ class LLMServeApp(App):
             return
         if gpu.vram_used_mb <= 0:
             return
-        params = self._effective_model_params(info.model)
-        if not params:
+        model_key = self._model_key_for_instance(info) or info.model
+        cfg = self.registry.models.get(model_key)
+        if cfg is None:
             return
+        quant = info.quant or self._model_active_quant(model_key)
+        slot = info.preset_slot
+        if slot is None:
+            slot = get_active_slot(self.preset_store, model_key, quant)
+        preset = get_preset(self.preset_store, model_key, quant, slot) if slot is not None else None
+        identity = dict(cfg.params)
+        params = merge_identity_and_preset(identity, preset) if preset else identity
 
-        cfg = self.registry.models.get(info.model)
-        rels = quant_rel_paths(cfg, info.quant or "") if cfg else []
+        rels = quant_rel_paths(cfg, quant) if cfg else []
         if not rels:
             rels = coerce_rel_paths(params.get("files")) or coerce_rel_paths(params.get("file"))
         file_rel = rels[0] if rels else ""
@@ -804,6 +819,33 @@ class LLMServeApp(App):
         ctx = as_int(params.get("ctx"), 0)
         if ctx <= 0:
             return
+        cache_hit = None
+        live = panel.live_throughput
+        last = getattr(live, "last_request", None) if live else None
+        if last is not None and getattr(last, "prompt_tokens", 0) > 0:
+            cache_hit = last.cache_tokens / last.prompt_tokens * 100
+        kv_mb = None
+        headroom_mb = None
+        total_layers = as_int(params.get("total_layers"), 0)
+        ngl = as_int(params.get("gpu_layers"), 99)
+        ratio = 1.0
+        if total_layers > 0 and 0 < ngl < 99:
+            ratio = max(0.0, min(1.0, ngl / total_layers))
+        elif ngl == 0:
+            ratio = 0.0
+        if file_size > 0:
+            from tui.data.vram import estimate_vram_calibrated
+
+            total_mb = estimate_vram_calibrated(
+                file_size,
+                ctx * max(as_int(params.get("parallel"), 1), 1),
+                ratio,
+                gpu_name=gpu.name,
+                filename=Path(file_rel).name if file_rel else "",
+            )
+            weights_mb = (file_size / 1_000_000) * ratio
+            kv_mb = max(0.0, total_mb - weights_mb - 640.0 * ratio)
+            headroom_mb = gpu.vram_total_mb - total_mb
         try:
             changed = record_baseline(
                 self.paths.baselines_json,
@@ -813,8 +855,8 @@ class LLMServeApp(App):
                     file_size=file_size,
                     gpu_name=gpu.name,
                     ctx=ctx,
-                    gpu_layers=as_int(params.get("gpu_layers"), 99),
-                    total_layers=as_int(params.get("total_layers"), 0),
+                    gpu_layers=ngl,
+                    total_layers=total_layers,
                     cache_k=str(params.get("cache_k") or "q4_0"),
                     cache_v=str(params.get("cache_v") or "q4_0"),
                     vram_used_mb=gpu.vram_used_mb,
@@ -825,6 +867,13 @@ class LLMServeApp(App):
                     gen_tps=gen_tps,
                     prompt_tps=prompt_tps,
                     tokens_predicted=tokens,
+                    preset_slot=slot,
+                    preset_name=preset.name if preset else "",
+                    cache_hit_pct=cache_hit,
+                    queue_busy=float(metrics.requests_processing) if metrics else None,
+                    queue_deferred=float(metrics.requests_deferred) if metrics else None,
+                    kv_mb=kv_mb,
+                    headroom_mb=headroom_mb,
                 ),
             )
         except OSError:
@@ -1008,8 +1057,15 @@ class LLMServeApp(App):
                         model=model_name,
                         file=rels[0] if rels else "",
                         file_size=file_size,
+                        gpu_name=gpu_name,
                         ctx=ctx,
+                        gpu_layers=ngl,
+                        total_layers=total_layers,
+                        cache_k="",
+                        cache_v="",
+                        vram_used_mb=0.0,
                         gen_tps=gen,
+                        preset_slot=slot,
                     )
                     estimated = True
 
@@ -1056,6 +1112,9 @@ class LLMServeApp(App):
                     fmt_memory_mb(kv_mb),
                     fmt_memory_mb(max(0.0, headroom)) if headroom > 0 else "over budget",
                 )
+                if sel_run is not None:
+                    sel_run.kv_mb = kv_mb
+                    sel_run.headroom_mb = headroom
 
         delta = None
         if sel_run is not None and sel_run.gen_tps and not estimated:
@@ -1078,6 +1137,7 @@ class LLMServeApp(App):
                 ctx=sel_run.ctx,
                 offload_ratio=ratio,
                 gpu_name=gpu_name,
+                preset_slot=slot,
             )
             if best is not None and best.gen_tps:
                 d = sel_run.gen_tps - best.gen_tps
@@ -1114,6 +1174,12 @@ class LLMServeApp(App):
                     history=list(panel.gen_tps_history or []),
                 )
                 running_label = self.registry.models[running_key].display
+                running_preset_bit = format_preset_display(
+                    running_slot,
+                    running_preset.name if running_preset else None,
+                )
+                if running_preset_bit:
+                    running_label = f"{running_label} {running_preset_bit}"
         elif sel_run is None:
             default = resolve_default_preset(self.preset_store, model_name, quant or "")
             if default is not None:

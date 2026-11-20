@@ -43,10 +43,9 @@ from tui.data.hf import (
     HubRepo,
     auth_login,
     auth_whoami,
-    build_download_plan,
     build_source_metadata,
-    discard_mismatched_local_file,
     download_files,
+    prepare_hub_download,
     fetch_repo_info,
     fmt_size,
     fmt_count,
@@ -935,7 +934,6 @@ class HubScreen(Screen):
             self.notify("A download is already running", severity="warning")
             return
         display_name, clone_from = profile
-        all_names = [f.path for f in self.files]
         extra_files = extra_download_files(
             self.files,
             quant_filename=filename,
@@ -943,17 +941,13 @@ class HubScreen(Screen):
             author=self.selected_repo.author,
             params=self._registered_params(),
         )
-        plan = build_download_plan(
+        plan, expected = prepare_hub_download(
             self.selected_repo.id,
             filename,
             self.models_dir,
-            all_ggufs=all_names,
+            self.files,
             extra_files=extra_files,
         )
-        sizes = {item.path: item.size for item in self.files if item.size > 0}
-        for name in plan.filenames:
-            discard_mismatched_local_file(plan.local_dir, name, sizes.get(name, 0))
-        expected = sum(item.size for item in self.files if item.path in plan.filenames)
 
         from tui.app import LLMServeApp
 

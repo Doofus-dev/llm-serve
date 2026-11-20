@@ -37,9 +37,19 @@ class RunBaseline:
     vram_used_mb: float
     gen_tps: float | None = None
     prompt_tps: float | None = None
+    gen_tps_avg: float | None = None
+    prompt_tps_avg: float | None = None
     tokens_predicted: float = 0.0
+    prompt_samples: float = 0.0
     updated_at: str = ""
     vision_enabled: bool = False
+    preset_slot: int | None = None
+    preset_name: str = ""
+    cache_hit_pct: float | None = None
+    queue_busy: float | None = None
+    queue_deferred: float | None = None
+    kv_mb: float | None = None
+    headroom_mb: float | None = None
 
     @property
     def offload_ratio(self) -> float:
@@ -68,9 +78,21 @@ class RunBaseline:
             vram_used_mb=float(data.get("vram_used_mb") or 0.0),
             gen_tps=_optional_float(data.get("gen_tps")),
             prompt_tps=_optional_float(data.get("prompt_tps")),
+            gen_tps_avg=_optional_float(data.get("gen_tps_avg"))
+            or _optional_float(data.get("gen_tps")),
+            prompt_tps_avg=_optional_float(data.get("prompt_tps_avg"))
+            or _optional_float(data.get("prompt_tps")),
             tokens_predicted=float(data.get("tokens_predicted") or 0.0),
+            prompt_samples=float(data.get("prompt_samples") or 0.0),
             updated_at=str(data.get("updated_at") or ""),
             vision_enabled=_optional_bool(data.get("vision_enabled")),
+            preset_slot=_optional_int(data.get("preset_slot")),
+            preset_name=str(data.get("preset_name") or ""),
+            cache_hit_pct=_optional_float(data.get("cache_hit_pct")),
+            queue_busy=_optional_float(data.get("queue_busy")),
+            queue_deferred=_optional_float(data.get("queue_deferred")),
+            kv_mb=_optional_float(data.get("kv_mb")),
+            headroom_mb=_optional_float(data.get("headroom_mb")),
         )
 
 
@@ -81,6 +103,15 @@ def _optional_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_float(value: object) -> float | None:
@@ -118,6 +149,7 @@ def _identity(run: RunBaseline) -> tuple:
         run.cache_k,
         run.cache_v,
         bool(run.vision_enabled),
+        int(run.preset_slot) if run.preset_slot is not None else -1,
     )
 
 
@@ -141,17 +173,36 @@ def save_baselines(path: Path, runs: list[RunBaseline]) -> None:
     atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
-def record_baseline(path: Path, observation: RunBaseline) -> bool:
-    """Upsert a live observation. Returns True if the file changed.
+def _running_avg(
+    old_avg: float | None, old_n: float, sample: float | None, sample_n: float
+) -> tuple[float | None, float]:
+    if sample is None or sample <= 0:
+        return old_avg, old_n
+    weight = sample_n if sample_n > 0 else 0.0
+    if weight <= 0:
+        return old_avg, old_n
+    if old_avg is None or old_n <= 0:
+        return sample, weight
+    total = old_n + weight
+    return (old_avg * old_n + sample * weight) / total, total
 
-    Generation / prompt tok/s are high-water marks of recorded averages:
-    a slower later sample never replaces a faster one, so Hub still shows
-    the best seen speed after the server has been idle or down.
+
+def record_baseline(path: Path, observation: RunBaseline) -> bool:
+    """Upsert a live observation keyed by preset identity.
+
+    ``gen_tps`` / ``prompt_tps`` stay peaks. ``gen_tps_avg`` / ``prompt_tps_avg``
+    are token-weighted running averages so two presets of one model cannot share
+    a single stored row or a single speed.
     """
     vram_ok = plausible_vram(observation.vram_used_mb, observation.file_size)
     has_speed = bool(observation.gen_tps or observation.prompt_tps)
     if not vram_ok and not has_speed:
         return False
+
+    if observation.gen_tps_avg is None:
+        observation.gen_tps_avg = observation.gen_tps
+    if observation.prompt_tps_avg is None:
+        observation.prompt_tps_avg = observation.prompt_tps
 
     runs = load_baselines(path)
     key = _identity(observation)
@@ -167,7 +218,6 @@ def record_baseline(path: Path, observation: RunBaseline) -> bool:
             existing.gen_tps is None or observation.gen_tps > existing.gen_tps + TPS_DELTA
         ):
             existing.gen_tps = observation.gen_tps
-            existing.tokens_predicted = observation.tokens_predicted
             changed = True
         if observation.prompt_tps and (
             existing.prompt_tps is None
@@ -175,6 +225,41 @@ def record_baseline(path: Path, observation: RunBaseline) -> bool:
         ):
             existing.prompt_tps = observation.prompt_tps
             changed = True
+        gen_avg, gen_n = _running_avg(
+            existing.gen_tps_avg,
+            existing.tokens_predicted,
+            observation.gen_tps,
+            observation.tokens_predicted,
+        )
+        if gen_avg != existing.gen_tps_avg or gen_n != existing.tokens_predicted:
+            existing.gen_tps_avg = gen_avg
+            existing.tokens_predicted = gen_n
+            changed = True
+        prompt_avg, prompt_n = _running_avg(
+            existing.prompt_tps_avg,
+            existing.prompt_samples,
+            observation.prompt_tps,
+            observation.prompt_samples or observation.tokens_predicted,
+        )
+        if prompt_avg != existing.prompt_tps_avg or prompt_n != existing.prompt_samples:
+            existing.prompt_tps_avg = prompt_avg
+            existing.prompt_samples = prompt_n
+            changed = True
+        for field in (
+            "preset_name",
+            "cache_hit_pct",
+            "queue_busy",
+            "queue_deferred",
+            "kv_mb",
+            "headroom_mb",
+        ):
+            new = getattr(observation, field)
+            if new in (None, "") or getattr(existing, field) == new:
+                continue
+            setattr(existing, field, new)
+            changed = True
+        if observation.preset_slot is not None:
+            existing.preset_slot = observation.preset_slot
         if changed:
             existing.updated_at = now
             save_baselines(path, runs)
@@ -197,6 +282,7 @@ def lookup_baseline(
     offload_ratio: float,
     gpu_name: str,
     vision_enabled: bool | None = None,
+    preset_slot: int | None = None,
 ) -> RunBaseline | None:
     """Best measurement for a file on this GPU. Closer context scores higher.
 
@@ -207,6 +293,8 @@ def lookup_baseline(
     best: RunBaseline | None = None
     best_score = -1.0
     for run in runs:
+        if preset_slot is not None and run.preset_slot not in (None, preset_slot):
+            continue
         if vision_enabled is not None and bool(run.vision_enabled) != bool(vision_enabled):
             continue
         if gpu_name and run.gpu_name and not same_gpu(run.gpu_name, gpu_name):
@@ -229,6 +317,8 @@ def lookup_baseline(
         score = 2.0 if name_match else 1.0
         score -= abs(run.offload_ratio - offload_ratio)
         score -= abs(run.ctx - ctx) / ctx_span
+        if preset_slot is not None and run.preset_slot == preset_slot:
+            score += 3.0
         if run.gen_tps:
             score += 2.0
         if plausible_vram(run.vram_used_mb, run.file_size):

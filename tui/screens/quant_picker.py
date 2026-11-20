@@ -149,7 +149,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
         *,
         baselines_path: Path | None = None,
         preferred_ctx: int | None = None,
-        on_download: Callable[[str, str, int], None] | None = None,
+        on_download: Callable[..., None] | None = None,
         download_manager: DownloadManager | None = None,
     ) -> None:
         super().__init__()
@@ -581,7 +581,9 @@ class QuantPickerScreen(ModalScreen[str | None]):
                 self.notify(f"{picked.path} is already downloading", severity="information")
                 return
             if self.on_download:
-                self.on_download(self.model_name, picked.path, picked.size)
+                self.on_download(
+                    self.model_name, picked.path, picked.size, self._files
+                )
                 if self.download_manager is not None:
                     self._apply_download_state(self.download_manager.state)
                 return
@@ -596,7 +598,7 @@ class QuantPickerScreen(ModalScreen[str | None]):
             self.notify(f"{picked.path} is already downloading", severity="information")
             return
         if self.on_download:
-            self.on_download(self.model_name, picked.path, picked.size)
+            self.on_download(self.model_name, picked.path, picked.size, self._files)
             if self.download_manager is not None:
                 self._apply_download_state(self.download_manager.state)
             return

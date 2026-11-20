@@ -17,11 +17,20 @@ from tui.theme import ACCENT, ERR, OK
 _NO_DATA = "[dim]no data[/]"
 
 _METRICS: tuple[tuple[str, str, bool, str], ...] = (
-    ("VRAM used (MB)", "vram_used_mb", False, "mb"),
-    ("gen t/s", "gen_tps", True, "tps"),
-    ("prompt t/s", "prompt_tps", True, "tps"),
+    ("gen t/s peak", "gen_tps", True, "tps"),
+    ("gen t/s avg", "gen_tps_avg", True, "tps"),
+    ("prompt t/s peak", "prompt_tps", True, "tps"),
+    ("prompt t/s avg", "prompt_tps_avg", True, "tps"),
+    ("VRAM used", "vram_used_mb", False, "mb"),
+    ("KV cache", "kv_mb", False, "mb"),
+    ("headroom", "headroom_mb", True, "mb"),
     ("file size", "file_size", False, "bytes"),
     ("context", "ctx", True, "ctx"),
+    ("offload", "offload_ratio", True, "pct"),
+    ("tokens", "tokens_predicted", True, "count"),
+    ("cache hit", "cache_hit_pct", True, "pct100"),
+    ("queue busy", "queue_busy", False, "count"),
+    ("deferred", "queue_deferred", False, "count"),
 )
 
 
@@ -91,12 +100,9 @@ def resolve_baseline(
 ) -> RunBaseline | None:
     """Look up the measured baseline for a preset, with live-speed fallback.
 
-    ``preset_slot`` is part of the public identity of the lookup; stored
-    baselines do not record the slot, so matching uses model / file / ctx
-    (and gpu layers when present). Live ``baseline_speed`` fills gen/prompt
-    t/s when no stored speed exists.
+    Stored rows are keyed by model + file + preset slot. Live
+    ``baseline_speed`` fills gen/prompt t/s when no stored speed exists.
     """
-    del preset_slot  # slot distinguishes callers; runs are keyed by config
     identity = identity or {}
     file_rels = _file_rels_for_quant(identity, quant)
     file_rel = file_rels[0] if file_rels else ""
@@ -127,12 +133,15 @@ def resolve_baseline(
             continue
         if want_name and _filename(run.file) != want_name:
             continue
+        if run.preset_slot is not None and run.preset_slot != preset_slot:
+            continue
         if ctx and run.ctx and run.ctx != ctx:
             continue
         if gpu_layers and run.gpu_layers and gpu_layers not in {99, run.gpu_layers} and run.gpu_layers not in {99, gpu_layers}:
             continue
         stored = run
-        break
+        if run.preset_slot == preset_slot:
+            break
 
     if stored is None and (filename or file_size):
         stored = lookup_baseline(
@@ -142,6 +151,7 @@ def resolve_baseline(
             ctx=ctx or 1,
             offload_ratio=offload_ratio,
             gpu_name=gpu_name,
+            preset_slot=preset_slot,
         )
         # Fuzzy lookup can return a sibling preset's measurement (different
         # ctx). Only keep it when ctx is unknown or matches.
@@ -150,12 +160,18 @@ def resolve_baseline(
 
     gen_tps = stored.gen_tps if stored else None
     prompt_tps = stored.prompt_tps if stored else None
+    gen_avg = stored.gen_tps_avg if stored else None
+    prompt_avg = stored.prompt_tps_avg if stored else None
     if gen_tps is None or prompt_tps is None:
         live_gen, live_prompt, _tokens = baseline_speed(live, history)
         if gen_tps is None:
             gen_tps = live_gen
         if prompt_tps is None:
             prompt_tps = live_prompt
+        if gen_avg is None:
+            gen_avg = live_gen
+        if prompt_avg is None:
+            prompt_avg = live_prompt
 
     vram = stored.vram_used_mb if stored and stored.vram_used_mb else 0.0
     size_out = (stored.file_size if stored and stored.file_size else 0) or file_size
@@ -184,8 +200,17 @@ def resolve_baseline(
         vram_used_mb=vram,
         gen_tps=gen_tps,
         prompt_tps=prompt_tps,
+        gen_tps_avg=gen_avg,
+        prompt_tps_avg=prompt_avg,
         tokens_predicted=stored.tokens_predicted if stored else 0.0,
         updated_at=stored.updated_at if stored else "",
+        preset_slot=preset_slot if preset_slot is not None else (stored.preset_slot if stored else None),
+        preset_name=preset.name if preset is not None else (stored.preset_name if stored else ""),
+        cache_hit_pct=stored.cache_hit_pct if stored else None,
+        queue_busy=stored.queue_busy if stored else None,
+        queue_deferred=stored.queue_deferred if stored else None,
+        kv_mb=stored.kv_mb if stored else None,
+        headroom_mb=stored.headroom_mb if stored else None,
     )
 
 
@@ -195,9 +220,9 @@ def _metric_value(run: RunBaseline | None, key: str) -> float | int | None:
     value = getattr(run, key, None)
     if value is None:
         return None
-    if key in {"vram_used_mb", "file_size", "ctx"} and not value:
+    if key in {"vram_used_mb", "file_size", "ctx", "kv_mb", "headroom_mb", "tokens_predicted"} and not value:
         return None
-    if key in {"gen_tps", "prompt_tps"} and float(value) <= 0:
+    if key in {"gen_tps", "prompt_tps", "gen_tps_avg", "prompt_tps_avg"} and float(value) <= 0:
         return None
     return value
 
@@ -255,6 +280,12 @@ def format_metric_value(value: float | int | None, fmt: str) -> str:
         return fmt_size(int(value))
     if fmt == "ctx":
         return str(fmt_ctx_compact(int(value)))
+    if fmt == "pct":
+        return f"{float(value) * 100:.0f}%"
+    if fmt == "pct100":
+        return f"{float(value):.0f}%"
+    if fmt == "count":
+        return f"{float(value):.0f}"
     return str(value)
 
 

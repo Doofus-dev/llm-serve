@@ -131,17 +131,16 @@ def local_file_bytes(path: Path) -> int:
 
 
 def hub_blob_on_disk(path: Path, expected_size: int = 0) -> bool:
-    """True when ``path`` exists and matches the Hub listing size (if known).
+    """True when ``path`` exists and matches the Hub listing size.
 
     Same-named GGUFs from different repos of one author share a directory
-    (``models/<author>/mmproj-BF16.gguf``). Filename presence is not identity.
+    (``models/<author>/mmproj-BF16.gguf``). Filename presence is not identity,
+    and an unknown listing size cannot confirm the blob.
     """
     size = local_file_bytes(path)
-    if size <= 0:
+    if size <= 0 or expected_size <= 0:
         return False
-    if expected_size > 0 and size != expected_size:
-        return False
-    return True
+    return size == expected_size
 
 
 def discard_mismatched_local_file(local_dir: Path, filename: str, expected_size: int) -> bool:
@@ -202,6 +201,36 @@ def build_download_plan(
         relative_file=relative_file,
         revision=revision,
     )
+
+
+def prepare_hub_download(
+    repo_id: str,
+    filename: str,
+    models_dir: Path,
+    files: list[HubFile],
+    *,
+    extra_files: list[str] | None = None,
+    revision: str = "main",
+) -> tuple[DownloadPlan, int]:
+    """Plan a Hub download the same way Hub and the quant picker must.
+
+    Groups shards from the listing, then removes same-named local files whose
+    size does not match the listing so ``hf download`` cannot treat a leftover
+    blob as already complete.
+    """
+    plan = build_download_plan(
+        repo_id,
+        filename,
+        models_dir,
+        all_ggufs=[item.path for item in files],
+        extra_files=extra_files,
+        revision=revision,
+    )
+    sizes = {item.path: item.size for item in files if item.size > 0}
+    for name in plan.filenames:
+        discard_mismatched_local_file(plan.local_dir, name, sizes.get(name, 0))
+    expected = sum(sizes[name] for name in plan.filenames if name in sizes)
+    return plan, expected
 
 
 def shard_filenames(selected: str, all_ggufs: list[str]) -> list[str]:

@@ -22,6 +22,7 @@ from tui.data.hf import (
     local_download_bytes,
     discard_mismatched_local_file,
     hub_blob_on_disk,
+    prepare_hub_download,
     build_download_plan,
     build_source_metadata,
     download_files,
@@ -162,7 +163,7 @@ class HFPathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "mmproj-BF16.gguf"
             path.write_bytes(b"x" * 50)
-            self.assertTrue(hub_blob_on_disk(path, 0))
+            self.assertFalse(hub_blob_on_disk(path, 0))
             self.assertTrue(hub_blob_on_disk(path, 50))
             self.assertFalse(hub_blob_on_disk(path, 100))
             self.assertFalse(hub_blob_on_disk(Path(tmp) / "missing.gguf", 50))
@@ -183,6 +184,27 @@ class HFPathTests(unittest.TestCase):
             self.assertFalse((local_dir / name).is_file())
             self.assertFalse((cache / f"{name}.metadata").is_file())
             self.assertFalse((cache / f"{name}.lock").is_file())
+
+    def test_prepare_hub_download_discards_mismatched_leftover(self) -> None:
+        """Quant-picker and Hub must share this so hf cannot skip a leftover blob."""
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            leftover = models_dir / "unsloth" / "DeepSeek-Flash-UD-Q4_K_XL.gguf"
+            leftover.parent.mkdir(parents=True)
+            leftover.write_bytes(b"stale" * 20)
+            files = [
+                HubFile(path="DeepSeek-Flash-UD-Q4_K_XL.gguf", size=10_000),
+                HubFile(path="DeepSeek-Flash-UD-Q4_K_XL-00001-of-00002.gguf", size=4_000),
+            ]
+            plan, expected = prepare_hub_download(
+                "unsloth/DeepSeek-Flash-GGUF",
+                "DeepSeek-Flash-UD-Q4_K_XL.gguf",
+                models_dir,
+                files,
+            )
+            self.assertEqual(plan.filenames, ["DeepSeek-Flash-UD-Q4_K_XL.gguf"])
+            self.assertEqual(expected, 10_000)
+            self.assertFalse(leftover.is_file())
 
 
 class SettingsTests(unittest.TestCase):
